@@ -55,6 +55,7 @@ export type { AuditCancelParams } from "./AuditCancelParams";
 export type { AuditCancelResponse } from "./AuditCancelResponse";
 export type { AuditListParams } from "./AuditListParams";
 export type { AuditListResponse } from "./AuditListResponse";
+export type { AuditOperationState } from "./AuditOperationState";
 export type { AuditProgressNotification } from "./AuditProgressNotification";
 export type { AuditReadParams } from "./AuditReadParams";
 export type { AuditReadResponse } from "./AuditReadResponse";

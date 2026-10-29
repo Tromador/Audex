@@ -13,6 +13,7 @@ pub(super) fn try_parse_from(
     let mut command = MultitoolCli::command();
     let mut matches = command.try_get_matches_from_mut(&args)?;
     crate::queue_cmd::validate_options(&command, &matches)?;
+    crate::audit::validate_options(&matches)?;
     let mut cli = MultitoolCli::from_arg_matches_mut(&mut matches)
         .map_err(|error| error.format(&mut command))?;
     if cli.subcommand.is_none() || cli.config_overrides.raw_overrides.is_empty() {

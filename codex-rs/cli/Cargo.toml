@@ -33,6 +33,7 @@ chrono = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 codex-app-server = { workspace = true }
+codex-app-server-client = { workspace = true }
 codex-app-server-daemon = { workspace = true }
 codex-app-server-protocol = { workspace = true }
 codex-app-server-test-client = { workspace = true }
@@ -111,12 +112,14 @@ tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 unicode-segmentation = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
 which = { workspace = true }
 
 [target.'cfg(all(target_os = "linux", target_env = "musl", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
 tikv-jemallocator = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+codex-uds = { workspace = true }
 codex_windows_sandbox = { package = "codex-windows-sandbox", path = "../windows-sandbox-rs" }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
@@ -126,10 +129,10 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+codex-app-server-transport = { workspace = true }
 app_test_support = { workspace = true }
 assert_cmd = { workspace = true }
 assert_matches = { workspace = true }
-codex-app-server-client = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 codex-utils-pty = { workspace = true }
 core_test_support = { workspace = true }

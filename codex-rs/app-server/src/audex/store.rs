@@ -196,6 +196,7 @@ pub(crate) struct AuditRunRecord {
     pub assignment_state: AssignmentState,
     pub operation_id: String,
     pub operation_state: OperationState,
+    pub observation_pending: bool,
     pub result_digest: Option<String>,
     pub result_path: Option<String>,
     pub report: Option<ReportRecord>,
@@ -1910,7 +1911,7 @@ impl AuditStore {
             "SELECT r.snapshot_id, r.phase, r.control_intent, r.revision, r.outcome,
                     a.id AS assignment_id, a.state AS assignment_state,
                     a.result_digest, a.result_path,
-                    o.id AS operation_id, o.state AS operation_state
+                    o.id AS operation_id, o.state AS operation_state, o.retry_classification
              FROM audit_runs r
              JOIN reviewer_assignments a ON a.run_id=r.id
              JOIN operations o ON o.assignment_id=a.id
@@ -1920,17 +1921,28 @@ impl AuditStore {
         .fetch_one(&self.pool)
         .await?;
         let assignment_id: String = row.try_get("assignment_id")?;
+        let phase = RunPhase::parse(row.try_get("phase")?)?;
+        let operation_state = OperationState::parse(row.try_get("operation_state")?)?;
         let record = AuditRunRecord {
             run_id: run_id.to_string(),
             snapshot_id: row.try_get("snapshot_id")?,
-            phase: RunPhase::parse(row.try_get("phase")?)?,
+            phase,
             control_intent: row.try_get("control_intent")?,
             revision: row.try_get("revision")?,
             outcome: row.try_get("outcome")?,
             assignment_id: assignment_id.clone(),
             assignment_state: AssignmentState::parse(row.try_get("assignment_state")?)?,
             operation_id: row.try_get("operation_id")?,
-            operation_state: OperationState::parse(row.try_get("operation_state")?)?,
+            operation_state,
+            observation_pending: !phase.is_terminal()
+                && matches!(
+                    operation_state,
+                    OperationState::Dispatching | OperationState::Accepted
+                )
+                && row
+                    .try_get::<Option<String>, _>("retry_classification")?
+                    .as_deref()
+                    == Some("observe_only"),
             result_digest: row.try_get("result_digest")?,
             result_path: row.try_get("result_path")?,
             report: self.read_report_record(run_id).await?,

@@ -418,6 +418,8 @@ async fn crash_windows_use_evidence_without_replaying_dispatch() {
             .expect("run");
         if matches!(mode, "absent" | "ambiguous" | "mismatched") {
             assert_eq!(recovered_run.assignment_state, AssignmentState::Unknown);
+            assert_eq!(view["operationState"], "unknown");
+            assert_eq!(view["observationPending"], false);
         }
         if matches!(mode, "interrupted" | "failed" | "rejected") {
             assert_eq!(recovered_run.assignment_state, AssignmentState::Failed);

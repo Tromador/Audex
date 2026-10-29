@@ -328,7 +328,12 @@ impl AuditController {
                 for id in ids {
                     runs.push(self.view(&id).await?);
                 }
-                Ok(AuditListResponse { runs, next_cursor }.into())
+                Ok(AuditListResponse {
+                    protocol_version: AUDIT_PROTOCOL_VERSION,
+                    runs,
+                    next_cursor,
+                }
+                .into())
             }
             ClientRequest::AuditCancel { params, .. } => {
                 let _gate = self.gate.lock().await;
@@ -356,6 +361,16 @@ impl AuditController {
             snapshot_id: run.snapshot_id.clone(),
             assignment_id: run.assignment_id.clone(),
             phase: phase(run.phase),
+            operation_state: match run.operation_state {
+                OperationState::Planned => AuditOperationState::Planned,
+                OperationState::Dispatching => AuditOperationState::Dispatching,
+                OperationState::Accepted => AuditOperationState::Accepted,
+                OperationState::ObservedTerminal => AuditOperationState::ObservedTerminal,
+                OperationState::Committed => AuditOperationState::Committed,
+                OperationState::Failed => AuditOperationState::Failed,
+                OperationState::Unknown => AuditOperationState::Unknown,
+            },
+            observation_pending: run.observation_pending,
             revision: run.revision,
             cancellation_requested: run.control_intent == "cancel_requested",
             outcome: run.outcome.clone(),

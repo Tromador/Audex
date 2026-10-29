@@ -21,8 +21,16 @@ pub(super) struct TestDaemon {
 }
 
 impl TestDaemon {
+    #[allow(
+        dead_code,
+        reason = "shared fixture constructor used by other integration test crates"
+    )]
     pub(super) fn new() -> Result<Self> {
-        let home = tempfile::Builder::new().tempdir_in("/tmp")?;
+        Self::new_in(std::path::Path::new("/tmp"))
+    }
+
+    pub(super) fn new_in(parent: &std::path::Path) -> Result<Self> {
+        let home = tempfile::Builder::new().tempdir_in(parent)?;
         let codex = codex_utils_cargo_bin::cargo_bin("codex")?;
         let codex_source = std::fs::canonicalize(&codex)?;
         let target = if cfg!(target_os = "macos") {
@@ -109,6 +117,23 @@ impl Drop for TestDaemon {
         let _ = self.lifecycle("stop");
         if let Ok(pid) = self.pid("app-server-updater.pid") {
             let _ = signal(pid, libc::SIGTERM);
+        }
+        // Audex snapshots seal directories read-only. Restore directory owner
+        // access only inside this disposable fixture so TempDir can remove it.
+        // Never follow links or chmod executable files shared with the build.
+        restore_fixture_directories(self.home.path());
+    }
+}
+
+fn restore_fixture_directories(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+        return;
+    }
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            restore_fixture_directories(&entry.path());
         }
     }
 }

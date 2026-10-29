@@ -699,6 +699,8 @@ fn delayed_terminal_visibility_remains_reconcilable_live_shutdown_and_cold() -> 
                 "late positive evidence must remain usable: {mode}"
             );
             assert_eq!(completed["rawResult"], raw);
+            assert_eq!(completed["operationState"], "committed");
+            assert_eq!(completed["observationPending"], false);
             let revision = completed["revision"].clone();
             for _ in 0..3 {
                 controller.tick().await?;

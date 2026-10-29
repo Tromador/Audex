@@ -1,6 +1,9 @@
 use crate::{JsonSchema, TS};
 use serde::{Deserialize, Serialize};
 
+/// Audex CLI contract, independent of the Codex executable's package version.
+pub const AUDIT_PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export_to = "v2/")]
@@ -60,6 +63,20 @@ pub enum AuditRunPhase {
     Cancelled,
 }
 
+/// Durable operation state; `unknown` is distinct from a failed review.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "v2/")]
+pub enum AuditOperationState {
+    Planned,
+    Dispatching,
+    Accepted,
+    ObservedTerminal,
+    Committed,
+    Failed,
+    Unknown,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -68,6 +85,10 @@ pub struct AuditRunView {
     pub snapshot_id: String,
     pub assignment_id: String,
     pub phase: AuditRunPhase,
+    pub operation_state: AuditOperationState,
+    /// A retained observation issue remains unresolved. This is non-terminal:
+    /// the daemon continues observing the original operation, without resampling.
+    pub observation_pending: bool,
     pub revision: i64,
     pub cancellation_requested: bool,
     pub outcome: Option<String>,
@@ -101,6 +122,8 @@ pub struct AuditCancelResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct AuditListResponse {
+    /// Required even for an empty list, so clients can check before submitting work.
+    pub protocol_version: u32,
     pub runs: Vec<AuditRunView>,
     pub next_cursor: Option<String>,
 }

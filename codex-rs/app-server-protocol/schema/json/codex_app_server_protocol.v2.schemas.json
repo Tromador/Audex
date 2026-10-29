@@ -1521,6 +1521,12 @@
             "null"
           ]
         },
+        "protocolVersion": {
+          "description": "Required even for an empty list, so clients can check before submitting work.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "runs": {
           "items": {
             "$ref": "#/definitions/AuditRunView"
@@ -1529,10 +1535,24 @@
         }
       },
       "required": [
+        "protocolVersion",
         "runs"
       ],
       "title": "AuditListResponse",
       "type": "object"
+    },
+    "AuditOperationState": {
+      "description": "Durable operation state; `unknown` is distinct from a failed review.",
+      "enum": [
+        "planned",
+        "dispatching",
+        "accepted",
+        "observed_terminal",
+        "committed",
+        "failed",
+        "unknown"
+      ],
+      "type": "string"
     },
     "AuditProgressNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1605,6 +1625,13 @@
         "cancellationRequested": {
           "type": "boolean"
         },
+        "observationPending": {
+          "description": "A retained observation issue remains unresolved. This is non-terminal: the daemon continues observing the original operation, without resampling.",
+          "type": "boolean"
+        },
+        "operationState": {
+          "$ref": "#/definitions/AuditOperationState"
+        },
         "outcome": {
           "type": [
             "string",
@@ -1641,6 +1668,8 @@
       "required": [
         "assignmentId",
         "cancellationRequested",
+        "observationPending",
+        "operationState",
         "phase",
         "revision",
         "runId",

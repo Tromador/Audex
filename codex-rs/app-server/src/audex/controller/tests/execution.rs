@@ -526,6 +526,9 @@ fn real_cancellation_and_cold_terminal_recovery_never_resample() -> anyhow::Resu
                 assert_eq!(retained.phase, RunPhase::Reviewing);
                 assert_eq!(retained.operation_state, OperationState::Accepted);
                 assert!(retained.outcome.is_none());
+                let view = read(&restarted, &id).await;
+                assert_eq!(view["operationState"], "accepted");
+                assert_eq!(view["observationPending"], true);
                 let (issue, retry): (String, String) =
                     sqlx::query_as("SELECT error,retry_classification FROM operations WHERE id=?")
                         .bind(&run.operation_id)

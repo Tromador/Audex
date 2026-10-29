@@ -53,6 +53,7 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
+mod audit;
 mod config_override_args;
 mod daemon_install;
 mod daemon_telemetry;
@@ -144,6 +145,8 @@ struct MultitoolCli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Subcommand {
+    /// Audit an immutable source snapshot through the running local daemon.
+    Audit(audit::AuditCommand),
     /// Browse all agent sessions on the shared local app-server daemon.
     Agents(AgentsCommand),
 
@@ -1103,6 +1106,17 @@ async fn cli_main(
 
     let open_agents_overview = matches!(&subcommand, Some(Subcommand::Agents(_)));
     match subcommand {
+        Some(Subcommand::Audit(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "audit",
+            )?;
+            let code = audit::run(command).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         None | Some(Subcommand::Agents(_)) => {
             prepend_config_flags(
                 &mut interactive.config_overrides,
@@ -2372,6 +2386,7 @@ fn unsupported_subcommand_name_for_strict_config(
         }
         Some(Subcommand::RemoteControl(remote_control)) => Some(remote_control.subcommand_name()),
         Some(Subcommand::Mcp(_)) => Some("mcp"),
+        Some(Subcommand::Audit(_)) => Some("audit"),
         Some(Subcommand::Plugin(_)) => Some("plugin"),
         Some(Subcommand::MigrateRollouts(_)) => Some("migrate-rollouts"),
         Some(Subcommand::MigrateNfsDb(_)) => Some("migrate-nfs-db"),

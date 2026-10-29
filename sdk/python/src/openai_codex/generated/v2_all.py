@@ -400,6 +400,16 @@ class AuditListParams(BaseModel):
     limit: Annotated[int | None, Field(ge=0)] = None
 
 
+class AuditOperationState(Enum):
+    planned = "planned"
+    dispatching = "dispatching"
+    accepted = "accepted"
+    observed_terminal = "observed_terminal"
+    committed = "committed"
+    failed = "failed"
+    unknown = "unknown"
+
+
 class AuditReadParams(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -426,6 +436,14 @@ class AuditRunView(BaseModel):
     )
     assignment_id: Annotated[str, Field(alias="assignmentId")]
     cancellation_requested: Annotated[bool, Field(alias="cancellationRequested")]
+    observation_pending: Annotated[
+        bool,
+        Field(
+            alias="observationPending",
+            description="A retained observation issue remains unresolved. This is non-terminal: the daemon continues observing the original operation, without resampling.",
+        ),
+    ]
+    operation_state: Annotated[AuditOperationState, Field(alias="operationState")]
     outcome: str | None = None
     phase: AuditRunPhase
     raw_result: Annotated[
@@ -7251,6 +7269,14 @@ class AuditListResponse(BaseModel):
         populate_by_name=True,
     )
     next_cursor: Annotated[str | None, Field(alias="nextCursor")] = None
+    protocol_version: Annotated[
+        int,
+        Field(
+            alias="protocolVersion",
+            description="Required even for an empty list, so clients can check before submitting work.",
+            ge=0,
+        ),
+    ]
     runs: list[AuditRunView]
 
 
