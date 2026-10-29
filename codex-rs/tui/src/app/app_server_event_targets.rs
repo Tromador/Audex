@@ -46,8 +46,8 @@ pub(super) fn server_notification_thread_target(
     notification: &ServerNotification,
 ) -> ServerNotificationThreadTarget {
     let thread_id = match notification {
-        // Audit progress identifies a run, not a conversation thread. The TUI
-        // has no audit view yet, so keep it out of chat notification routing.
+        // Audit progress identifies a durable run, not a conversation thread.
+        // App-level audit observers refetch the authoritative run view.
         ServerNotification::AuditProgress(_) => return ServerNotificationThreadTarget::AppScoped,
         ServerNotification::Error(notification) => Some(notification.thread_id.as_str()),
         ServerNotification::ThreadStarted(notification) => Some(notification.thread.id.as_str()),

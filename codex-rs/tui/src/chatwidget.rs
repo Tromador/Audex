@@ -256,6 +256,7 @@ use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 mod activity_groups;
 mod activity_presentation;
+mod audit;
 mod command_lifecycle;
 mod config_panel;
 mod connector_mentions;

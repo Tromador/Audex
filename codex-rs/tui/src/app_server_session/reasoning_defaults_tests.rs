@@ -141,6 +141,7 @@ stream_max_retries = 0
                         text: "hello".to_string(),
                         text_elements: Vec::new(),
                     }],
+                    /*additional_context*/ None,
                     config.cwd.to_path_buf(),
                     /*approval_policy*/ None,
                     /*approvals_reviewer*/ None,

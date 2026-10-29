@@ -100,6 +100,7 @@ impl ThreadToolTransport {
 #[derive(Clone)]
 pub(crate) struct ToolServices {
     pub(crate) task_tools: bool,
+    pub(crate) audits: bool,
     pub(crate) worktrees: Option<crate::managed_worktree_tools::ManagedWorktreeTools>,
 }
 
@@ -157,6 +158,9 @@ impl DynamicToolMcpServer {
                 "create_thread": {"approval_mode": "prompt"},
                 "send_message_to_thread": {"approval_mode": "prompt"},
                 "fork_thread": {"approval_mode": "prompt"},
+                // Audit launch has its own non-bypassable source/provider confirmation.
+                "audit_start": {"approval_mode": "approve"},
+                "audit_cancel": {"approval_mode": "prompt"},
                 "create_worktree": {"approval_mode": "approve"}
             }
         });
@@ -264,6 +268,9 @@ impl ServerHandler for DynamicToolMcpHandler {
         if self.services.worktrees.is_some() {
             specs.extend(crate::managed_worktree_tool_specs::specs());
         }
+        if self.services.audits {
+            specs.extend(crate::audit::tool_specs());
+        }
         for spec in specs {
             let functions = match spec {
                 DynamicToolSpec::Function(function) => vec![function],
@@ -286,6 +293,8 @@ impl ServerHandler for DynamicToolMcpHandler {
                 tool.annotations = Some(ToolAnnotations::new().read_only(matches!(
                     tool.name.as_ref(),
                     "list_threads"
+                        | "audit_read"
+                        | "audit_list"
                         | "list_archived_threads"
                         | "read_thread"
                         | "wait_threads"
@@ -348,7 +357,22 @@ impl ServerHandler for DynamicToolMcpHandler {
             .ok_or_else(|| {
                 McpError::internal_error("TUI is reconnecting; tool was not sent", None)
             })?;
-        let response = if matches!(
+        let response = if crate::audit::TOOLS.contains(&params.tool.as_str()) {
+            if !self.services.audits {
+                return Err(McpError::invalid_params(
+                    "Audits require the local managed daemon",
+                    None,
+                ));
+            }
+            let result = async {
+                let thread_id = codex_protocol::ThreadId::from_string(&params.thread_id)
+                    .map_err(|error| error.to_string())?;
+                let action = crate::audit::tool_action(&params.tool, params.arguments)?;
+                crate::audit::execute(request_handle, thread_id, action, app_event_tx).await
+            }
+            .await;
+            crate::audit::response(result)
+        } else if matches!(
             params.tool.as_str(),
             "create_worktree" | "get_worktree_creation_status" | "list_worktrees"
         ) {

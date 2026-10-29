@@ -167,6 +167,23 @@ impl App {
             event => (event, None),
         };
         match event {
+            AppEvent::AuditCommand { thread_id, args } => self.audit_command(app_server, thread_id, args),
+            AppEvent::AuditPrompt => self.chat_widget.show_audit_prompt(),
+            AppEvent::AuditConfirm { thread_id, params, decision } => {
+                if self.current_displayed_thread_id() == Some(thread_id) && self.audit_available(app_server) {
+                    self.chat_widget.confirm_audit(params, decision);
+                } else {
+                    let _ = decision.send(false);
+                }
+            }
+            AppEvent::AuditListLoaded { thread_id, page } => {
+                if self.current_displayed_thread_id() == Some(thread_id) { self.chat_widget.show_audit_list(page); }
+            }
+            AppEvent::AuditOpened { thread_id, run } => self.audit_opened(app_server, thread_id, run),
+            AppEvent::AuditUpdated { thread_id, run, error } => self.audit_updated(thread_id, &run, error),
+            AppEvent::AuditError { thread_id, message } => {
+                if self.current_displayed_thread_id() == Some(thread_id) { self.chat_widget.add_error_message(message); }
+            }
             AppEvent::OpenDaemonMenu => self.open_daemon_menu(),
             AppEvent::ConfirmDaemonRestart => self.confirm_daemon_restart(),
             AppEvent::RunDaemonRestart => {

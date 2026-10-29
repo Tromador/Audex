@@ -295,6 +295,34 @@ pub(crate) struct AgentPickerThreadRefresh {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
+    /// Operator audit actions use the same typed protocol as the CLI.
+    AuditCommand {
+        thread_id: ThreadId,
+        args: String,
+    },
+    AuditPrompt,
+    AuditConfirm {
+        thread_id: ThreadId,
+        params: codex_app_server_protocol::AuditStartParams,
+        decision: tokio::sync::oneshot::Sender<bool>,
+    },
+    AuditListLoaded {
+        thread_id: ThreadId,
+        page: codex_app_server_protocol::AuditListResponse,
+    },
+    AuditOpened {
+        thread_id: ThreadId,
+        run: codex_app_server_protocol::AuditRunView,
+    },
+    AuditUpdated {
+        thread_id: ThreadId,
+        run: codex_app_server_protocol::AuditRunView,
+        error: Option<String>,
+    },
+    AuditError {
+        thread_id: ThreadId,
+        message: String,
+    },
     AccountEmailLoaded {
         request_id: uuid::Uuid,
         email: Option<String>,

@@ -540,6 +540,7 @@ impl AppServerSession {
         };
         let services = crate::dynamic_tools_mcp::ToolServices {
             task_tools: !self.uses_embedded_app_server(),
+            audits: !self.uses_embedded_app_server() && !self.uses_remote_workspace(),
             worktrees,
         };
         if !services.task_tools && services.worktrees.is_none() {
@@ -1521,6 +1522,9 @@ impl AppServerSession {
         turn_trigger: &str,
         client_user_message_id: String,
         items: Vec<UserInput>,
+        additional_context: Option<
+            HashMap<String, codex_app_server_protocol::AdditionalContextEntry>,
+        >,
         cwd: PathBuf,
         approval_policy: Option<AskForApproval>,
         approvals_reviewer: Option<codex_app_server_protocol::ApprovalsReviewer>,
@@ -1540,6 +1544,7 @@ impl AppServerSession {
             turn_trigger: Some(turn_trigger.to_string()),
             client_user_message_id: Some(client_user_message_id),
             input: items,
+            additional_context,
             output_schema,
             cyber_access_program,
             ..TurnStartParams::default()
@@ -1597,6 +1602,9 @@ impl AppServerSession {
         turn_id: String,
         client_user_message_id: String,
         items: Vec<UserInput>,
+        additional_context: Option<
+            HashMap<String, codex_app_server_protocol::AdditionalContextEntry>,
+        >,
     ) -> std::result::Result<TurnSteerResponse, TypedRequestError> {
         let request_id = self.next_request_id();
         self.client
@@ -1608,7 +1616,7 @@ impl AppServerSession {
                     input: items,
                     responsesapi_client_metadata: None,
                     responsesapi_client_metadata_patch: None,
-                    additional_context: None,
+                    additional_context,
                     expected_turn_id: turn_id,
                 },
             })
@@ -3289,6 +3297,7 @@ mod tests {
                 "user",
                 client_user_message_id.clone(),
                 input.clone(),
+                /*additional_context*/ None,
                 test_path_buf("/local/workspace"),
                 Some(codex_app_server_protocol::AskForApproval::Never),
                 Some(codex_app_server_protocol::ApprovalsReviewer::User),

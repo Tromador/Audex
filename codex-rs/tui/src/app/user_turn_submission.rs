@@ -28,6 +28,11 @@ pub(super) async fn try_submit_user_turn(
     else {
         return Ok(false);
     };
+    // Reports join an explicitly submitted operator message, never background execution.
+    let audit_context = (*turn_trigger == "user")
+        .then(|| app.audits.reports.for_turn(thread_id))
+        .flatten();
+    let carries_audit_context = audit_context.is_some();
     if let Some(turn_id) = app.active_turn_id_for_thread(thread_id).await {
         if *turn_trigger != "user" {
             color_eyre::eyre::bail!("the fork already has an active turn");
@@ -41,10 +46,14 @@ pub(super) async fn try_submit_user_turn(
                     steer_turn_id.clone(),
                     client_user_message_id.clone(),
                     items.to_vec(),
+                    audit_context.clone(),
                 )
                 .await
             {
                 Ok(_) => {
+                    if carries_audit_context {
+                        app.audits.reports.acknowledged(thread_id);
+                    }
                     if app.active_thread_id == Some(thread_id)
                         && app.chat_widget.thread_id() == Some(thread_id)
                     {
@@ -162,6 +171,7 @@ pub(super) async fn try_submit_user_turn(
             turn_trigger,
             client_user_message_id.clone(),
             items.to_vec(),
+            audit_context,
             cwd.clone(),
             turn_approval_policy,
             turn_approvals_reviewer,
@@ -176,6 +186,9 @@ pub(super) async fn try_submit_user_turn(
             cyber_access_program.map(Into::into),
         )
         .await?;
+    if carries_audit_context {
+        app.audits.reports.acknowledged(thread_id);
+    }
     if app.active_thread_id == Some(thread_id) && app.chat_widget.thread_id() == Some(thread_id) {
         crate::startup_recovery::acknowledged(client_user_message_id);
         app.chat_widget

@@ -188,6 +188,7 @@ impl ChatWidget {
         }
 
         match cmd {
+            SlashCommand::Audit => self.request_audit_command("list".to_owned()),
             SlashCommand::Daybreak => {
                 if !self.config.features.enabled(Feature::CliDaybreak) {
                     return;
@@ -805,6 +806,7 @@ impl ChatWidget {
             return;
         }
         match cmd {
+            SlashCommand::Audit => self.request_audit_command(trimmed.to_owned()),
             SlashCommand::Model if !trimmed.is_empty() => {
                 self.handle_model_command_args(trimmed);
                 self.app_event_tx.send(AppEvent::SettingsSelectionClosed);
@@ -1325,6 +1327,7 @@ impl ChatWidget {
                 }
             }
             SlashCommand::Feedback
+            | SlashCommand::Audit
             | SlashCommand::Warnings
             | SlashCommand::Export
             | SlashCommand::New

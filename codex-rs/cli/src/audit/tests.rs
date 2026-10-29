@@ -1,4 +1,6 @@
 use super::*;
+use codex_app_server_client::audit::require_audit_protocol_version as require_protocol_version;
+use codex_app_server_protocol::{AUDIT_PROTOCOL_VERSION, AuditListResponse};
 
 #[test]
 fn source_and_recovery_forms_parse_without_ambient_options() {

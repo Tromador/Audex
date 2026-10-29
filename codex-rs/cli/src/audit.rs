@@ -2,15 +2,15 @@
 //! in the existing process-scoped app-server controller.
 use anyhow::{Context, bail, ensure};
 use clap::{ArgMatches, Args, Parser, Subcommand, parser::ValueSource};
+use codex_app_server_client::audit::{AuditClient, AuditClientError};
 use codex_app_server_client::{
     AppServerEvent, RemoteAppServerClient, RemoteAppServerConnectArgs, RemoteAppServerEndpoint,
     TypedRequestError, app_server_control_socket_path, verified_local_daemon_socket,
 };
 use codex_app_server_protocol::{
-    AUDIT_PROTOCOL_VERSION, AuditCancelParams, AuditCancelResponse, AuditListParams,
-    AuditListResponse, AuditOperationState, AuditReadParams, AuditReadResponse, AuditRunPhase,
-    AuditRunView, AuditSource, AuditStartParams, AuditStartResponse, ClientRequest,
-    ConfigReadParams, ConfigReadResponse, JSONRPCErrorError, RequestId, ServerNotification,
+    AuditListParams, AuditOperationState, AuditRunPhase, AuditRunView, AuditSource,
+    AuditStartParams, ClientRequest, ConfigReadParams, ConfigReadResponse, JSONRPCErrorError,
+    RequestId, ServerNotification,
 };
 use codex_core::config::find_codex_home;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -169,14 +169,6 @@ fn id(name: &str) -> RequestId {
     RequestId::String(format!("audex-cli-{name}"))
 }
 
-fn require_protocol_version(version: u32) -> anyhow::Result<()> {
-    ensure!(
-        version == AUDIT_PROTOCOL_VERSION,
-        "incompatible Audex daemon protocol {version}; this CLI requires {AUDIT_PROTOCOL_VERSION}. Update the daemon explicitly before submitting work"
-    );
-    Ok(())
-}
-
 pub(crate) async fn run(command: AuditCommand) -> anyhow::Result<i32> {
     // Read explicit input before connecting; no project discovery or source execution.
     let source = if command.action.is_none() {
@@ -238,27 +230,24 @@ async fn execute(
     retained_run: &mut Option<String>,
 ) -> anyhow::Result<i32> {
     let requests = client.request_handle();
+    let audits = AuditClient::new(codex_app_server_client::AppServerRequestHandle::Remote(
+        requests.clone(),
+    ));
     if !matches!(&command.action, Some(Action::List { .. })) {
         // Package version 0.0.0 cannot identify development daemon capabilities.
         // An old/mismatched response must fail before audit/start or audit/cancel.
-        let compatibility: AuditListResponse = requests.request_typed(ClientRequest::AuditList {
-            request_id: id("compatibility"),
-            params: AuditListParams { after: None, limit: Some(1) },
-        }).await.context("Audex daemon compatibility check failed; no audit start or cancellation was submitted")?;
-        require_protocol_version(compatibility.protocol_version)?;
+        audits.check_compatibility().await.context(
+            "Audex daemon compatibility check failed; no audit start or cancellation was submitted",
+        )?;
     }
     let (view, follow) = match command.action {
         Some(Action::List { limit, after }) => {
-            let response: AuditListResponse = requests
-                .request_typed(ClientRequest::AuditList {
-                    request_id: id("list"),
-                    params: AuditListParams {
-                        after,
-                        limit: Some(limit),
-                    },
+            let response = audits
+                .list(AuditListParams {
+                    after,
+                    limit: Some(limit),
                 })
                 .await?;
-            require_protocol_version(response.protocol_version)?;
             for run in response.runs {
                 println!(
                     "{}\t{}\t{}\trevision={}{}",
@@ -280,25 +269,13 @@ async fn execute(
         }
         Some(Action::Read { run_id, follow }) => {
             *retained_run = Some(run_id.clone());
-            let response: AuditReadResponse = requests
-                .request_typed(ClientRequest::AuditRead {
-                    request_id: id("read"),
-                    params: AuditReadParams { run_id },
-                })
-                .await?;
-            (response.run, follow)
+            (audits.read(run_id).await?, follow)
         }
         Some(Action::Cancel { run_id }) => {
             *retained_run = Some(run_id.clone());
-            let response: AuditCancelResponse = requests
-                .request_typed(ClientRequest::AuditCancel {
-                    request_id: id("cancel"),
-                    params: AuditCancelParams { run_id },
-                })
-                .await?;
             // The server commits intent before returning; this client never sends
             // a thread interrupt or claims cancellation from an attempted request.
-            (response.run, true)
+            (audits.cancel(run_id).await?, true)
         }
         None => {
             let (model, provider) = if command.model.is_some() && command.provider.is_some() {
@@ -337,24 +314,22 @@ async fn execute(
                 agents_evidence,
             };
             eprintln!("Audit request key: {request_key}");
-            let response: AuditStartResponse = requests.request_typed(ClientRequest::AuditStart {
-                request_id: id("start"), params,
-            }).await.inspect_err(|error| {
-                if matches!(error, TypedRequestError::Transport {..} | TypedRequestError::Deserialize {..}) {
+            let run = audits.start(params).await.inspect_err(|error| {
+                if matches!(error, AuditClientError::Request(TypedRequestError::Transport {..} | TypedRequestError::Deserialize {..})) {
                     eprintln!("Start acknowledgement is uncertain. Use `audex audit list` or repeat the exact input with --request-key {request_key}; do not submit a new key automatically.");
                 }
             })?;
-            *retained_run = Some(response.run.run_id.clone());
+            *retained_run = Some(run.run_id.clone());
             if command.detach {
-                println!("{}", response.run.run_id);
+                println!("{}", run.run_id);
                 eprintln!(
                     "Submitted durably. Retrieve later: audex audit read {} --follow",
-                    response.run.run_id
+                    run.run_id
                 );
                 // Success here acknowledges durable submission, not a review verdict.
                 return Ok(0);
             }
-            (response.run, true)
+            (run, true)
         }
     };
     follow_run(client, view, follow).await
@@ -377,7 +352,9 @@ async fn follow_run(
     mut view: AuditRunView,
     follow: bool,
 ) -> anyhow::Result<i32> {
-    let requests = client.request_handle();
+    let audits = AuditClient::new(codex_app_server_client::AppServerRequestHandle::Remote(
+        client.request_handle(),
+    ));
     let mut shown = None;
     let mut poll = tokio::time::interval(Duration::from_secs(1));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -437,15 +414,7 @@ async fn follow_run(
             }
         };
         if refresh {
-            let response: AuditReadResponse = requests
-                .request_typed(ClientRequest::AuditRead {
-                    request_id: id("read"),
-                    params: AuditReadParams {
-                        run_id: view.run_id.clone(),
-                    },
-                })
-                .await?;
-            view = response.run;
+            view = audits.read(view.run_id.clone()).await?;
         }
     }
 }

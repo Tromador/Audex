@@ -10,6 +10,7 @@ use strum_macros::IntoStaticStr;
 )]
 #[strum(serialize_all = "kebab-case")]
 pub enum SlashCommand {
+    Audit,
     // DO NOT ALPHA-SORT! Enum order is presentation order in the popup, so
     // more frequently used commands should be listed first.
     Model,
@@ -92,6 +93,7 @@ impl SlashCommand {
     /// User-visible description shown in the popup.
     pub fn description(self) -> &'static str {
         match self {
+            SlashCommand::Audit => "start or retrieve a durable isolated source audit",
             SlashCommand::Config => "configure Codex preferences",
             SlashCommand::Feedback => "send logs to maintainers",
             SlashCommand::New => "start a new chat during a conversation",
@@ -173,6 +175,7 @@ impl SlashCommand {
         matches!(
             self,
             SlashCommand::Review
+                | SlashCommand::Audit
                 | SlashCommand::Model
                 | SlashCommand::Permissions
                 | SlashCommand::Title
@@ -271,6 +274,7 @@ impl SlashCommand {
             | SlashCommand::MemoryDrop
             | SlashCommand::MemoryUpdate => false,
             SlashCommand::Diff
+            | SlashCommand::Audit
             | SlashCommand::Archive
             | SlashCommand::Resume
             | SlashCommand::Model

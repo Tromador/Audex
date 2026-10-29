@@ -20,6 +20,7 @@
 //! runtime remain bounded; the local consumer event queue is unbounded so
 //! unread notifications cannot prevent request responses from being delivered.
 
+pub mod audit;
 mod cloud;
 mod path;
 mod remote;

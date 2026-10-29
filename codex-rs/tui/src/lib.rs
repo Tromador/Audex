@@ -142,6 +142,7 @@ mod security_setup;
 mod worktree_browser;
 pub use custom_terminal::Terminal;
 mod assistant_directives;
+mod audit;
 mod auto_review_denials;
 mod cwd_prompt;
 mod debug_config;
