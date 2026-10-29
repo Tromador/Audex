@@ -99,6 +99,8 @@ mod analytics_utils;
 mod app_info;
 mod app_server_tracing;
 mod attestation;
+#[allow(dead_code)]
+mod audex;
 mod auth_mode;
 mod bespoke_event_handling;
 mod code_mode_host;
