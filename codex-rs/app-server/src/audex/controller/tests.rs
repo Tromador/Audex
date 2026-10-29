@@ -1,4 +1,6 @@
 use super::*;
+
+mod execution;
 use codex_models_manager::{ModelOrigin, manager::StaticModelsManager};
 use codex_protocol::openai_models::ModelsResponse;
 use serde_json::{Value, json};

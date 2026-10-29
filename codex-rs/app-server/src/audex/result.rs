@@ -25,6 +25,26 @@ pub(crate) struct AuditResultV1 {
     pub findings: Vec<AuditFindingV1>,
 }
 
+/// Strict provider schemas require every property, including nullable fields.
+/// Keep the schema derived from the durable result type; local v1 parsing still
+/// accepts omitted optional fields in older retained results.
+pub(super) fn output_schema() -> serde_json::Result<serde_json::Value> {
+    let mut schema = schemars::schema_for!(AuditResultV1);
+    for object in
+        std::iter::once(&mut schema.schema).chain(schema.definitions.values_mut().filter_map(
+            |definition| match definition {
+                schemars::schema::Schema::Object(object) => Some(object),
+                schemars::schema::Schema::Bool(_) => None,
+            },
+        ))
+    {
+        if let Some(validation) = &mut object.object {
+            validation.required = validation.properties.keys().cloned().collect();
+        }
+    }
+    serde_json::to_value(schema)
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AuditFindingV1 {

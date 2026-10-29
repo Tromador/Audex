@@ -25,6 +25,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 static AUDEX_MIGRATOR: Migrator = sqlx_macros::migrate!("./migrations/audex");
+#[cfg(test)]
+mod submission_tests;
 const DATABASE_FILENAME: &str = "audit-state.sqlite3";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_IDENTIFIER_BYTES: usize = 512;
@@ -153,6 +155,16 @@ pub(crate) enum OperationState {
     Committed,
     Failed,
     Unknown,
+}
+
+/// Evidence about crossing the core submission boundary, independent of the
+/// controller's dispatch lease and its receipt-commit window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SubmissionBoundary {
+    Unsubmitted,
+    SubmissionStarted,
+    Accepted,
+    LegacyUncertain,
 }
 
 impl OperationState {
@@ -901,6 +913,157 @@ pub(crate) enum AuditStoreError {
 }
 
 impl AuditStore {
+    #[cfg(test)]
+    pub(super) fn pool_for_tests(&self) -> SqlitePool {
+        self.pool.clone()
+    }
+
+    pub(super) async fn run_for_operation(
+        &self,
+        operation: &str,
+    ) -> Result<AuditRunRecord, AuditStoreError> {
+        let id: String = sqlx::query_scalar("SELECT a.run_id FROM operations o JOIN reviewer_assignments a ON a.id=o.assignment_id WHERE o.id=?")
+            .bind(operation).fetch_one(&self.pool).await?;
+        self.load_run(&id).await
+    }
+
+    pub(super) async fn execution(
+        &self,
+        operation: &str,
+    ) -> Result<Option<(String, Option<String>, String)>, AuditStoreError> {
+        Ok(sqlx::query_as(
+            "SELECT thread_id, turn_id, policy_digest FROM audit_execution WHERE operation_id=?",
+        )
+        .bind(operation)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub(super) async fn submission_boundary(
+        &self,
+        operation: &str,
+    ) -> Result<SubmissionBoundary, AuditStoreError> {
+        let value: String =
+            sqlx::query_scalar("SELECT submission_boundary FROM operations WHERE id=?")
+                .bind(operation)
+                .fetch_one(&self.pool)
+                .await?;
+        match value.as_str() {
+            "unsubmitted" => Ok(SubmissionBoundary::Unsubmitted),
+            "submission_started" => Ok(SubmissionBoundary::SubmissionStarted),
+            "accepted" => Ok(SubmissionBoundary::Accepted),
+            "legacy_uncertain" => Ok(SubmissionBoundary::LegacyUncertain),
+            _ => Err(AuditStoreError::InvalidPersistedState(
+                "invalid submission boundary".to_string(),
+            )),
+        }
+    }
+
+    /// Fence late startup against cancellation, lease expiry, or a competing
+    /// recovery classification. Commit before invoking start_turn_if_idle.
+    pub(super) async fn begin_submission(
+        &self,
+        operation: &str,
+        owner: &str,
+        now: i64,
+    ) -> Result<bool, AuditStoreError> {
+        Ok(sqlx::query("UPDATE operations SET submission_boundary='submission_started',updated_at_ms=?
+            WHERE id=? AND state='dispatching' AND submission_boundary='unsubmitted'
+            AND lease_owner=? AND lease_expires_at_ms>?
+            AND EXISTS (SELECT 1 FROM reviewer_assignments a JOIN audit_runs r ON r.id=a.run_id
+                WHERE a.id=operations.assignment_id AND r.control_intent='active' AND r.phase='reviewing')")
+            .bind(now).bind(operation).bind(owner).bind(now).execute(&self.pool).await?.rows_affected() == 1)
+    }
+
+    /// Observation may be repeated; inference may not. Retain bounded diagnostics
+    /// without declaring a terminal outcome or churning the revision each poll.
+    pub(super) async fn record_observation_issue(
+        &self,
+        operation: &str,
+        expected_revision: i64,
+        diagnostic: &str,
+    ) -> Result<i64, AuditStoreError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let state = read_operation_context(&mut *tx, operation).await?;
+        if state.run_phase.is_terminal() || state.run_phase == RunPhase::Reporting {
+            tx.commit().await?;
+            return Ok(state.run_revision);
+        }
+        require_revision(expected_revision, state.run_revision)?;
+        let previous: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT error,retry_classification FROM operations WHERE id=?")
+                .bind(operation)
+                .fetch_one(&mut *tx)
+                .await?;
+        let diagnostic = bounded_error(diagnostic.to_string());
+        if previous.0.as_deref() == Some(&diagnostic)
+            && previous.1.as_deref() == Some("observe_only")
+        {
+            tx.commit().await?;
+            return Ok(state.run_revision);
+        }
+        let now = now_millis();
+        sqlx::query("UPDATE operations SET error=?,retry_classification='observe_only',updated_at_ms=? WHERE id=?")
+            .bind(diagnostic).bind(now).bind(operation).execute(&mut *tx).await?;
+        update_run_revision(&mut tx, &state.run_id, state.run_revision + 1, now).await?;
+        tx.commit().await?;
+        Ok(state.run_revision + 1)
+    }
+
+    /// Insert once; a competing caller cannot replace the reserved identity.
+    pub(super) async fn bind_execution(
+        &self,
+        operation: &str,
+        thread: &str,
+        policy: &str,
+        owner: &str,
+        now: i64,
+    ) -> Result<bool, AuditStoreError> {
+        Ok(sqlx::query("INSERT INTO audit_execution(operation_id,thread_id,policy_digest) SELECT id,?,? FROM operations
+            WHERE id=? AND state='dispatching' AND submission_boundary='unsubmitted' AND lease_owner=? AND lease_expires_at_ms>?
+            ON CONFLICT(operation_id) DO NOTHING")
+            .bind(thread).bind(policy).bind(operation).bind(owner).bind(now).execute(&self.pool).await?.rows_affected() == 1)
+    }
+
+    /// Positive evidence only: called after Started, or after reading a matching
+    /// durable TurnStarted. It does not advance the controller's workflow state.
+    pub(super) async fn execution_accepted(
+        &self,
+        operation: &str,
+        turn: &str,
+    ) -> Result<(), AuditStoreError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let updated = sqlx::query("UPDATE audit_execution SET turn_id=? WHERE operation_id=? AND (turn_id IS NULL OR turn_id=?)")
+            .bind(turn).bind(operation).bind(turn).execute(&mut *tx).await?;
+        if updated.rows_affected() != 1 {
+            return Err(AuditStoreError::InvalidPersistedState(
+                "conflicting execution turn identity".to_string(),
+            ));
+        }
+        let marked = sqlx::query("UPDATE operations SET submission_boundary='accepted' WHERE id=? AND submission_boundary IN ('submission_started','accepted','legacy_uncertain')")
+            .bind(operation).execute(&mut *tx).await?;
+        if marked.rows_affected() != 1 {
+            return Err(AuditStoreError::InvalidPersistedState(
+                "acceptance contradicts unsubmitted boundary".to_string(),
+            ));
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(super) async fn execution_usage(
+        &self,
+        operation: &str,
+        usage: &str,
+    ) -> Result<(), AuditStoreError> {
+        sqlx::query("UPDATE reviewer_assignments SET usage_json=? WHERE id=(SELECT assignment_id FROM operations WHERE id=?)")
+            .bind(usage)
+            .bind(operation)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub(super) async fn observation_lease_ready(
         &self,
         operation_id: &str,
@@ -973,6 +1136,29 @@ impl AuditStore {
         terminal: AssignmentState,
         reason: &str,
     ) -> Result<i64, AuditStoreError> {
+        self.finish_operation_inner(operation_id, expected_revision, terminal, reason, false)
+            .await
+    }
+
+    pub(super) async fn finish_unsubmitted_operation(
+        &self,
+        operation_id: &str,
+        expected_revision: i64,
+        terminal: AssignmentState,
+        reason: &str,
+    ) -> Result<i64, AuditStoreError> {
+        self.finish_operation_inner(operation_id, expected_revision, terminal, reason, true)
+            .await
+    }
+
+    async fn finish_operation_inner(
+        &self,
+        operation_id: &str,
+        expected_revision: i64,
+        terminal: AssignmentState,
+        reason: &str,
+        require_unsubmitted: bool,
+    ) -> Result<i64, AuditStoreError> {
         if !matches!(
             terminal,
             AssignmentState::Failed | AssignmentState::Cancelled | AssignmentState::Unknown
@@ -983,6 +1169,17 @@ impl AuditStore {
         }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let state = read_operation_context(&mut *tx, operation_id).await?;
+        if require_unsubmitted {
+            let boundary: String =
+                sqlx::query_scalar("SELECT submission_boundary FROM operations WHERE id=?")
+                    .bind(operation_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if boundary != "unsubmitted" {
+                tx.commit().await?;
+                return Ok(state.run_revision);
+            }
+        }
         // A concurrently committed result wins; repeated terminal observations are harmless.
         if matches!(
             state.assignment_state,
@@ -1120,8 +1317,8 @@ impl AuditStore {
         sqlx::query(
             "INSERT INTO operations (
                 id, assignment_id, kind, state, attempt, input_digest,
-                created_at_ms, updated_at_ms
-             ) VALUES (?, ?, 'review', 'planned', 0, ?, ?, ?)",
+                created_at_ms, updated_at_ms, submission_boundary
+             ) VALUES (?, ?, 'review', 'planned', 0, ?, ?, ?, 'unsubmitted')",
         )
         .bind(&created.operation_id)
         .bind(&created.assignment_id)
@@ -1362,7 +1559,7 @@ impl AuditStore {
         .await?;
         sqlx::query(
             "UPDATE operations
-             SET state='accepted', acceptance_evidence=?, updated_at_ms=?
+             SET state='accepted', submission_boundary='accepted', acceptance_evidence=?, updated_at_ms=?
              WHERE id=?",
         )
         .bind(evidence)

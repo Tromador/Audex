@@ -398,11 +398,6 @@ impl MessageProcessor {
                 None => manager,
             }
         });
-        let audex = crate::audex::controller::AuditController::service(
-            Arc::clone(&config),
-            thread_manager.get_models_manager(),
-            Arc::clone(&outgoing),
-        );
         let model_catalog = Arc::new(crate::model_catalog::ModelCatalog::new(
             config_manager.clone(),
             startup_cwd,
@@ -559,6 +554,17 @@ impl MessageProcessor {
             thread_watch_manager,
             Arc::clone(&skills_watcher),
             turn_cost_worker.as_ref().map(TurnCostWorker::handle),
+        );
+        let audex_listener = thread_processor.clone();
+        let audex = crate::audex::controller::AuditController::service(
+            Arc::clone(&config),
+            Arc::clone(&thread_manager),
+            Arc::clone(&thread_store),
+            Arc::new(move |id, thread| {
+                let processor = audex_listener.clone();
+                Box::pin(async move { processor.listen_for_audex(id, thread).await })
+            }),
+            Arc::clone(&outgoing),
         );
         if let Some(startup_config) = plugin_startup_tasks {
             // Keep plugin startup warmups aligned at app-server startup.

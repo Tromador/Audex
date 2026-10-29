@@ -1,5 +1,4 @@
 use super::lifecycle::{ReviewerLifecycle, ReviewerObservation};
-use super::result::AuditResultV1;
 use super::snapshot::{SnapshotHandle, manifest::sha256_hex};
 use super::tools::{SourceTools, TOOL_NAMES};
 use codex_core::StartThreadOptions;
@@ -107,12 +106,16 @@ pub(super) async fn prepare(
             "reviewer provider conflicts with managed provider requirement"
         );
     }
-    let provider = host
+    let mut provider = host
         .model_providers
         .get(&request.provider)
         .or_else(|| (host.model_provider_id == request.provider).then_some(&host.model_provider))
         .ok_or_else(|| anyhow::anyhow!("unknown reviewer provider"))?
         .clone();
+    // The audit ledger cannot disambiguate a retried chargeable sample. Keep
+    // Codex's normal transport/auth path, but do not automatically retry it.
+    provider.request_max_retries = Some(0);
+    provider.stream_max_retries = Some(0);
 
     let source_root = snapshot.source_root();
     let mut config = Config::load_default_with_cli_overrides_for_codex_home(
@@ -270,6 +273,7 @@ pub(super) async fn prepare(
         managed.model_providers = None;
     }
 
+    let output_schema = super::result::output_schema()?;
     let policy = json!({
         "version":1, "rules_digest":sha256_hex(AUDIT_RULES.as_bytes()),
         "snapshot_id":snapshot.snapshot_id(), "provider":request.provider,
@@ -279,6 +283,8 @@ pub(super) async fn prepare(
         "approval_policy":"never", "project_doc_max_bytes":0,
         "tools":TOOL_NAMES.map(|name| format!("audex_source.{name}")),
         "isolation":"isolated", "history":"new", "provider_fallback":false,
+        "request_max_retries":0, "stream_max_retries":0,
+        "output_schema_digest":sha256_hex(&serde_json::to_vec(&output_schema)?),
         "managed_requirements_digest":sha256_hex(&serde_json::to_vec(&managed)?),
     });
     let policy_digest = sha256_hex(&serde_json::to_vec(&policy)?);
@@ -337,8 +343,7 @@ pub(super) async fn prepare(
         text_elements: Vec::new(),
     }])
     .with_additional_context(context);
-    input.start.final_output_json_schema =
-        Some(serde_json::to_value(schemars::schema_for!(AuditResultV1))?);
+    input.start.final_output_json_schema = Some(output_schema);
     Ok(PreparedReviewer {
         options,
         input,

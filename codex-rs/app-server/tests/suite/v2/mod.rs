@@ -13,6 +13,7 @@ mod application_network;
 #[path = "attached_thread_tests.rs"]
 mod attached_thread;
 mod attestation;
+mod audex;
 #[path = "auth_storage_originator_tests.rs"]
 mod auth_storage_originator;
 mod auto_env;

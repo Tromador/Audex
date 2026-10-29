@@ -68,6 +68,40 @@ fn request(host: &Config) -> ReviewerRequest {
     }
 }
 
+#[test]
+fn strict_result_schema_requires_nullable_fields_without_changing_local_v1_types() {
+    let schema = crate::audex::result::output_schema().expect("derived provider schema");
+    for object in std::iter::once(&schema).chain(
+        schema["definitions"]
+            .as_object()
+            .expect("definitions")
+            .values(),
+    ) {
+        if let Some(properties) = object["properties"].as_object() {
+            let required = object["required"]
+                .as_array()
+                .expect("strict required fields")
+                .iter()
+                .map(|value| value.as_str().expect("field name"))
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(required, properties.keys().map(String::as_str).collect());
+            assert_eq!(object["additionalProperties"], false);
+        }
+    }
+    for (object, field) in [
+        ("AuditFindingV1", "remediation"),
+        ("FindingEvidenceV1", "start_line"),
+        ("FindingEvidenceV1", "end_line"),
+    ] {
+        assert!(
+            schema["definitions"][object]["properties"][field]["type"]
+                .as_array()
+                .expect("nullable type")
+                .contains(&serde_json::json!("null"))
+        );
+    }
+}
+
 fn make_hostile(host: &mut Config) {
     host.base_instructions = Some("HOST_BASE_SENTINEL".to_string());
     host.developer_instructions = Some("HOST_DEVELOPER_SENTINEL".to_string());

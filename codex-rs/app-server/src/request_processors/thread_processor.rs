@@ -1203,6 +1203,19 @@ impl ThreadRequestProcessor {
         }
     }
 
+    /// Audex uses the ordinary sole event reader without attaching a client or
+    /// giving the workflow a second next_event consumer.
+    pub(crate) async fn listen_for_audex(
+        &self,
+        id: ThreadId,
+        thread: Arc<CodexThread>,
+    ) -> anyhow::Result<()> {
+        let state = self.thread_state_manager.thread_state(id).await;
+        self.ensure_listener_task_running(id, thread, state)
+            .await
+            .map_err(|error| anyhow::anyhow!("{}", error.message))
+    }
+
     async fn ensure_conversation_listener(
         &self,
         conversation_id: ThreadId,

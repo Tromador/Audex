@@ -1,4 +1,4 @@
-//! Process-owned workflow. Dispatch is an internal test seam until reviewer execution is added.
+//! Process-owned workflow. Codex execution uses the same durable boundary as deterministic tests.
 use super::reviewer;
 use super::snapshot::manifest::sha256_hex;
 use super::snapshot::{
@@ -27,6 +27,7 @@ pub(super) struct DispatchRequest {
     pub assignment_id: String,
     pub operation_id: String,
     pub snapshot_id: String,
+    pub lease_owner: String,
 }
 
 #[derive(Clone)]
@@ -42,6 +43,13 @@ pub(super) enum WorkState {
 pub(super) enum Observation {
     Absent,
     Rejected(String),
+    /// A pre-submission observation must be rechecked transactionally before
+    /// closing the operation, since another owner may still be preparing it.
+    Unsubmitted(String),
+    /// No sampling retry: keep the durable operation parked for observation.
+    Deferred(String),
+    /// Positive evidence of an identity/integrity contradiction, not mere absence.
+    Uncertain(String),
     Accepted {
         operation_id: String,
         snapshot_id: String,
@@ -50,7 +58,7 @@ pub(super) enum Observation {
     },
 }
 
-/// No provider implementation in this milestone. Implementations must not silently retry.
+/// Implementations must not silently retry an accepted or ambiguous operation.
 pub(super) trait Dispatch: Send + Sync {
     fn available(&self) -> bool {
         true
@@ -60,8 +68,6 @@ pub(super) trait Dispatch: Send + Sync {
     fn interrupt(&self, operation_id: String) -> BoxFuture<'_, Observation>;
 }
 
-struct Unavailable;
-
 /// Keep local recovery from observing a dispatch whose acceptance call has not
 /// returned. This is advisory runtime state; cross-process recovery uses the lease.
 struct PendingDispatch<'a>(&'a AtomicBool);
@@ -69,21 +75,6 @@ struct PendingDispatch<'a>(&'a AtomicBool);
 impl Drop for PendingDispatch<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
-    }
-}
-
-impl Dispatch for Unavailable {
-    fn available(&self) -> bool {
-        false
-    }
-    fn start(&self, _: DispatchRequest) -> BoxFuture<'_, Observation> {
-        Box::pin(async { Observation::Absent })
-    }
-    fn inspect(&self, _: String) -> BoxFuture<'_, Observation> {
-        Box::pin(async { Observation::Absent })
-    }
-    fn interrupt(&self, _: String) -> BoxFuture<'_, Observation> {
-        Box::pin(async { Observation::Absent })
     }
 }
 
@@ -105,13 +96,21 @@ pub(crate) struct AuditController {
 impl AuditController {
     pub(crate) fn service(
         config: Arc<Config>,
-        models: SharedModelsManager,
+        threads: Arc<codex_core::ThreadManager>,
+        history: Arc<dyn codex_thread_store::ThreadStore>,
+        listen: super::dispatch::Listen,
         outgoing: Arc<crate::outgoing_message::OutgoingMessageSender>,
     ) -> Arc<Self> {
+        let dispatch = Arc::new(super::dispatch::CodexDispatch::new(
+            Arc::clone(&config),
+            Arc::clone(&threads),
+            history,
+            listen,
+        ));
         let controller = Self::new(
             config,
-            models,
-            Arc::new(Unavailable),
+            threads.get_models_manager(),
+            dispatch,
             Arc::new(move |progress| {
                 outgoing.try_send_server_notification(ServerNotification::AuditProgress(progress));
             }),
@@ -209,7 +208,7 @@ impl AuditController {
                 anyhow::ensure!(!self.stop.is_cancelled(), "server is quiescing");
                 anyhow::ensure!(
                     self.dispatch.available(),
-                    "reviewer execution is unavailable until provider integration is enabled"
+                    "reviewer execution is unavailable"
                 );
                 let capture = CaptureRequest {
                     source: match &params.source {
@@ -469,6 +468,7 @@ impl AuditController {
                         assignment_id: run.assignment_id.clone(),
                         operation_id: run.operation_id.clone(),
                         snapshot_id: run.snapshot_id.clone(),
+                        lease_owner: self.owner.clone(),
                     })
                     .await;
                 self.reconcile_observation(&run, &snapshot, observation)
@@ -540,11 +540,20 @@ impl AuditController {
                     ..
                 }
             );
+            let cancelled_before_acceptance = current.operation_state
+                == OperationState::Dispatching
+                && current.control_intent == "cancel_requested"
+                && matches!(
+                    &observation,
+                    Observation::Rejected(_) | Observation::Unsubmitted(_)
+                );
             // Retain matching acceptance and completed results even if cancellation
-            // arrived during the call. Other stale observations are superseded;
+            // arrived during the call. A definite pre-acceptance rejection also
+            // closes cancellation safely. Other stale observations are superseded;
             // the next drive observes the current intent without dispatching again.
-            if !positive_evidence
-                || (current.operation_state != OperationState::Dispatching && !completed)
+            if !cancelled_before_acceptance
+                && (!positive_evidence
+                    || (current.operation_state != OperationState::Dispatching && !completed))
             {
                 return Ok(());
             }
@@ -560,6 +569,38 @@ impl AuditController {
     ) -> anyhow::Result<()> {
         let store = self.store().await?;
         let (receipt, state) = match observation {
+            Observation::Unsubmitted(diagnostic) => {
+                store
+                    .finish_unsubmitted_operation(
+                        &run.operation_id,
+                        run.revision,
+                        if run.control_intent == "cancel_requested" {
+                            AssignmentState::Cancelled
+                        } else {
+                            AssignmentState::Failed
+                        },
+                        &diagnostic,
+                    )
+                    .await?;
+                return Ok(());
+            }
+            Observation::Deferred(diagnostic) => {
+                store
+                    .record_observation_issue(&run.operation_id, run.revision, &diagnostic)
+                    .await?;
+                return Ok(());
+            }
+            Observation::Uncertain(diagnostic) => {
+                store
+                    .finish_operation(
+                        &run.operation_id,
+                        run.revision,
+                        AssignmentState::Unknown,
+                        &diagnostic,
+                    )
+                    .await?;
+                return Ok(());
+            }
             Observation::Accepted {
                 operation_id,
                 snapshot_id,
@@ -576,7 +617,11 @@ impl AuditController {
                     .finish_operation(
                         &run.operation_id,
                         run.revision,
-                        AssignmentState::Failed,
+                        if run.control_intent == "cancel_requested" {
+                            AssignmentState::Cancelled
+                        } else {
+                            AssignmentState::Failed
+                        },
                         &reason,
                     )
                     .await?;

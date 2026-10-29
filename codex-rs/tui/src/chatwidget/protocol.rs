@@ -372,7 +372,8 @@ impl ChatWidget {
                     self.on_realtime_conversation_closed(notification.reason);
                 }
             }
-            ServerNotification::ServerRequestResolved(_)
+            ServerNotification::AuditProgress(_)
+            | ServerNotification::ServerRequestResolved(_)
             | ServerNotification::AccountUpdated(_)
             | ServerNotification::GatewayOAuthChanged(_)
             | ServerNotification::AccountRateLimitsUpdated(_)

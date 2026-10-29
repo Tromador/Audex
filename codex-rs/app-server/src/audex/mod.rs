@@ -1,4 +1,5 @@
 pub(crate) mod controller;
+mod dispatch;
 mod lifecycle;
 mod report;
 mod result;
