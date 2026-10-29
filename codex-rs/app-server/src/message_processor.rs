@@ -146,6 +146,7 @@ fn reject_removed_permission_profile(request: &JSONRPCRequest) -> Result<(), JSO
 }
 
 pub(crate) struct MessageProcessor {
+    audex: Arc<crate::audex::controller::AuditController>,
     pub(crate) turn_admission: TurnAdmission,
     user_verification: Arc<crate::user_verification::Service>,
     outgoing: Arc<OutgoingMessageSender>,
@@ -397,6 +398,11 @@ impl MessageProcessor {
                 None => manager,
             }
         });
+        let audex = crate::audex::controller::AuditController::service(
+            Arc::clone(&config),
+            thread_manager.get_models_manager(),
+            Arc::clone(&outgoing),
+        );
         let model_catalog = Arc::new(crate::model_catalog::ModelCatalog::new(
             config_manager.clone(),
             startup_cwd,
@@ -610,6 +616,7 @@ impl MessageProcessor {
 
         Self {
             turn_admission,
+            audex,
             user_verification,
             outgoing,
             startup_warnings: StartupWarnings {
@@ -880,11 +887,16 @@ impl MessageProcessor {
     }
 
     pub(crate) async fn drain_background_tasks(&self) {
+        self.audex.quiesce().await;
         self.models_refresh_worker.shutdown();
         if let Some(worker) = &self.turn_cost_worker {
             worker.shutdown();
         }
         self.thread_processor.drain_background_tasks().await;
+    }
+
+    pub(crate) fn quiesce_audex(&self) {
+        self.audex.stop_new_dispatch();
     }
 
     pub(crate) async fn cancel_active_login(&self) {
@@ -1031,7 +1043,8 @@ impl MessageProcessor {
             | ClientRequest::TurnSettingsUpdate { .. }
             | ClientRequest::ThreadDelete { .. }
             | ClientRequest::ThreadArchive { .. } => (Some(self.turn_admission.admit()?), false),
-            ClientRequest::ThreadSample { .. }
+            ClientRequest::AuditStart { .. }
+            | ClientRequest::ThreadSample { .. }
             | ClientRequest::TurnStart { .. }
             | ClientRequest::TurnSteer { .. }
             | ClientRequest::ReviewStart { .. }
@@ -1171,6 +1184,10 @@ impl MessageProcessor {
                 })
                 .await;
             }
+            request @ (ClientRequest::AuditStart { .. }
+            | ClientRequest::AuditRead { .. }
+            | ClientRequest::AuditList { .. }
+            | ClientRequest::AuditCancel { .. }) => self.audex.handle(request).await.map(Some),
             ClientRequest::ServerDiagnostics { .. } => Ok(Some(read_server_diagnostics().into())),
             ClientRequest::ConfigRead { params, .. } => self
                 .config_processor

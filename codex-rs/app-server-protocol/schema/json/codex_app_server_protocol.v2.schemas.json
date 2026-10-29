@@ -1463,6 +1463,306 @@
       ],
       "type": "object"
     },
+    "AuditCancelParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "title": "AuditCancelParams",
+      "type": "object"
+    },
+    "AuditCancelResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "run": {
+          "$ref": "#/definitions/AuditRunView"
+        }
+      },
+      "required": [
+        "run"
+      ],
+      "title": "AuditCancelResponse",
+      "type": "object"
+    },
+    "AuditListParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "AuditListParams",
+      "type": "object"
+    },
+    "AuditListResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runs": {
+          "items": {
+            "$ref": "#/definitions/AuditRunView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "runs"
+      ],
+      "title": "AuditListResponse",
+      "type": "object"
+    },
+    "AuditProgressNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "phase": {
+          "$ref": "#/definitions/AuditRunPhase"
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "phase",
+        "revision",
+        "runId"
+      ],
+      "title": "AuditProgressNotification",
+      "type": "object"
+    },
+    "AuditReadParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "title": "AuditReadParams",
+      "type": "object"
+    },
+    "AuditReadResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "run": {
+          "$ref": "#/definitions/AuditRunView"
+        }
+      },
+      "required": [
+        "run"
+      ],
+      "title": "AuditReadResponse",
+      "type": "object"
+    },
+    "AuditRunPhase": {
+      "enum": [
+        "created",
+        "snapshot_bound",
+        "reviewing",
+        "reporting",
+        "reconciling",
+        "completed",
+        "completed_with_failures",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "AuditRunView": {
+      "properties": {
+        "assignmentId": {
+          "type": "string"
+        },
+        "cancellationRequested": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "$ref": "#/definitions/AuditRunPhase"
+        },
+        "rawResult": {
+          "description": "Exact retained response, including invalid JSON, when a bounded result was received.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "report": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "snapshotId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assignmentId",
+        "cancellationRequested",
+        "phase",
+        "revision",
+        "runId",
+        "snapshotId"
+      ],
+      "type": "object"
+    },
+    "AuditSource": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "snippet"
+              ],
+              "title": "SnippetAuditSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "content",
+            "name",
+            "type"
+          ],
+          "title": "SnippetAuditSource",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "file"
+              ],
+              "title": "FileAuditSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "path",
+            "type"
+          ],
+          "title": "FileAuditSource",
+          "type": "object"
+        }
+      ]
+    },
+    "AuditStartParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "agentsEvidence": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "audexGuidance": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "brief": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestKey": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/definitions/AuditSource"
+        }
+      },
+      "required": [
+        "brief",
+        "model",
+        "provider",
+        "requestKey",
+        "source"
+      ],
+      "title": "AuditStartParams",
+      "type": "object"
+    },
+    "AuditStartResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "run": {
+          "$ref": "#/definitions/AuditRunView"
+        }
+      },
+      "required": [
+        "run"
+      ],
+      "title": "AuditStartResponse",
+      "type": "object"
+    },
     "AuthMode": {
       "description": "Authentication mode for OpenAI-backed providers.",
       "oneOf": [
@@ -1940,6 +2240,102 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "description": "Request from the client to the server.",
       "oneOf": [
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "audit/start"
+              ],
+              "title": "Audit/startRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AuditStartParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Audit/startRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "audit/read"
+              ],
+              "title": "Audit/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AuditReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Audit/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "audit/list"
+              ],
+              "title": "Audit/listRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AuditListParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Audit/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "audit/cancel"
+              ],
+              "title": "Audit/cancelRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AuditCancelParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Audit/cancelRequest",
+          "type": "object"
+        },
         {
           "properties": {
             "id": {
@@ -16912,6 +17308,26 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "description": "Notification sent from the server to the client.",
       "oneOf": [
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "audit/progress"
+              ],
+              "title": "Audit/progressNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AuditProgressNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Audit/progressNotification",
+          "type": "object"
+        },
         {
           "description": "NEW NOTIFICATIONS",
           "properties": {

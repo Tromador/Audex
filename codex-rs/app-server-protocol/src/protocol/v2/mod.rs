@@ -1,4 +1,6 @@
+mod audit;
 mod shared;
+pub use audit::*;
 
 mod account;
 mod application;

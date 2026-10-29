@@ -220,6 +220,150 @@
         }
       ]
     },
+    "AuditCancelParams": {
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "type": "object"
+    },
+    "AuditListParams": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AuditReadParams": {
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "type": "object"
+    },
+    "AuditSource": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "snippet"
+              ],
+              "title": "SnippetAuditSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "content",
+            "name",
+            "type"
+          ],
+          "title": "SnippetAuditSource",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "file"
+              ],
+              "title": "FileAuditSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "path",
+            "type"
+          ],
+          "title": "FileAuditSource",
+          "type": "object"
+        }
+      ]
+    },
+    "AuditStartParams": {
+      "additionalProperties": false,
+      "properties": {
+        "agentsEvidence": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "audexGuidance": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "brief": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestKey": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/definitions/AuditSource"
+        }
+      },
+      "required": [
+        "brief",
+        "model",
+        "provider",
+        "requestKey",
+        "source"
+      ],
+      "type": "object"
+    },
     "ByteRange": {
       "properties": {
         "end": {
@@ -6309,6 +6453,102 @@
   },
   "description": "Request from the client to the server.",
   "oneOf": [
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "audit/start"
+          ],
+          "title": "Audit/startRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AuditStartParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Audit/startRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "audit/read"
+          ],
+          "title": "Audit/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AuditReadParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Audit/readRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "audit/list"
+          ],
+          "title": "Audit/listRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AuditListParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Audit/listRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "audit/cancel"
+          ],
+          "title": "Audit/cancelRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AuditCancelParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Audit/cancelRequest",
+      "type": "object"
+    },
     {
       "properties": {
         "id": {

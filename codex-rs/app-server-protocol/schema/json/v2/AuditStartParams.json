@@ -1,0 +1,104 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AuditSource": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "snippet"
+              ],
+              "title": "SnippetAuditSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "content",
+            "name",
+            "type"
+          ],
+          "title": "SnippetAuditSource",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "file"
+              ],
+              "title": "FileAuditSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "path",
+            "type"
+          ],
+          "title": "FileAuditSource",
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "agentsEvidence": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "audexGuidance": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "brief": {
+      "type": "string"
+    },
+    "model": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "reasoningEffort": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "requestKey": {
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/definitions/AuditSource"
+    }
+  },
+  "required": [
+    "brief",
+    "model",
+    "provider",
+    "requestKey",
+    "source"
+  ],
+  "title": "AuditStartParams",
+  "type": "object"
+}

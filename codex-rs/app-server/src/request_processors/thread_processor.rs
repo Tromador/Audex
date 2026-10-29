@@ -3924,6 +3924,16 @@ impl ThreadRequestProcessor {
         client_mcp_extensions: ClientMcpExtensions,
         prepared_config: &mut Option<PreparedResumeConfig>,
     ) -> Result<ControlFlow<()>, JSONRPCErrorError> {
+        if matches!(target, ThreadResumeTarget::DaemonRecovery(_)) {
+            // Do not reconstruct an Audex root through ordinary cold resume: its
+            // capability attachments and workflow recovery belong to Audex.
+            let stored = self
+                .read_stored_thread_for_resume(&params.thread_id, params.path.as_ref(), false)
+                .await?;
+            if crate::audex::controller::is_reviewer_source(stored.thread_source.as_ref()) {
+                return Ok(ControlFlow::Break(()));
+            }
+        }
         if let Ok(thread_id) = ThreadId::from_string(&params.thread_id)
             && self
                 .pending_thread_unloads

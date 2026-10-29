@@ -1129,6 +1129,7 @@ pub async fn run_main_with_transport_options(
                         };
                         let running_turn_count = *running_turn_count_rx.borrow();
                         shutdown_state.on_signal(signal, connections.len(), running_turn_count, &processor.turn_admission);
+                        processor.quiesce_audex();
                     }
                     changed = running_turn_count_rx.changed(), if shutdown_state.requested() => {
                         if changed.is_err() {
@@ -1153,6 +1154,7 @@ pub async fn run_main_with_transport_options(
                         match event {
                             TransportEvent::DaemonShutdown => {
                                 shutdown_state.on_signal(ShutdownSignal::Forceable, connections.len(), *running_turn_count_rx.borrow(), &processor.turn_admission);
+                                processor.quiesce_audex();
                             }
                             TransportEvent::ConnectionOpened {
                                 connection_id,

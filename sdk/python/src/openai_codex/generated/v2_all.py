@@ -383,6 +383,110 @@ class AsyncUserInputQuestion(BaseModel):
     title: str
 
 
+class AuditCancelParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    run_id: Annotated[str, Field(alias="runId")]
+
+
+class AuditListParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    after: str | None = None
+    limit: Annotated[int | None, Field(ge=0)] = None
+
+
+class AuditReadParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    run_id: Annotated[str, Field(alias="runId")]
+
+
+class AuditRunPhase(Enum):
+    created = "created"
+    snapshot_bound = "snapshot_bound"
+    reviewing = "reviewing"
+    reporting = "reporting"
+    reconciling = "reconciling"
+    completed = "completed"
+    completed_with_failures = "completed_with_failures"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
+class AuditRunView(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    assignment_id: Annotated[str, Field(alias="assignmentId")]
+    cancellation_requested: Annotated[bool, Field(alias="cancellationRequested")]
+    outcome: str | None = None
+    phase: AuditRunPhase
+    raw_result: Annotated[
+        str | None,
+        Field(
+            alias="rawResult",
+            description="Exact retained response, including invalid JSON, when a bounded result was received.",
+        ),
+    ] = None
+    report: str | None = None
+    revision: int
+    run_id: Annotated[str, Field(alias="runId")]
+    snapshot_id: Annotated[str, Field(alias="snapshotId")]
+
+
+class SnippetAuditSource(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    content: str
+    name: str
+    type: Annotated[Literal["snippet"], Field(title="SnippetAuditSourceType")]
+
+
+class FileAuditSource(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    name: str
+    path: str
+    type: Annotated[Literal["file"], Field(title="FileAuditSourceType")]
+
+
+class AuditSource(RootModel[SnippetAuditSource | FileAuditSource]):
+    root: SnippetAuditSource | FileAuditSource
+
+
+class AuditStartParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    agents_evidence: Annotated[str | None, Field(alias="agentsEvidence")] = None
+    audex_guidance: Annotated[str | None, Field(alias="audexGuidance")] = None
+    brief: str
+    model: str
+    provider: str
+    reasoning_effort: Annotated[str | None, Field(alias="reasoningEffort")] = None
+    request_key: Annotated[str, Field(alias="requestKey")]
+    source: AuditSource
+
+
+class AuditStartResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    run: AuditRunView
+
+
 class AuthMode(Enum):
     apikey = "apikey"
     chatgpt = "chatgpt"
@@ -7135,6 +7239,37 @@ class AppsReadResponse(BaseModel):
     missing_app_ids: Annotated[list[str], Field(alias="missingAppIds")]
 
 
+class AuditCancelResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    run: AuditRunView
+
+
+class AuditListResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    next_cursor: Annotated[str | None, Field(alias="nextCursor")] = None
+    runs: list[AuditRunView]
+
+
+class AuditProgressNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    phase: AuditRunPhase
+    revision: int
+    run_id: Annotated[str, Field(alias="runId")]
+
+
+class AuditReadResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    run: AuditRunView
+
+
 class BrowserUseConfig(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -7173,6 +7308,42 @@ class CancelLoginAccountResponse(BaseModel):
         populate_by_name=True,
     )
     status: CancelLoginAccountStatus
+
+
+class AuditStartRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["audit/start"], Field(title="Audit/startRequestMethod")]
+    params: AuditStartParams
+
+
+class AuditReadRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["audit/read"], Field(title="Audit/readRequestMethod")]
+    params: AuditReadParams
+
+
+class AuditListRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["audit/list"], Field(title="Audit/listRequestMethod")]
+    params: AuditListParams
+
+
+class AuditCancelRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["audit/cancel"], Field(title="Audit/cancelRequestMethod")]
+    params: AuditCancelParams
 
 
 class InitializeRequest(BaseModel):
@@ -9561,6 +9732,21 @@ class ScheduledTaskSummary(BaseModel):
     name: str
     prompt: str
     schedule: ScheduledTaskSchedule
+
+
+class AuditProgressServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[Literal["audit/progress"], Field(title="Audit/progressNotificationMethod")]
+    params: AuditProgressNotification
 
 
 class ThreadStatusChangedServerNotification(BaseModel):
@@ -13224,7 +13410,11 @@ class ExternalAgentConfigImportRecordHistoryRequest(BaseModel):
 
 class ClientRequest(
     RootModel[
-        InitializeRequest
+        AuditStartRequest
+        | AuditReadRequest
+        | AuditListRequest
+        | AuditCancelRequest
+        | InitializeRequest
         | ThreadStartRequest
         | ThreadResumeRequest
         | ThreadForkRequest
@@ -13333,7 +13523,11 @@ class ClientRequest(
     ]
 ):
     root: Annotated[
-        InitializeRequest
+        AuditStartRequest
+        | AuditReadRequest
+        | AuditListRequest
+        | AuditCancelRequest
+        | InitializeRequest
         | ThreadStartRequest
         | ThreadResumeRequest
         | ThreadForkRequest
@@ -13615,7 +13809,8 @@ class ItemAutoApprovalReviewCompletedServerNotification(BaseModel):
 
 class ServerNotification(
     RootModel[
-        ErrorServerNotification
+        AuditProgressServerNotification
+        | ErrorServerNotification
         | ThreadStartedServerNotification
         | ThreadStatusChangedServerNotification
         | ThreadReadStateChangedServerNotification
@@ -13703,7 +13898,8 @@ class ServerNotification(
     ]
 ):
     root: Annotated[
-        ErrorServerNotification
+        AuditProgressServerNotification
+        | ErrorServerNotification
         | ThreadStartedServerNotification
         | ThreadStatusChangedServerNotification
         | ThreadReadStateChangedServerNotification

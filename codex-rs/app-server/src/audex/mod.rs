@@ -1,3 +1,4 @@
+pub(crate) mod controller;
 mod lifecycle;
 mod report;
 mod result;

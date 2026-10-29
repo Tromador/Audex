@@ -901,6 +901,130 @@ pub(crate) enum AuditStoreError {
 }
 
 impl AuditStore {
+    pub(super) async fn observation_lease_ready(
+        &self,
+        operation_id: &str,
+        owner: &str,
+        now: i64,
+    ) -> Result<bool, AuditStoreError> {
+        let row = sqlx::query("SELECT lease_owner, lease_expires_at_ms FROM operations WHERE id=?")
+            .bind(operation_id)
+            .fetch_one(&self.pool)
+            .await?;
+        let held_by: Option<String> = row.try_get("lease_owner")?;
+        let expires: Option<i64> = row.try_get("lease_expires_at_ms")?;
+        Ok(held_by.as_deref() == Some(owner) || expires.is_none_or(|expiry| expiry <= now))
+    }
+
+    pub(super) async fn controller_input(
+        &self,
+        run_id: &str,
+    ) -> Result<(String, String, String, String), AuditStoreError> {
+        let row = sqlx::query(
+            "SELECT i.request_json, i.policy_json, r.policy_digest, r.manifest_digest, r.input_digest
+             FROM audit_inputs i JOIN audit_runs r ON r.id=i.run_id WHERE i.run_id=?",
+        ).bind(run_id).fetch_one(&self.pool).await?;
+        let request_json: String = row.try_get("request_json")?;
+        let input_digest: String = row.try_get("input_digest")?;
+        if sha256_hex(request_json.as_bytes()) != input_digest {
+            return Err(AuditStoreError::InvalidPersistedState(
+                "retained audit input digest mismatch".to_string(),
+            ));
+        }
+        Ok((
+            request_json,
+            row.try_get("policy_json")?,
+            row.try_get("policy_digest")?,
+            row.try_get("manifest_digest")?,
+        ))
+    }
+
+    pub(super) async fn list_run_ids(
+        &self,
+        after: &str,
+        limit: u32,
+    ) -> Result<Vec<String>, AuditStoreError> {
+        Ok(
+            sqlx::query_scalar("SELECT id FROM audit_runs WHERE id>? ORDER BY id LIMIT ?")
+                .bind(after)
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await?,
+        )
+    }
+
+    pub(super) fn raw_result(
+        &self,
+        run: &AuditRunRecord,
+    ) -> Result<Option<Vec<u8>>, AuditStoreError> {
+        match (&run.result_path, &run.result_digest) {
+            (Some(path), Some(digest)) => {
+                Ok(Some(verify_immutable(self.root.as_path(), path, digest)?))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Resolve work using positive terminal evidence; never turn ambiguity into a retry.
+    pub(super) async fn finish_operation(
+        &self,
+        operation_id: &str,
+        expected_revision: i64,
+        terminal: AssignmentState,
+        reason: &str,
+    ) -> Result<i64, AuditStoreError> {
+        if !matches!(
+            terminal,
+            AssignmentState::Failed | AssignmentState::Cancelled | AssignmentState::Unknown
+        ) {
+            return Err(AuditStoreError::InvalidInput(
+                "invalid terminal classification".to_string(),
+            ));
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let state = read_operation_context(&mut *tx, operation_id).await?;
+        // A concurrently committed result wins; repeated terminal observations are harmless.
+        if matches!(
+            state.assignment_state,
+            AssignmentState::Succeeded
+                | AssignmentState::Failed
+                | AssignmentState::Cancelled
+                | AssignmentState::Unknown
+        ) {
+            tx.commit().await?;
+            return Ok(state.run_revision);
+        }
+        require_revision(expected_revision, state.run_revision)?;
+        let (assignment, operation, phase) = match terminal {
+            AssignmentState::Cancelled => ("cancelled", "failed", "cancelled"),
+            AssignmentState::Unknown => ("unknown", "unknown", "failed"),
+            _ => ("failed", "failed", "failed"),
+        };
+        if terminal == AssignmentState::Cancelled && state.control_intent != "cancel_requested" {
+            return Err(AuditStoreError::InvalidTransition(
+                "cancellation requires durable intent".to_string(),
+            ));
+        }
+        let now = now_millis();
+        sqlx::query("UPDATE operations SET state=?, error=?, retry_classification='never_automatically_retry',
+            lease_owner=NULL, lease_expires_at_ms=NULL, updated_at_ms=? WHERE id=?")
+            .bind(operation).bind(bounded_error(reason.to_string())).bind(now).bind(operation_id)
+            .execute(&mut *tx).await?;
+        sqlx::query(
+            "UPDATE reviewer_assignments SET state=?, failure_code=?, updated_at_ms=? WHERE id=?",
+        )
+        .bind(assignment)
+        .bind(reason)
+        .bind(now)
+        .bind(&state.assignment_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE audit_runs SET phase=?, outcome=?, revision=revision+1, updated_at_ms=? WHERE id=?")
+            .bind(phase).bind(reason).bind(now).bind(&state.run_id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(state.run_revision + 1)
+    }
+
     pub(crate) async fn open(root: AbsolutePathBuf) -> Result<Self, AuditStoreError> {
         std::fs::create_dir_all(root.as_path())?;
         let database_path = root.join(DATABASE_FILENAME).into_path_buf();
@@ -931,6 +1055,14 @@ impl AuditStore {
     pub(crate) async fn create_run(
         &self,
         request: &CreateRunRequest,
+    ) -> Result<CreatedRun, AuditStoreError> {
+        self.create_run_with_input(request, None).await
+    }
+
+    pub(super) async fn create_run_with_input(
+        &self,
+        request: &CreateRunRequest,
+        input: Option<(&str, &str)>,
     ) -> Result<CreatedRun, AuditStoreError> {
         validate_create_request(request)?;
         let now = now_millis();
@@ -998,6 +1130,16 @@ impl AuditStore {
         .bind(now)
         .execute(&mut *transaction)
         .await?;
+        if let Some((request_json, policy_json)) = input {
+            sqlx::query(
+                "INSERT INTO audit_inputs(run_id, request_json, policy_json) VALUES (?, ?, ?)",
+            )
+            .bind(&created.run_id)
+            .bind(request_json)
+            .bind(policy_json)
+            .execute(&mut *transaction)
+            .await?;
+        }
         transaction.commit().await?;
         Ok(created)
     }
@@ -1066,6 +1208,19 @@ impl AuditStore {
         if state != OperationState::Planned || phase != RunPhase::SnapshotBound {
             transaction.commit().await?;
             return Ok(ClaimOutcome::NotClaimable(state));
+        }
+        let other_active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM operations WHERE id<>? AND (
+                state IN ('dispatching', 'accepted') OR
+                (state='planned' AND lease_owner IS NOT NULL AND lease_expires_at_ms>?)))",
+        )
+        .bind(operation_id)
+        .bind(now_ms)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if other_active {
+            transaction.commit().await?;
+            return Ok(ClaimOutcome::Busy);
         }
         let existing_owner: Option<String> = row.try_get("lease_owner")?;
         let existing_expiry: Option<i64> = row.try_get("lease_expires_at_ms")?;

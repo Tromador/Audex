@@ -500,6 +500,26 @@ enum GetAccountRateLimitsParamsTypeScript {
 }
 
 client_request_definitions! {
+    AuditStart => "audit/start" {
+        params: v2::AuditStartParams,
+        serialization: None,
+        response: v2::AuditStartResponse,
+    },
+    AuditRead => "audit/read" {
+        params: v2::AuditReadParams,
+        serialization: None,
+        response: v2::AuditReadResponse,
+    },
+    AuditList => "audit/list" {
+        params: v2::AuditListParams,
+        serialization: None,
+        response: v2::AuditListResponse,
+    },
+    AuditCancel => "audit/cancel" {
+        params: v2::AuditCancelParams,
+        serialization: None,
+        response: v2::AuditCancelResponse,
+    },
     Initialize => "initialize" {
         params: v1::InitializeParams,
         serialization: None,
@@ -1997,6 +2017,7 @@ pub struct FuzzyFileSearchSessionCompletedNotification {
 }
 
 server_notification_definitions! {
+    AuditProgress => "audit/progress" (v2::AuditProgressNotification),
     /// NEW NOTIFICATIONS
     Error => "error" (v2::ErrorNotification),
     ThreadStarted => "thread/started" (v2::ThreadStartedNotification),

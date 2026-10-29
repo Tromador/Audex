@@ -23,6 +23,9 @@ impl ThreadRequestProcessor {
                 continue;
             };
             let config = thread.config_snapshot().await;
+            if crate::audex::controller::is_reviewer_source(config.thread_source.as_ref()) {
+                continue;
+            }
             if !config.ephemeral
                 && config.parent_thread_id.is_none()
                 && !config.session_source.is_non_root_agent()

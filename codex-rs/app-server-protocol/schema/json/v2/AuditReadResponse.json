@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AuditRunPhase": {
+      "enum": [
+        "created",
+        "snapshot_bound",
+        "reviewing",
+        "reporting",
+        "reconciling",
+        "completed",
+        "completed_with_failures",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "AuditRunView": {
+      "properties": {
+        "assignmentId": {
+          "type": "string"
+        },
+        "cancellationRequested": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "$ref": "#/definitions/AuditRunPhase"
+        },
+        "rawResult": {
+          "description": "Exact retained response, including invalid JSON, when a bounded result was received.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "report": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "snapshotId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assignmentId",
+        "cancellationRequested",
+        "phase",
+        "revision",
+        "runId",
+        "snapshotId"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "run": {
+      "$ref": "#/definitions/AuditRunView"
+    }
+  },
+  "required": [
+    "run"
+  ],
+  "title": "AuditReadResponse",
+  "type": "object"
+}

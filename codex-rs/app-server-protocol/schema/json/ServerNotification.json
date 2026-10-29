@@ -543,6 +543,40 @@
       ],
       "type": "object"
     },
+    "AuditProgressNotification": {
+      "properties": {
+        "phase": {
+          "$ref": "#/definitions/AuditRunPhase"
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "phase",
+        "revision",
+        "runId"
+      ],
+      "type": "object"
+    },
+    "AuditRunPhase": {
+      "enum": [
+        "created",
+        "snapshot_bound",
+        "reviewing",
+        "reporting",
+        "reconciling",
+        "completed",
+        "completed_with_failures",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
     "AuthMode": {
       "description": "Authentication mode for OpenAI-backed providers.",
       "oneOf": [
@@ -7187,6 +7221,26 @@
   },
   "description": "Notification sent from the server to the client.",
   "oneOf": [
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "audit/progress"
+          ],
+          "title": "Audit/progressNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AuditProgressNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Audit/progressNotification",
+      "type": "object"
+    },
     {
       "description": "NEW NOTIFICATIONS",
       "properties": {

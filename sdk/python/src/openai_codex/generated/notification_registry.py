@@ -12,6 +12,7 @@ from .v2_all import AccountRateLimitsUpdatedNotification
 from .v2_all import AccountUpdatedNotification
 from .v2_all import AgentMessageDeltaNotification
 from .v2_all import AppListUpdatedNotification
+from .v2_all import AuditProgressNotification
 from .v2_all import AuthRecoveryNotification
 from .v2_all import CommandExecOutputDeltaNotification
 from .v2_all import CommandExecutionOutputDeltaNotification
@@ -97,6 +98,7 @@ KnownNotificationPayload: TypeAlias = (
     | AccountUpdatedNotification
     | AgentMessageDeltaNotification
     | AppListUpdatedNotification
+    | AuditProgressNotification
     | AuthRecoveryNotification
     | CommandExecOutputDeltaNotification
     | CommandExecutionOutputDeltaNotification
@@ -183,6 +185,7 @@ NOTIFICATION_MODELS: dict[str, type[KnownNotificationPayload]] = {
     "account/rateLimits/updated": AccountRateLimitsUpdatedNotification,
     "account/updated": AccountUpdatedNotification,
     "app/list/updated": AppListUpdatedNotification,
+    "audit/progress": AuditProgressNotification,
     "autoApprovalReview/strictReviewRequired": StrictReviewRequiredNotification,
     "command/exec/outputDelta": CommandExecOutputDeltaNotification,
     "configWarning": ConfigWarningNotification,
