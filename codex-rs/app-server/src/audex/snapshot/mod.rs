@@ -1,6 +1,6 @@
 mod access;
 mod capture;
-mod manifest;
+pub(super) mod manifest;
 
 #[cfg(test)]
 mod tests;
