@@ -145,6 +145,62 @@ impl SnapshotHandle {
         self.manifest.as_ref()
     }
 
+    pub(crate) fn source_root(&self) -> AbsolutePathBuf {
+        self.snapshot_root.join("source")
+    }
+
+    /// Read only the explicitly captured context objects, verifying them again before disclosure.
+    pub(crate) async fn context_documents(
+        &self,
+    ) -> Result<Vec<(String, String, Vec<u8>)>, SnapshotError> {
+        use codex_exec_server::GetMetadataOptions;
+        use codex_exec_server::ReadFileOptions;
+        use codex_utils_path_uri::PathUri;
+        let mut documents = Vec::new();
+        for document in &self.manifest.identity.context_documents {
+            let path = self
+                .snapshot_root
+                .join("objects")
+                .join("sha256")
+                .join(&document.sha256);
+            let uri = PathUri::from_abs_path(&path);
+            let metadata = self
+                .file_system
+                .get_metadata(
+                    &uri,
+                    GetMetadataOptions {
+                        follow_symlinks: false,
+                    },
+                    None,
+                )
+                .await?;
+            if !metadata.is_file || metadata.is_symlink || metadata.size != document.size {
+                return Err(SnapshotError::Integrity(
+                    "context object metadata changed".to_string(),
+                ));
+            }
+            let bytes = self
+                .file_system
+                .read_file(
+                    &uri,
+                    ReadFileOptions {
+                        follow_symlinks: false,
+                    },
+                    None,
+                )
+                .await?;
+            if bytes.len() as u64 != document.size
+                || manifest::sha256_hex(&bytes) != document.sha256
+            {
+                return Err(SnapshotError::Integrity(
+                    "context object digest changed".to_string(),
+                ));
+            }
+            documents.push((document.path.to_string(), document.sha256.clone(), bytes));
+        }
+        Ok(documents)
+    }
+
     pub(crate) fn access(&self, limits: AccessLimits) -> SnapshotAccess {
         SnapshotAccess::new(self.clone(), limits)
     }
