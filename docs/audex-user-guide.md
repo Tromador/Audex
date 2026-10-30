@@ -95,8 +95,9 @@ Launch the TUI using `audex --remote unix://`. Slash commands act directly throu
 | `/audit --file ./src/example.rs --model MODEL --provider PROVIDER` | Override the reviewer selection. |
 | `/audit --file ./src/example.rs --brief 'Check error handling and state transitions'` | Supply specific review priorities. |
 | `/audit list` | List existing durable audits. |
-| `/audit read RUN` | Reopen a saved run and display its report. |
+| `/audit read RUN` | Reopen a saved run, keep observing through pending states and display its report. |
 | `/audit cancel RUN` | Request cancellation of an existing run. |
+| `/audit release-slot RUN` | Explicitly confirm releasing an unresolved run's capacity reservation; this does not establish its outcome. |
 
 For source submissions, paths are resolved relative to the **conversation's working directory**, not necessarily the directory of a later shell invocation. An absolute path is an option when there is any doubt.
 
@@ -169,9 +170,10 @@ audex audit read RUN --follow
 audex audit cancel RUN
 ```
 
-- `list` lists durable runs (default page size: 20; maximum: 100). An optional cursor pages forward.
+- `list` lists durable run summaries, newest first (default page size: 20; maximum: 100). The returned cursor pages towards older audits, including when creation timestamps tie. New submissions do not shift an existing page cursor.
+- Listing does not open results or reports. A damaged historical artefact therefore does not prevent listing other runs; retrieving the damaged artefact still fails integrity verification.
 - `read RUN` returns the existing state and the Markdown report if one is ready; it never starts another review.
-- `read RUN --follow` waits for progress or completion. It can also resume observation after your previous terminal closed.
+- `read RUN --follow` waits through recoverable observation-pending states until a terminal outcome or Ctrl-C. Attached submissions, cancellation watches and TUI observation do the same. A plain `read RUN` returns immediately; it can report exit 5 while work is pending.
 - `cancel RUN` records cancellation intent and follows the original operation's outcome. Cancellation may race with completion; a completed result is retained.
 
 ### CLI exit codes
@@ -183,7 +185,7 @@ audex audit cancel RUN
 | `2` | Audit failed or completed with failures. |
 | `3` | Audit cancelled. |
 | `4` | Terminal unknown operation state. |
-| `5` | Still pending, including an observation-pending state. |
+| `5` | Non-following read or slot release: work is still pending. |
 | `130` | User pressed Ctrl-C; the frontend disconnected, **not** the reviewer cancelled. |
 
 Scripts should not interpret `--detach` returning zero as a successful review verdict. A zero there means **the submission was accepted**.
@@ -280,7 +282,33 @@ This is a deliberate operator inference request, not a rerun of the reviewer.
 
 If a start request loses its acknowledgement, **do not automatically submit another request with a new key**. First inspect `audex audit list`. The CLI's `--request-key` lets you reuse the *same key with identical input* when an acknowledgement is genuinely uncertain. This preserves the controller's idempotency contract.
 
+If the server retained a matching request before its response failed, the error includes its run ID and request key. Reusing a key for different input returns an explicit idempotency conflict without a recovery run ID. Recover that run with `audit read RUN --follow` or `/audit read RUN`. An identical retry compares the captured source, explicit brief and requested reviewer settings, not today's resolved model catalogue or policy. Changed source contents or explicit inputs conflict with the original key. Older runs created before stable requested-input identities were recorded retain their conservative legacy comparison; recover using a known run ID or inspect the listing; the server does not claim that a legacy request key alone proves matching input.
+
+Compatibility is checked using `audit/capabilities`, independently of historical runs and artefact integrity. Both daemon and client must support this endpoint and audit protocol version **2**.
+
+Preparation leases are renewed while their owner remains active and unexpired. Cancellation, explicit slot release and lease expiry fence submission; an expired owner cannot revive its lease. Known unsubmitted failures and abandoned preparation are cleaned up without creating replacement inference. Potentially submitted work remains observation-only.
+
+Healthy runs are normally observed once per second, with lifecycle hints waking recovery sooner. Unresolved observation failures back off to at most one attempt per minute. New cancellation intent bypasses the observation delay. Unchanged revisions do not repeatedly broadcast progress.
+
+Attached CLI and TUI clients continue watching pending runs. Progress notifications can wake them immediately; fallback reads are once per second during normal execution and once per five seconds while observation is pending. Reading progress does not submit inference or bypass the controller's recovery backoff.
+
+Missing or transient evidence retains the operation for observation and holds capacity until positive terminal evidence or explicit operator release. Positive contradictory identity or acceptance evidence instead produces terminal `unknown` (CLI exit 4), preserving its diagnostic and freeing normal capacity; it never permits replay of that operation. An unknown outcome does not prove that an inference stopped. To release it, first request cancellation, then acknowledge that its original reviewer may still execute and incur charges:
+
+```bash
+audex audit release-slot RUN \
+    --acknowledge-concurrent-execution-and-charges \
+    --reason 'Accept possible concurrent execution'
+```
+
+If `audit cancel RUN` remains attached because the outcome is unresolved, wait for the cancellation-requested status, then press Ctrl-C to disconnect before running the release command. This does not withdraw the recorded cancellation intent.
+
+The TUI equivalent, `/audit release-slot RUN`, defaults to **No** and requires explicit confirmation. Release permanently fences resubmission of the original operation. It does not mark the audit complete or cancelled, prevent observation, or discard late valid results.
+
 A report can identify findings with severity and confidence, but those values are reviewer assessments. Treat references to source lines and byte offsets as evidence **to verify**, not automatic authorisation to modify code.
+
+New result commits derive authoritative line numbers from captured source bytes and strictly validated byte ranges. Incorrect, partial or absent numeric reviewer line claims do not discard valid findings. The exact raw reviewer response is preserved, including its original claims; finding identities remain bound to that response. Lines are 1-based and LF-delimited; CRLF is one delimiter. Byte ranges remain half-open, and the end line contains the last included byte. Report format 2 distinguishes verified line ranges from migrated, unverified reviewer claims. Existing format-1 reports remain immutable; their line numbers were not checked against source and must be treated as reviewer claims.
+
+Reviewer threads are private to the controller. Ordinary thread APIs and agent coordination tools cannot read, resume, fork, send input to or interrupt those roots. Use the audit protocol to observe or cancel their owning runs.
 
 Audit submission may call a paid or usage-metered provider. TUI confirmation provides an opportunity to inspect the chosen model/provider; CLI submission begins when the command executes. Reading and listing existing runs do not resample the reviewer.
 

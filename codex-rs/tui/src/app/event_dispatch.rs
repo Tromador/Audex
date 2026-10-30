@@ -169,6 +169,11 @@ impl App {
         match event {
             AppEvent::AuditCommand { thread_id, args } => self.audit_command(app_server, thread_id, args),
             AppEvent::AuditPrompt => self.chat_widget.show_audit_prompt(),
+            AppEvent::AuditReleaseConfirm { thread_id, run, decision } => {
+                if self.current_displayed_thread_id() == Some(thread_id) && self.audit_available(app_server) {
+                    self.chat_widget.confirm_audit_release(run, decision);
+                } else { let _ = decision.send(false); }
+            }
             AppEvent::AuditConfirm { thread_id, params, decision } => {
                 if self.current_displayed_thread_id() == Some(thread_id) && self.audit_available(app_server) {
                     self.chat_widget.confirm_audit(params, decision);

@@ -140,6 +140,7 @@ impl LocalAgentControl {
         input: Vec<UserInput>,
         start_options: TurnStartOptions,
     ) -> CodexResult<String> {
+        self.ensure_agent_target_access(agent_id).await?;
         let state = self.runtime.upgrade()?;
         let thread = state.get_thread(agent_id).await?;
         let result = match thread
@@ -170,6 +171,7 @@ impl LocalAgentControl {
         agent_communication_context: AgentCommunicationContext,
         start_options: TurnStartOptions,
     ) -> CodexResult<String> {
+        self.ensure_agent_target_access(agent_id).await?;
         let state = self.runtime.upgrade()?;
         if communication.trigger_turn {
             let thread = state.get_thread(agent_id).await?;
@@ -313,6 +315,7 @@ impl LocalAgentControl {
 
     /// Interrupt the current task for an existing agent thread.
     pub(crate) async fn interrupt_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
+        self.ensure_agent_target_access(agent_id).await?;
         let state = self.runtime.upgrade()?;
         self.handle_thread_request_result(
             agent_id,
@@ -349,6 +352,9 @@ impl LocalAgentControl {
 
     /// Fetch the last known status for `agent_id`, returning `NotFound` when unavailable.
     pub(crate) async fn get_status(&self, agent_id: ThreadId) -> AgentStatus {
+        if self.ensure_agent_target_access(agent_id).await.is_err() {
+            return AgentStatus::NotFound;
+        }
         let Ok(state) = self.runtime.upgrade() else {
             // No agent available if upgrade fails.
             return AgentStatus::NotFound;

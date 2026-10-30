@@ -11,6 +11,42 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::SessionSource;
 
 impl LocalAgentControl {
+    /// Audex roots are owned by their durable workflow, not by another model's
+    /// agent tools. Check cold metadata too, before any legacy resume can load it.
+    pub(super) async fn ensure_agent_target_access(&self, target: ThreadId) -> CodexResult<()> {
+        let manager = self.runtime.upgrade()?;
+        let source = if let Ok(thread) = manager.get_thread(target).await {
+            thread.config_snapshot().await.thread_source
+        } else {
+            match manager
+                .read_stored_thread(codex_thread_store::ReadThreadParams {
+                    thread_id: target,
+                    include_archived: true,
+                    include_history: false,
+                })
+                .await
+            {
+                Ok(stored) => stored.thread_source,
+                Err(error)
+                    if matches!(
+                        error.details(),
+                        codex_protocol::error::CodexErrorDetails::ThreadNotFound(_)
+                    ) =>
+                {
+                    None
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        if matches!(source,Some(codex_protocol::protocol::ThreadSource::Feature(name)) if name=="audex-reviewer")
+        {
+            return Err(CodexErr::InvalidRequest(
+                "Audex reviewer threads are owned by the audit controller".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn resolve_target(
         &self,
         caller: ThreadId,

@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "protocolVersion": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "protocolVersion"
+  ],
+  "title": "AuditCapabilitiesResponse",
+  "type": "object"
+}

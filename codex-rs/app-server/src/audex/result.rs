@@ -153,6 +153,57 @@ pub(super) fn parse_and_validate(
     })
 }
 
+/// Lines are 1-based LF-delimited byte lines (CRLF counts as one delimiter).
+/// Byte evidence is half-open; end_line names the line containing end_byte - 1.
+/// Reviewer line claims are cosmetic: replace them only after strict byte-range
+/// validation. Finding IDs remain bound to the original parsed response, and the
+/// exact raw response is retained separately. I/O/integrity errors remain errors.
+pub(super) async fn derive_source_lines(
+    response: &mut AuditResultV1,
+    snapshot: &super::snapshot::SnapshotHandle,
+) -> Result<(), super::snapshot::SnapshotError> {
+    for entry in &snapshot.manifest().identity.entries {
+        let claims: Vec<_> = response
+            .findings
+            .iter_mut()
+            .flat_map(|finding| &mut finding.evidence)
+            .filter(|evidence| evidence.path == entry.path.as_str())
+            .collect();
+        if claims.is_empty() {
+            continue;
+        }
+        let bytes = snapshot
+            .access(super::snapshot::AccessLimits::default())
+            .verified_content(&entry.path)
+            .await?;
+        // Only evidence boundaries are indexed; memory is bounded by the result,
+        // rather than the number of source lines in a potentially large file.
+        let mut boundaries: Vec<_> = claims
+            .iter()
+            .flat_map(|e| [e.start_byte, e.end_byte - 1])
+            .collect();
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        let mut lines = std::collections::HashMap::new();
+        let mut offset = 0usize;
+        let mut line = 1u32;
+        for boundary in boundaries {
+            let boundary = boundary as usize; // validated against the captured byte length
+            line += bytes[offset..boundary]
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count() as u32;
+            lines.insert(boundary as u64, line);
+            offset = boundary;
+        }
+        for evidence in claims {
+            evidence.start_line = lines.get(&evidence.start_byte).copied();
+            evidence.end_line = lines.get(&(evidence.end_byte - 1)).copied();
+        }
+    }
+    Ok(())
+}
+
 fn validate_response(
     response: &AuditResultV1,
     expected_assignment_id: &str,
@@ -233,15 +284,8 @@ fn validate_evidence(
             "finding {finding_ordinal} evidence {evidence_ordinal} has an invalid byte range"
         )));
     }
-    match (evidence.start_line, evidence.end_line) {
-        (None, None) => {}
-        (Some(start), Some(end)) if start > 0 && start <= end => {}
-        _ => {
-            return Err(ResultValidationError::Semantic(format!(
-                "finding {finding_ordinal} evidence {evidence_ordinal} has an invalid line range"
-            )));
-        }
-    }
+    // Optional numeric line claims never determine evidence validity. The server
+    // derives both lines from these validated bytes before committing new evidence.
     Ok(())
 }
 

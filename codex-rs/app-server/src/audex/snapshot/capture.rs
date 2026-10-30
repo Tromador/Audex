@@ -321,8 +321,12 @@ pub(super) async fn open(
     snapshot_id: &SnapshotId,
 ) -> Result<SnapshotHandle, SnapshotError> {
     let snapshot_root = store.root.join(snapshot_id.digest());
-    if !snapshot_root.as_path().exists() {
-        return Err(SnapshotError::NotFound(snapshot_id.to_string()));
+    match std::fs::symlink_metadata(snapshot_root.as_path()) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(SnapshotError::NotFound(snapshot_id.to_string()));
+        }
+        Err(error) => return Err(SnapshotError::Io(error)),
     }
     verify_published_root_is_read_only(snapshot_root.as_path())?;
     let manifest_path = snapshot_root.join("manifest.json");
@@ -348,13 +352,7 @@ pub(super) async fn open(
                 path.join(component)
             });
         verify_file(store, &materialized_path, entry.size, &entry.sha256).await?;
-        if native_executable(materialized_path.as_path()).map_err(|error| {
-            SnapshotError::Integrity(format!(
-                "cannot inspect materialised mode for `{}`: {error}",
-                entry.path
-            ))
-        })? != entry.executable
-        {
+        if native_executable(materialized_path.as_path())? != entry.executable {
             return Err(SnapshotError::Integrity(format!(
                 "materialised mode does not match `{}`",
                 entry.path
@@ -406,13 +404,7 @@ async fn read_nofollow(
             },
             None,
         )
-        .await
-        .map_err(|error| {
-            SnapshotError::Integrity(format!(
-                "cannot inspect `{}`: {error}",
-                path.as_path().display()
-            ))
-        })?;
+        .await?;
     if !metadata.is_file || metadata.is_directory || metadata.is_symlink {
         return Err(SnapshotError::Integrity(format!(
             "path is not a regular file: {}",
@@ -429,12 +421,7 @@ async fn read_nofollow(
             None,
         )
         .await
-        .map_err(|error| {
-            SnapshotError::Integrity(format!(
-                "cannot read `{}`: {error}",
-                path.as_path().display()
-            ))
-        })
+        .map_err(SnapshotError::Io)
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> io::Result<()> {

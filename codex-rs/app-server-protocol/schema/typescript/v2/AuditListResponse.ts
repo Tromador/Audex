@@ -7,4 +7,9 @@ export type AuditListResponse = {
 /**
  * Required even for an empty list, so clients can check before submitting work.
  */
-protocolVersion: number, runs: Array<AuditRunView>, nextCursor: string | null, };
+protocolVersion: number,
+/**
+ * Newest-first metadata summaries. Results and reports are absent; audit/read
+ * retrieves those artefacts with strict integrity verification.
+ */
+runs: Array<AuditRunView>, nextCursor: string | null, };

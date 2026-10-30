@@ -556,6 +556,7 @@ impl MessageProcessor {
             turn_cost_worker.as_ref().map(TurnCostWorker::handle),
         );
         let audex_listener = thread_processor.clone();
+        let audex_cleanup = thread_processor.clone();
         let audex = crate::audex::controller::AuditController::service(
             Arc::clone(&config),
             Arc::clone(&thread_manager),
@@ -563,6 +564,13 @@ impl MessageProcessor {
             Arc::new(move |id, thread| {
                 let processor = audex_listener.clone();
                 Box::pin(async move { processor.listen_for_audex(id, thread).await })
+            }),
+            Arc::new(move |id, thread| {
+                let processor = audex_cleanup.clone();
+                Box::pin(async move {
+                    processor.cleanup_audex(id, thread).await;
+                    Ok(())
+                })
             }),
             Arc::clone(&outgoing),
         );
@@ -1139,6 +1147,9 @@ impl MessageProcessor {
             connection_id,
             request_id: codex_request.id().clone(),
         };
+        self.thread_processor
+            .ensure_audex_client_access(&codex_request)
+            .await?;
         let result: Result<Option<ClientResponsePayload>, JSONRPCErrorError> = match codex_request {
             ClientRequest::Initialize { .. } => {
                 panic!("Initialize should be handled before initialized request dispatch");
@@ -1190,10 +1201,12 @@ impl MessageProcessor {
                 })
                 .await;
             }
-            request @ (ClientRequest::AuditStart { .. }
+            request @ (ClientRequest::AuditCapabilities { .. }
+            | ClientRequest::AuditStart { .. }
             | ClientRequest::AuditRead { .. }
             | ClientRequest::AuditList { .. }
-            | ClientRequest::AuditCancel { .. }) => self.audex.handle(request).await.map(Some),
+            | ClientRequest::AuditCancel { .. }
+            | ClientRequest::AuditReleaseSlot { .. }) => self.audex.handle(request).await.map(Some),
             ClientRequest::ServerDiagnostics { .. } => Ok(Some(read_server_diagnostics().into())),
             ClientRequest::ConfigRead { params, .. } => self
                 .config_processor

@@ -116,6 +116,15 @@ impl SnapshotAccess {
         Ok(hits)
     }
 
+    /// Trusted result validation uses the same manifest-bound verified reader.
+    /// This is not registered as a model-facing tool or an increased tool limit.
+    pub(crate) async fn verified_content(
+        &self,
+        path: &SnapshotPath,
+    ) -> Result<Vec<u8>, SnapshotError> {
+        self.read_all_verified(self.entry(path)?).await
+    }
+
     fn entry(&self, path: &SnapshotPath) -> Result<&SnapshotEntryV1, SnapshotError> {
         self.handle
             .manifest

@@ -232,6 +232,10 @@
       ],
       "type": "object"
     },
+    "AuditCapabilitiesParams": {
+      "additionalProperties": false,
+      "type": "object"
+    },
     "AuditListParams": {
       "additionalProperties": false,
       "properties": {
@@ -260,6 +264,31 @@
         }
       },
       "required": [
+        "runId"
+      ],
+      "type": "object"
+    },
+    "AuditReleaseSlotParams": {
+      "additionalProperties": false,
+      "properties": {
+        "acknowledgePossibleConcurrentExecutionAndCharges": {
+          "type": "boolean"
+        },
+        "expectedRevision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "acknowledgePossibleConcurrentExecutionAndCharges",
+        "expectedRevision",
+        "reason",
         "runId"
       ],
       "type": "object"
@@ -6460,6 +6489,30 @@
         },
         "method": {
           "enum": [
+            "audit/capabilities"
+          ],
+          "title": "Audit/capabilitiesRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AuditCapabilitiesParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Audit/capabilitiesRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
             "audit/start"
           ],
           "title": "Audit/startRequestMethod",
@@ -6547,6 +6600,30 @@
         "params"
       ],
       "title": "Audit/cancelRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "audit/release-slot"
+          ],
+          "title": "Audit/releaseSlotRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AuditReleaseSlotParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Audit/releaseSlotRequest",
       "type": "object"
     },
     {

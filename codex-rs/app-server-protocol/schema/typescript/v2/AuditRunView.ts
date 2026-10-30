@@ -9,7 +9,11 @@ export type AuditRunView = { runId: string, snapshotId: string, assignmentId: st
  * A retained observation issue remains unresolved. This is non-terminal:
  * the daemon continues observing the original operation, without resampling.
  */
-observationPending: boolean, revision: bigint, cancellationRequested: boolean, outcome: string | null,
+observationPending: boolean,
+/**
+ * The operator explicitly released capacity. This is not terminal evidence.
+ */
+capacityReleased: boolean, revision: bigint, cancellationRequested: boolean, outcome: string | null,
 /**
  * Exact retained response, including invalid JSON, when a bounded result was received.
  */

@@ -367,6 +367,7 @@ async fn active_context_scenario() -> Result<()> {
         phase: AuditRunPhase::Completed,
         operation_state: codex_app_server_protocol::AuditOperationState::Committed,
         observation_pending: false,
+        capacity_released: false,
         revision: 1,
         cancellation_requested: false,
         outcome: None,
@@ -596,4 +597,78 @@ async fn conversational_scenario() -> Result<()> {
     assert_eq!(provider.received_requests().await.unwrap().len(), 6);
     resumed.shutdown().await?;
     Ok(())
+}
+
+#[test]
+fn pending_observer_recovers_and_delivers_report_once_without_another_inference()
+-> anyhow::Result<()> {
+    run_test_with_large_stack("tui-audit-pending-watch", || async {
+        let provider = responses::start_mock_server().await;
+        let (home, _config, session, thread) = boxed_future!(fixture(&provider))
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+        mount_provider(&provider, home.0.path().join("example.rs")).await;
+        let audits = AuditClient::new(session.request_handle());
+        let mut initial = audits
+            .start(AuditStartParams {
+                request_key: "pending-watcher".into(),
+                source: arguments().source,
+                brief: default_brief(),
+                model: "audit-test".into(),
+                provider: "mock_provider".into(),
+                reasoning_effort: None,
+                audex_guidance: None,
+                agents_evidence: None,
+            })
+            .await?;
+        let complete = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let view = audits.read(initial.run_id.clone()).await?;
+                if terminal(&view) {
+                    break Ok::<_, codex_app_server_client::audit::AuditClientError>(view);
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await??;
+        assert!(complete.report.is_some());
+        // The frontend's last durable read was pending. Recovering on the daemon
+        // before its next notification/read must not abandon the watch.
+        initial.phase = AuditRunPhase::Reviewing;
+        initial.operation_state = codex_app_server_protocol::AuditOperationState::Accepted;
+        initial.revision = complete.revision - 1;
+        initial.observation_pending = true;
+        let requests = provider.received_requests().await.expect("requests").len();
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let wake = Arc::new(tokio::sync::Notify::new());
+        wake.notify_one();
+        let watch = tokio::spawn(observe(
+            session.request_handle(),
+            thread,
+            initial,
+            AppEventSender::new(tx),
+            wake.clone(),
+        ));
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await?
+            .expect("pending watcher must remain active");
+        let AppEvent::AuditUpdated { run, error, .. } = event else {
+            panic!("expected report update")
+        };
+        assert!(error.is_none());
+        assert_eq!(run.report, complete.report);
+        assert!(!run.observation_pending);
+        watch.await?;
+        wake.notify_one();
+        assert!(
+            events.recv().await.is_none(),
+            "completed watcher sends its report only once"
+        );
+        assert_eq!(
+            provider.received_requests().await.expect("requests").len(),
+            requests
+        );
+        session.shutdown().await?;
+        Ok(())
+    })
 }

@@ -24,6 +24,11 @@ pub(super) async fn ensure_direct_input_allowed(
     thread: &CodexThread,
 ) -> Result<(), JSONRPCErrorError> {
     let config_snapshot = thread.config_snapshot().await;
+    if crate::audex::controller::is_reviewer_source(config_snapshot.thread_source.as_ref()) {
+        return Err(invalid_request(
+            "Audex reviewer input is owned by the audit controller",
+        ));
+    }
     if !can_accept_direct_input(
         thread.multi_agent_version(),
         &config_snapshot.session_source,

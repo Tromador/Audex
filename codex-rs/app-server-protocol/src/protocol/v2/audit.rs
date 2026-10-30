@@ -2,7 +2,19 @@ use crate::{JsonSchema, TS};
 use serde::{Deserialize, Serialize};
 
 /// Audex CLI contract, independent of the Codex executable's package version.
-pub const AUDIT_PROTOCOL_VERSION: u32 = 1;
+pub const AUDIT_PROTOCOL_VERSION: u32 = 2;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct AuditCapabilitiesParams {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AuditCapabilitiesResponse {
+    pub protocol_version: u32,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
@@ -38,6 +50,16 @@ pub struct AuditReadParams {
 #[ts(export_to = "v2/")]
 pub struct AuditCancelParams {
     pub run_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct AuditReleaseSlotParams {
+    pub run_id: String,
+    pub expected_revision: i64,
+    pub reason: String,
+    pub acknowledge_possible_concurrent_execution_and_charges: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -89,6 +111,8 @@ pub struct AuditRunView {
     /// A retained observation issue remains unresolved. This is non-terminal:
     /// the daemon continues observing the original operation, without resampling.
     pub observation_pending: bool,
+    /// The operator explicitly released capacity. This is not terminal evidence.
+    pub capacity_released: bool,
     pub revision: i64,
     pub cancellation_requested: bool,
     pub outcome: Option<String>,
@@ -121,9 +145,18 @@ pub struct AuditCancelResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct AuditReleaseSlotResponse {
+    pub run: AuditRunView,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct AuditListResponse {
     /// Required even for an empty list, so clients can check before submitting work.
     pub protocol_version: u32,
+    /// Newest-first metadata summaries. Results and reports are absent; audit/read
+    /// retrieves those artefacts with strict integrity verification.
     pub runs: Vec<AuditRunView>,
     pub next_cursor: Option<String>,
 }

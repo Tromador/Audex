@@ -46,6 +46,7 @@ pub(crate) enum AuditAction {
     Read(String),
     List(Option<String>),
     Cancel(String),
+    ReleaseSlot { run_id: String, reason: String },
 }
 
 #[derive(Debug, Parser)]
@@ -84,15 +85,25 @@ struct Input {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Reopen a run and keep observing through pending states until its outcome.
     Read {
         run_id: String,
     },
     List {
+        /// Continue towards older audits using the previous page's cursor.
         #[arg(long)]
         after: Option<String>,
     },
     Cancel {
         run_id: String,
+    },
+    ReleaseSlot {
+        run_id: String,
+        #[arg(
+            long,
+            default_value = "Operator explicitly released unresolved audit capacity"
+        )]
+        reason: String,
     },
 }
 
@@ -108,6 +119,9 @@ impl AuditCommand {
             Some(Command::Read { run_id }) => AuditAction::Read(run_id),
             Some(Command::List { after }) => AuditAction::List(after),
             Some(Command::Cancel { run_id }) => AuditAction::Cancel(run_id),
+            Some(Command::ReleaseSlot { run_id, reason }) => {
+                AuditAction::ReleaseSlot { run_id, reason }
+            }
             None => AuditAction::Start(StartArguments {
                 source: if let Some(path) = self.input.file {
                     AuditSource::File {
@@ -262,6 +276,32 @@ pub(crate) async fn execute(
             return serde_json::to_value(page).map_err(|error| error.to_string());
         }
         AuditAction::Read(id) => audits.read(id).await.map_err(|error| error.to_string())?,
+        AuditAction::ReleaseSlot { run_id, reason } => {
+            let current = audits
+                .read(run_id.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            let (decision, receiver) = oneshot::channel();
+            events.send(AppEvent::AuditReleaseConfirm {
+                thread_id,
+                run: current.clone(),
+                decision,
+            });
+            if !receiver.await.unwrap_or(false) {
+                return Err(
+                    "Capacity was not released: operator declined or disconnected".to_owned(),
+                );
+            }
+            audits
+                .release_slot(codex_app_server_protocol::AuditReleaseSlotParams {
+                    run_id,
+                    expected_revision: current.revision,
+                    reason,
+                    acknowledge_possible_concurrent_execution_and_charges: true,
+                })
+                .await
+                .map_err(|error| error.to_string())?
+        }
         AuditAction::Cancel(id) => {
             // The server, not this UI, commits intent before interrupting work.
             audits.cancel(id).await.map_err(|error| error.to_string())?
@@ -313,7 +353,10 @@ pub(crate) async fn execute(
                 return Err("Audit was not submitted: operator declined or disconnected".to_owned());
             }
             let key = params.request_key.clone();
-            audits.start(params).await.map_err(|error| format!("Audit start was not acknowledged: {error}. Request key: {key}. Inspect /audit list before any new submission; do not automatically retry."))?
+            audits.start(params).await.map_err(|error| {
+                let recovery = error.retained_run_id().map(|id|format!("Retrieve the retained run with /audit read {id}. ")).unwrap_or_default();
+                format!("Audit start was not acknowledged: {error}. Request key: {key}. {recovery}Inspect /audit list before any new submission; do not automatically retry.")
+            })?
         }
     };
     // The first view is delivered immediately. Observation is independent of the operator turn.
@@ -336,7 +379,7 @@ pub(crate) fn terminal(view: &AuditRunView) -> bool {
 }
 
 pub(crate) fn progress(view: &AuditRunView) -> String {
-    format!(
+    let mut text = format!(
         "Audit {}: {:?} / {:?}, revision {}{}{}",
         view.run_id,
         view.phase,
@@ -352,7 +395,11 @@ pub(crate) fn progress(view: &AuditRunView) -> String {
         } else {
             ""
         }
-    )
+    );
+    if view.capacity_released {
+        text.push_str("; capacity released by operator (execution outcome remains independent)");
+    }
+    text
 }
 
 fn report_context(view: &AuditRunView) -> Option<String> {
@@ -409,12 +456,10 @@ pub(crate) async fn observe(
             });
             return;
         }
-        // Pending is observation-only; the daemon owns any later reconciliation.
-        if view.observation_pending {
-            return;
-        }
+        // Pending suspends inference, not this client's observation. The daemon
+        // can recover without another submission or an operator reconnect.
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(1)) => {},
+            _ = tokio::time::sleep(Duration::from_secs(if view.observation_pending { 5 } else { 1 })) => {},
             _ = wake.notified() => {},
         }
         match audits.read(view.run_id.clone()).await {

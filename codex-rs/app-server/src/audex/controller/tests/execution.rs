@@ -16,6 +16,8 @@ use wiremock::{
     matchers::{method, path},
 };
 
+mod corrections;
+mod preparation;
 mod recovery;
 
 async fn real_fixture(
@@ -134,6 +136,9 @@ async fn fixture_with_hooks(
         // These tests observe durable history only, including with no lifecycle hints.
         listen,
     );
+    if let Some(cleanup) = &hooks.cleanup {
+        dispatch = dispatch.with_cleanup(cleanup.clone());
+    }
     dispatch.hooks = hooks;
     let dispatch = Arc::new(dispatch);
     (

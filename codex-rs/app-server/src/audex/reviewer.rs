@@ -33,6 +33,8 @@ Do not execute source or invent evidence. Report only supported findings with ma
 Do not seek or consume other reviewers' findings. Return only the required structured JSON result.
 Every finding is an unverified model claim, not a proven defect.";
 
+const OUTPUT_CONTRACT: &str = "Return AuditResultV1 JSON matching the supplied schema. Findings must use manifest paths and non-empty half-open byte ranges. Optional line numbers are 1-based and LF-delimited (CRLF is one delimiter); end_line is the line containing end_byte - 1. Omit both line numbers if unsure. An empty findings list is valid.";
+
 pub(super) struct ReviewerRequest {
     pub run_id: String,
     pub assignment_id: String,
@@ -285,6 +287,7 @@ pub(super) async fn prepare(
         "isolation":"isolated", "history":"new", "provider_fallback":false,
         "request_max_retries":0, "stream_max_retries":0,
         "output_schema_digest":sha256_hex(&serde_json::to_vec(&output_schema)?),
+        "output_contract_digest":sha256_hex(OUTPUT_CONTRACT.as_bytes()),
         "managed_requirements_digest":sha256_hex(&serde_json::to_vec(&managed)?),
     });
     let policy_digest = sha256_hex(&serde_json::to_vec(&policy)?);
@@ -318,7 +321,7 @@ pub(super) async fn prepare(
     let assignment = json!({
         "version":1, "run_id":request.run_id, "assignment_id":request.assignment_id,
         "snapshot_id":snapshot.snapshot_id(), "brief":request.brief,
-        "output_contract":"Return AuditResultV1 JSON matching the supplied schema. Findings must use manifest paths and non-empty byte ranges. An empty findings list is valid.",
+        "output_contract":OUTPUT_CONTRACT,
     });
     let mut context = BTreeMap::new();
     for (path, digest, bytes) in snapshot.context_documents().await? {

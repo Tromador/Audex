@@ -301,6 +301,11 @@ pub(crate) enum AppEvent {
         args: String,
     },
     AuditPrompt,
+    AuditReleaseConfirm {
+        thread_id: ThreadId,
+        run: codex_app_server_protocol::AuditRunView,
+        decision: tokio::sync::oneshot::Sender<bool>,
+    },
     AuditConfirm {
         thread_id: ThreadId,
         params: codex_app_server_protocol::AuditStartParams,

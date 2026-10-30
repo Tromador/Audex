@@ -37,6 +37,7 @@ type HistoryHook = Arc<
 pub(super) struct DispatchTestHooks {
     pub checkpoint: Option<Arc<dyn Fn(&'static str) -> BoxFuture<'static, ()> + Send + Sync>>,
     pub history: Option<HistoryHook>,
+    pub cleanup: Option<Listen>,
 }
 
 pub(super) struct CodexDispatch {
@@ -45,6 +46,8 @@ pub(super) struct CodexDispatch {
     threads: Arc<ThreadManager>,
     history: Arc<dyn ThreadStore>,
     listen: Listen,
+    cleanup: Option<Listen>,
+    wake: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     store: OnceCell<AuditStore>,
     #[cfg(test)]
     pub hooks: DispatchTestHooks,
@@ -107,6 +110,7 @@ impl DispatchFailure {
                 AuditStoreError::Migration(_) => "audit_store_migration_error".to_string(),
                 AuditStoreError::Json(_) => "audit_store_json_error".to_string(),
                 AuditStoreError::Io(error) => format!("io:{:?}", error.kind()),
+                AuditStoreError::Snapshot(_) => "snapshot_verification_unavailable".to_string(),
             }
         } else if let Some(error) = error.downcast_ref::<codex_protocol::error::CodexErr>() {
             let kind: &'static str =
@@ -163,9 +167,61 @@ impl CodexDispatch {
             threads,
             history,
             listen,
+            cleanup: None,
+            wake: std::sync::OnceLock::new(),
             store: OnceCell::new(),
             #[cfg(test)]
             hooks: DispatchTestHooks::default(),
+        }
+    }
+
+    pub(super) fn set_wake(&self, wake: Arc<tokio::sync::Notify>) {
+        let _ = self.wake.set(wake);
+    }
+
+    pub(super) fn with_cleanup(mut self, cleanup: Listen) -> Self {
+        self.cleanup = Some(cleanup);
+        self
+    }
+
+    async fn cleanup_unsubmitted(&self, operation: &str, id: ThreadId, thread: Arc<CodexThread>) {
+        if !matches!(
+            async {
+                self.store()
+                    .await?
+                    .submission_boundary(operation)
+                    .await
+                    .map_err(anyhow::Error::from)
+            }
+            .await,
+            Ok(SubmissionBoundary::Unsubmitted)
+        ) {
+            return;
+        }
+        self.cleanup_runtime(id, thread).await;
+    }
+
+    async fn cleanup_runtime(&self, id: ThreadId, thread: Arc<CodexThread>) {
+        if !matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                thread.shutdown_and_wait()
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            tracing::warn!(thread_id=%id,"Unsubmitted Audex thread cleanup did not complete; no inference will be retried");
+            return;
+        }
+        if self
+            .threads
+            .remove_thread_if_matches(&id, &thread)
+            .await
+            .is_some()
+            && let Some(cleanup) = &self.cleanup
+            && cleanup(id, thread).await.is_err()
+        {
+            tracing::warn!(thread_id=%id,"Unsubmitted Audex listener cleanup failed");
         }
     }
 
@@ -201,7 +257,20 @@ impl CodexDispatch {
                 model: input.model,
                 reasoning_effort: input.reasoning_effort,
             },
-            Arc::new(|_| {}),
+            {
+                let wake = self.wake.get().cloned();
+                Arc::new(move |observation| {
+                    if matches!(
+                        observation,
+                        super::lifecycle::ReviewerObservation::Stopped { .. }
+                            | super::lifecycle::ReviewerObservation::Aborted { .. }
+                            | super::lifecycle::ReviewerObservation::Error { .. }
+                    ) && let Some(wake) = &wake
+                    {
+                        wake.notify_one();
+                    }
+                })
+            },
         ))
         .await?;
         anyhow::ensure!(
@@ -251,6 +320,40 @@ impl CodexDispatch {
                 "cancel_requested",
             )));
         }
+        if !store
+            .renew_preparation_lease(
+                &request.operation_id,
+                &request.lease_owner,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await
+            .map_err(|e| DispatchFailure::new("renew_preparation_lease", e, true))?
+        {
+            return Ok(Observation::Unsubmitted(diagnostic(
+                "preparation_lease",
+                "expired_or_fenced",
+            )));
+        }
+        let renewal_store = store.clone();
+        let operation = request.operation_id.clone();
+        let owner = request.lease_owner.clone();
+        let renewal = PreparationLease(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if !matches!(
+                    renewal_store
+                        .renew_preparation_lease(
+                            &operation,
+                            &owner,
+                            chrono::Utc::now().timestamp_millis()
+                        )
+                        .await,
+                    Ok(true)
+                ) {
+                    break;
+                }
+            }
+        }));
         let (_, mut prepared) = self
             .prepare(&request.operation_id)
             .await
@@ -280,6 +383,7 @@ impl CodexDispatch {
             .thread;
         #[cfg(test)]
         self.checkpoint("thread_created").await;
+        let preparation: Result<bool, DispatchFailure> = async {
         (self.listen)(thread_id, Arc::clone(&thread))
             .await
             .map_err(|e| DispatchFailure::new("install_listener", e, true))?;
@@ -307,15 +411,28 @@ impl CodexDispatch {
         }
         #[cfg(test)]
         self.checkpoint("history_materialised").await;
-        if !store
+        let admitted=store
             .begin_submission(
                 &request.operation_id,
                 &request.lease_owner,
                 chrono::Utc::now().timestamp_millis(),
             )
             .await
-            .map_err(|e| DispatchFailure::new("persist_submission_boundary", e, true))?
-        {
+            .map_err(|e| DispatchFailure::new("persist_submission_boundary", e, true))?;
+        Ok(admitted)
+        }.await;
+        drop(renewal);
+        let admitted = match preparation {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                self.cleanup_unsubmitted(&request.operation_id, thread_id, thread)
+                    .await;
+                return Err(error);
+            }
+        };
+        if !admitted {
+            self.cleanup_unsubmitted(&request.operation_id, thread_id, thread)
+                .await;
             return Ok(Observation::Unsubmitted(diagnostic(
                 "submission_admission",
                 "cancelled_expired_or_superseded",
@@ -344,9 +461,13 @@ impl CodexDispatch {
                     WorkState::Live,
                 ))
             }
-            Ok(StartIfIdleSubmission::NotSubmitted { .. }) => Ok(Observation::Rejected(
-                diagnostic("submit_turn", "core_declined_input"),
-            )),
+            Ok(StartIfIdleSubmission::NotSubmitted { .. }) => {
+                self.cleanup_runtime(thread_id, thread).await;
+                Ok(Observation::Rejected(diagnostic(
+                    "submit_turn",
+                    "core_declined_input",
+                )))
+            }
             Err(error) => Err(DispatchFailure::new("submit_turn", error, false)),
         }
     }
@@ -414,11 +535,15 @@ impl CodexDispatch {
                 )));
             }
         };
-        let (_, prepared) = self
-            .prepare(operation)
+        // Observation does not construct a reviewer, consult mutable provider
+        // configuration, or resolve today's model catalogue. Verify retained evidence.
+        let (_, policy_json, retained_digest, _) = store
+            .controller_input(&run.run_id)
             .await
-            .map_err(|e| DispatchFailure::new("observation_preflight", e, false))?;
-        if prepared.policy_digest != policy {
+            .map_err(|e| DispatchFailure::new("retained_policy", e, false))?;
+        if super::snapshot::manifest::sha256_hex(policy_json.as_bytes()) != retained_digest
+            || retained_digest != policy
+        {
             return Ok(Observation::Uncertain(diagnostic(
                 "execution_identity",
                 "policy_binding_mismatch",
@@ -465,10 +590,21 @@ impl CodexDispatch {
             thread.wait_until_terminated().await;
             history = self.read_history(thread_id).await?;
         }
-        if history.thread_id != thread_id || !history.items.iter().any(|item| matches!(item,
-            RolloutItem::SessionMeta(meta) if meta.meta.id == thread_id && super::controller::is_reviewer_source(meta.meta.thread_source.as_ref()))) {
+        if history.thread_id != thread_id || history.items.iter().any(|item| matches!(item,
+            RolloutItem::SessionMeta(meta) if meta.meta.id != thread_id || !super::controller::is_reviewer_source(meta.meta.thread_source.as_ref()))) {
             return Ok(Observation::Uncertain(diagnostic("history_identity", "foreign_persisted_thread")));
         }
+        if !history
+            .items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::SessionMeta(_)))
+        {
+            return Ok(Observation::Deferred(diagnostic(
+                "history_identity",
+                "session_metadata_unavailable",
+            )));
+        }
+        let accepted_already = boundary == SubmissionBoundary::Accepted && retained_turn.is_some();
         let mut turn = retained_turn;
         let trigger = format!("audex:{operation}");
         for item in &history.items {
@@ -494,10 +630,12 @@ impl CodexDispatch {
                 "turn_acceptance_unconfirmed",
             )));
         };
-        store
-            .execution_accepted(operation, &turn)
-            .await
-            .map_err(|e| DispatchFailure::new("persist_acceptance", e, false))?;
+        if !accepted_already {
+            store
+                .execution_accepted(operation, &turn)
+                .await
+                .map_err(|e| DispatchFailure::new("persist_acceptance", e, false))?;
+        }
         if let Some(info) = history.items.iter().rev().find_map(|item| match item {
             RolloutItem::EventMsg(EventMsg::TokenCount(event)) => event.info.as_ref(),
             _ => None,
@@ -523,7 +661,7 @@ impl CodexDispatch {
         {
             if interrupt {
                 if run.control_intent != "cancel_requested" {
-                    return Ok(Observation::Uncertain(diagnostic(
+                    return Ok(Observation::Deferred(diagnostic(
                         "interrupt",
                         "missing_durable_intent",
                     )));
@@ -547,6 +685,13 @@ impl CodexDispatch {
             "terminal_observation",
             "terminal_history_unconfirmed",
         )))
+    }
+}
+
+struct PreparationLease(tokio::task::JoinHandle<()>);
+impl Drop for PreparationLease {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -593,6 +738,28 @@ fn accepted(
 }
 
 impl Dispatch for CodexDispatch {
+    fn cleanup_preparation(&self, operation: String) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let Ok(store) = self.store().await else {
+                return;
+            };
+            let Ok(run) = store.run_for_operation(&operation).await else {
+                return;
+            };
+            if !matches!(run.operation_state, OperationState::Failed) {
+                return;
+            }
+            let Ok(Some((id, _, _))) = store.execution(&operation).await else {
+                return;
+            };
+            let Ok(id) = ThreadId::from_string(&id) else {
+                return;
+            };
+            if let Ok(thread) = self.threads.get_thread(id).await {
+                self.cleanup_unsubmitted(&operation, id, thread).await;
+            }
+        })
+    }
     fn start(&self, request: DispatchRequest) -> BoxFuture<'_, Observation> {
         Box::pin(async move {
             Box::pin(self.start_inner(request))

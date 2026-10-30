@@ -1,6 +1,9 @@
 use super::*;
 
+mod corrections;
 mod execution;
+mod remaining;
+mod residual;
 use codex_models_manager::{ModelOrigin, manager::StaticModelsManager};
 use codex_protocol::openai_models::ModelsResponse;
 use serde_json::{Value, json};
@@ -12,6 +15,7 @@ use std::sync::{
 
 #[derive(Default)]
 struct Fake {
+    observations: AtomicUsize,
     starts: AtomicUsize,
     work: StdMutex<HashMap<String, Observation>>,
     root: StdMutex<Option<AbsolutePathBuf>>,
@@ -84,6 +88,7 @@ impl Dispatch for Fake {
     }
     fn inspect(&self, operation: String) -> BoxFuture<'_, Observation> {
         Box::pin(async move {
+            self.observations.fetch_add(1, Ordering::SeqCst);
             let observed = self
                 .work
                 .lock()
@@ -100,6 +105,7 @@ impl Dispatch for Fake {
     }
     fn interrupt(&self, operation: String) -> BoxFuture<'_, Observation> {
         Box::pin(async move {
+            self.observations.fetch_add(1, Ordering::SeqCst);
             let root = self.root.lock().expect("root lock").clone().expect("root");
             let store = AuditStore::open(root).await.expect("observer store");
             let ids = store.list_non_terminal_runs().await.expect("runs");
@@ -405,7 +411,9 @@ async fn crash_windows_use_evidence_without_replaying_dispatch() {
         recovered.tick().await.expect("recover");
         let view = read(&recovered, &id).await;
         match mode {
-            "planned" | "matching" | "live" => assert_eq!(view["phase"], "reviewing", "{mode}"),
+            "planned" | "matching" | "live" | "absent" | "ambiguous" => {
+                assert_eq!(view["phase"], "reviewing", "{mode}")
+            }
             "terminal" => assert_eq!(view["phase"], "reporting"),
             _ => assert_eq!(view["phase"], "failed", "{mode}"),
         }
@@ -416,13 +424,27 @@ async fn crash_windows_use_evidence_without_replaying_dispatch() {
             .load_run(&id)
             .await
             .expect("run");
-        if matches!(mode, "absent" | "ambiguous" | "mismatched") {
-            assert_eq!(recovered_run.assignment_state, AssignmentState::Unknown);
-            assert_eq!(view["operationState"], "unknown");
-            assert_eq!(view["observationPending"], false);
+        if matches!(mode, "absent" | "ambiguous") {
+            // Missing outcome evidence is not proof of termination
+            // and must not implicitly release the global capacity reservation.
+            assert_eq!(
+                recovered_run.assignment_state,
+                if mode == "ambiguous" {
+                    AssignmentState::Running
+                } else {
+                    AssignmentState::Dispatching
+                }
+            );
+            assert_eq!(view["observationPending"], true);
+            assert_eq!(view["capacityReleased"], false);
         }
         if matches!(mode, "interrupted" | "failed" | "rejected") {
             assert_eq!(recovered_run.assignment_state, AssignmentState::Failed);
+        }
+        if mode == "mismatched" {
+            assert_eq!(recovered_run.operation_state, OperationState::Unknown);
+            assert_eq!(recovered_run.assignment_state, AssignmentState::Unknown);
+            assert_eq!(view["observationPending"], false);
         }
         assert_eq!(
             fake.starts.load(Ordering::SeqCst),

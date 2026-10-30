@@ -4,6 +4,9 @@ mod daemon_continuation;
 #[path = "daemon_snapshot.rs"]
 mod daemon_snapshot;
 
+#[path = "audex_access.rs"]
+mod audex_access;
+
 mod workspace_switching;
 
 use super::persisted_resume_settings::PersistedResumeSettings;
@@ -1214,6 +1217,10 @@ impl ThreadRequestProcessor {
         self.ensure_listener_task_running(id, thread, state)
             .await
             .map_err(|error| anyhow::anyhow!("{}", error.message))
+    }
+
+    pub(crate) async fn cleanup_audex(&self, id: ThreadId, _thread: Arc<CodexThread>) {
+        self.finalize_thread_teardown(id).await;
     }
 
     async fn ensure_conversation_listener(
@@ -2959,6 +2966,11 @@ impl ThreadRequestProcessor {
                 .map_err(thread_store_list_error)?;
 
             for result in page.items {
+                if crate::audex::controller::is_reviewer_source(
+                    result.thread.thread_source.as_ref(),
+                ) {
+                    continue;
+                }
                 let source = with_thread_spawn_agent_metadata(
                     result.thread.source.clone(),
                     result.thread.agent_nickname.clone(),
@@ -3036,6 +3048,9 @@ impl ThreadRequestProcessor {
         let mut data = Vec::new();
         for thread_id in self.thread_manager.list_thread_ids().await {
             if let Ok(thread) = self.thread_manager.get_thread(thread_id).await
+                && !crate::audex::controller::is_reviewer_source(
+                    thread.config_snapshot().await.thread_source.as_ref(),
+                )
                 && thread
                     .thread_extension_data()
                     .get::<SampleThread>()
@@ -6076,6 +6091,9 @@ impl ThreadRequestProcessor {
 
             let mut filtered = Vec::with_capacity(page.items.len());
             for it in page.items {
+                if crate::audex::controller::is_reviewer_source(it.thread_source.as_ref()) {
+                    continue;
+                }
                 let source = with_thread_spawn_agent_metadata(
                     it.source.clone(),
                     it.agent_nickname.clone(),

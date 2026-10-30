@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "acknowledgePossibleConcurrentExecutionAndCharges": {
+      "type": "boolean"
+    },
+    "expectedRevision": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "runId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "acknowledgePossibleConcurrentExecutionAndCharges",
+    "expectedRevision",
+    "reason",
+    "runId"
+  ],
+  "title": "AuditReleaseSlotParams",
+  "type": "object"
+}

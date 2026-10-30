@@ -17,6 +17,7 @@ impl LocalAgentControl {
         thread_id: ThreadId,
         source: SessionSource,
     ) -> CodexResult<(LiveAgent, ThreadConfigSnapshot)> {
+        self.ensure_agent_target_access(thread_id).await?;
         let manager = self.runtime.upgrade()?;
         let thread = match manager.get_thread(thread_id).await {
             Ok(thread) => thread,

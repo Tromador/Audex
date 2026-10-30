@@ -943,6 +943,142 @@ async fn send_input_errors_when_thread_missing() {
 }
 
 #[tokio::test]
+async fn agent_tools_cannot_send_to_a_service_owned_audex_reviewer() {
+    let server = core_test_support::responses::start_mock_server().await;
+    let (home, mut config) = test_config().await;
+    config.model_provider.base_url = Some(server.uri());
+    config.model_provider.request_max_retries = Some(0);
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let mut options = StartThreadOptions::new(harness.config.clone());
+    options.thread_source = Some(codex_protocol::protocol::ThreadSource::Feature(
+        "audex-reviewer".into(),
+    ));
+    options
+        .thread_extension_init
+        .insert(codex_extension_api::SessionIsolation::Isolated);
+    let private = harness
+        .manager
+        .start_thread(options)
+        .await
+        .expect("reviewer root");
+    let result = harness
+        .control
+        .send(SendRequest {
+            caller: ThreadId::new(),
+            target: AgentTarget::Id(private.thread_id),
+            resume_config: harness.config.clone(),
+            input: AgentInput::UserInput(text_input("Unauthorised extra reviewer inference")),
+            start_options: Default::default(),
+        })
+        .await;
+    assert!(
+        harness
+            .control
+            .interrupt_agent(private.thread_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        harness
+            .control
+            .close_agent(private.thread_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        harness
+            .control
+            .subscribe_status(private.thread_id)
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        harness.control.get_status(private.thread_id).await,
+        AgentStatus::NotFound
+    ));
+    private.thread.ensure_rollout_materialized().await;
+    private
+        .thread
+        .checkpoint_preparation()
+        .await
+        .expect("retained reviewer ownership");
+    private
+        .thread
+        .flush_rollout()
+        .await
+        .expect("durable private metadata");
+    private
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown fixture");
+    assert!(
+        result
+            .err()
+            .expect("ordinary agent tools must reject a private reviewer")
+            .to_string()
+            .contains("owned by the audit controller")
+    );
+    harness.manager.remove_thread(&private.thread_id).await;
+    assert!(
+        harness
+            .control
+            .send_input(
+                private.thread_id,
+                text_input("cold injection"),
+                Default::default()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        harness
+            .control
+            .resume_agent(
+                harness.config.clone(),
+                private.thread_id,
+                SessionSource::Exec
+            )
+            .await
+            .expect_err("cold owner check")
+            .to_string()
+            .contains("owned by the audit controller")
+    );
+    assert!(
+        harness.manager.get_thread(private.thread_id).await.is_err(),
+        "denied cold resume must not reconstruct the private reviewer"
+    );
+    let requests = server.received_requests().await.expect("local requests");
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.method == http::Method::POST),
+        "unexpected local requests: {:?}",
+        requests
+            .iter()
+            .map(|request| (&request.method, request.url.path()))
+            .collect::<Vec<_>>()
+    );
+    let (ordinary_id, ordinary) = harness.start_thread().await;
+    let accepted = harness
+        .control
+        .send_input(
+            ordinary_id,
+            text_input("Ordinary agent input remains allowed"),
+            Default::default(),
+        )
+        .await;
+    ordinary
+        .shutdown_and_wait()
+        .await
+        .expect("ordinary fixture shutdown");
+    assert!(
+        accepted.is_ok(),
+        "ordinary agent admission must remain available"
+    );
+}
+
+#[tokio::test]
 async fn get_status_returns_not_found_for_missing_thread() {
     let harness = AgentControlHarness::new().await;
     let status = harness.control.get_status(ThreadId::new()).await;

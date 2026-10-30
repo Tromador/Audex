@@ -20,6 +20,7 @@ impl LocalAgentControl {
         &self,
         agent_id: ThreadId,
     ) -> CodexResult<StatusSubscription> {
+        self.ensure_agent_target_access(agent_id).await?;
         let manager = self.runtime.upgrade()?;
         let thread = manager.get_thread(agent_id).await?;
         // Subscribe before reading settings; mark the initial status seen only afterward.

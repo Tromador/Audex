@@ -10,6 +10,7 @@ fn audit_commands_preserve_explicit_source_and_selection() {
         "list --after cursor",
         "read run",
         "cancel run",
+        "release-slot run --reason 'Accept overlap'",
     ] {
         assert!(parse_command(args).is_ok(), "{args}");
     }
@@ -44,6 +45,10 @@ fn conversational_audits_use_tools_with_strict_arguments() {
     );
     assert!(tool_action("audit_start", json!({"source":{"type":"snippet","name":"x.rs","content":"source"},"permissions":"danger-full-access"})).is_err());
     assert!(tool_action("audit_cancel", json!({"runId":"run","retry":true})).is_err());
+    assert!(
+        tool_action("audit_release_slot", json!({"runId":"run"})).is_err(),
+        "models cannot bypass the operator-only release command"
+    );
 }
 
 #[test]
@@ -55,6 +60,7 @@ fn audit_report_is_untrusted_conversation_context_not_an_instruction_override() 
         phase: AuditRunPhase::Completed,
         operation_state: codex_app_server_protocol::AuditOperationState::Committed,
         observation_pending: false,
+        capacity_released: false,
         revision: 4,
         cancellation_requested: false,
         outcome: None,

@@ -500,6 +500,11 @@ enum GetAccountRateLimitsParamsTypeScript {
 }
 
 client_request_definitions! {
+    AuditCapabilities => "audit/capabilities" {
+        params: v2::AuditCapabilitiesParams,
+        serialization: None,
+        response: v2::AuditCapabilitiesResponse,
+    },
     AuditStart => "audit/start" {
         params: v2::AuditStartParams,
         serialization: None,
@@ -519,6 +524,11 @@ client_request_definitions! {
         params: v2::AuditCancelParams,
         serialization: None,
         response: v2::AuditCancelResponse,
+    },
+    AuditReleaseSlot => "audit/release-slot" {
+        params: v2::AuditReleaseSlotParams,
+        serialization: None,
+        response: v2::AuditReleaseSlotResponse,
     },
     Initialize => "initialize" {
         params: v1::InitializeParams,

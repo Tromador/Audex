@@ -36,6 +36,10 @@
         "cancellationRequested": {
           "type": "boolean"
         },
+        "capacityReleased": {
+          "description": "The operator explicitly released capacity. This is not terminal evidence.",
+          "type": "boolean"
+        },
         "observationPending": {
           "description": "A retained observation issue remains unresolved. This is non-terminal: the daemon continues observing the original operation, without resampling.",
           "type": "boolean"
@@ -79,6 +83,7 @@
       "required": [
         "assignmentId",
         "cancellationRequested",
+        "capacityReleased",
         "observationPending",
         "operationState",
         "phase",
@@ -103,6 +108,7 @@
       "type": "integer"
     },
     "runs": {
+      "description": "Newest-first metadata summaries. Results and reports are absent; audit/read retrieves those artefacts with strict integrity verification.",
       "items": {
         "$ref": "#/definitions/AuditRunView"
       },

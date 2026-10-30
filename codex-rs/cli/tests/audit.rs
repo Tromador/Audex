@@ -414,6 +414,118 @@ async fn missing_daemon_is_a_local_error_without_service_start() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_capacity_release_after_runtime_loss_allows_another_audit_without_replay()
+-> Result<()> {
+    let server = responses::start_mock_server().await;
+    provider(&server, "blocked").await;
+    let daemon = configured(&server)?;
+    let source = daemon.home.path().join("first.rs");
+    std::fs::write(&source, "fn main() {}\n")?;
+    daemon.lifecycle("start")?;
+    let submitted = audit(&daemon)
+        .arg("--file")
+        .arg(&source)
+        .arg("--detach")
+        .output()?;
+    check(&submitted, 0)?;
+    let first = String::from_utf8(submitted.stdout)?.trim().to_owned();
+    request_seen(&server).await?;
+    let pid = daemon.pid("app-server.pid")?;
+    signal(pid, libc::SIGKILL)?;
+    wait_for_exit(pid)?;
+    let pool = fixture_db(&daemon).await?;
+    sqlx::query("UPDATE operations SET lease_expires_at_ms=0")
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    daemon.lifecycle("start")?;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let output = audit(&daemon).args(["read", &first]).output()?;
+            check(&output, 5)?;
+            if String::from_utf8_lossy(&output.stderr).contains("observation pending") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    // Cancellation follows too: pending observation must not drop the watch.
+    let mut cancellation = audit(&daemon)
+        .args(["cancel", &first])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let read = audit(&daemon).args(["read", &first]).output()?;
+            check(&read, 5)?;
+            if String::from_utf8_lossy(&read.stderr).contains("cancellation requested") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert!(
+        cancellation.try_wait()?.is_none(),
+        "pending cancellation stays attached"
+    );
+    signal(cancellation.id(), libc::SIGINT)?;
+    check(&cancellation.wait_with_output()?, 130)?;
+    let second_source = daemon.home.path().join("second.rs");
+    std::fs::write(&second_source, "fn independent() {}\n")?;
+    let second = audit(&daemon)
+        .arg("--file")
+        .arg(&second_source)
+        .arg("--detach")
+        .output()?;
+    check(&second, 0)?;
+    let second = String::from_utf8(second.stdout)?.trim().to_owned();
+    check(&audit(&daemon).args(["read", &second]).output()?, 5)?;
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    check(
+        &audit(&daemon)
+            .args(["release-slot", &first, "--reason", "Accept overlap"])
+            .output()?,
+        2,
+    )?;
+    for _ in 0..2 {
+        let output = audit(&daemon)
+            .args([
+                "release-slot",
+                &first,
+                "--acknowledge-concurrent-execution-and-charges",
+                "--reason",
+                "Accept overlap",
+            ])
+            .output()?;
+        check(&output, 5)?;
+        assert!(String::from_utf8_lossy(&output.stderr).contains("capacity released by operator"));
+    }
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while server.received_requests().await.unwrap().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    let old = audit(&daemon).args(["read", &first]).output()?;
+    check(&old, 5)?;
+    assert!(String::from_utf8_lossy(&old.stderr).contains("observation pending"));
+    assert!(String::from_utf8_lossy(&old.stderr).contains("capacity released by operator"));
+    check(&audit(&daemon).args(["cancel", &second]).output()?, 3)?;
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        2,
+        "one sample per independent audit; original is never replayed"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn incompatible_protocol_and_missing_selection_fail_before_submission() -> Result<()> {
     use codex_app_server_protocol::AUDIT_PROTOCOL_VERSION;
     use codex_app_server_transport::{app_server_control_socket_path, bind_private_daemon_socket};
@@ -481,7 +593,7 @@ async fn incompatible_protocol_and_missing_selection_fail_before_submission() ->
                         methods.push(method.to_string());
                         let result = match method {
                             "initialize" => json!({"userAgent":"codex/0.0.0"}),
-                            "audit/list" => {
+                            "audit/capabilities" => {
                                 let mut list = json!({"runs":[],"nextCursor":null});
                                 if let Some(version) = version {
                                     list["protocolVersion"] = json!(version);
@@ -526,15 +638,145 @@ async fn incompatible_protocol_and_missing_selection_fail_before_submission() ->
         assert_eq!(
             methods,
             if version == Some(AUDIT_PROTOCOL_VERSION) {
-                vec!["initialize", "audit/list", "config/read"]
+                vec!["initialize", "audit/capabilities", "config/read"]
             } else {
-                vec!["initialize", "audit/list"]
+                vec!["initialize", "audit/capabilities"]
             }
         );
         assert!(
             !daemon.home.path().join("audex").exists(),
             "no snapshot or run may be created by preflight"
         );
+        assert!(
+            provider
+                .received_requests()
+                .await
+                .context("requests")?
+                .is_empty()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attached_clients_follow_pending_recovery_while_nonfollowing_reads_return_pending()
+-> Result<()> {
+    use codex_app_server_transport::{app_server_control_socket_path, bind_private_daemon_socket};
+    use tokio_tungstenite::tungstenite::Message;
+
+    for mode in ["read", "follow", "attached", "cancel"] {
+        let provider = responses::start_mock_server().await;
+        let daemon = configured(&provider)?;
+        let source = daemon.home.path().join("example.rs");
+        std::fs::write(&source, b"fn main() {}\n")?;
+        let socket = app_server_control_socket_path(daemon.home.path())?;
+        let (mut listener, guard) = bind_private_daemon_socket(socket.as_path()).await?;
+        let peer = tokio::spawn(async move {
+            let _guard = guard;
+            let mut stream = tokio_tungstenite::accept_async(listener.accept().await?).await?;
+            let mut reads = 0;
+            let mut starts = 0;
+            while let Some(message) = stream.next().await {
+                let Message::Text(text) = message? else {
+                    break;
+                };
+                let request: Value = serde_json::from_str(&text)?;
+                if request.get("id").is_none() {
+                    continue;
+                }
+                let method = request["method"].as_str().context("method")?;
+                let result = match method {
+                    "initialize" => json!({"userAgent":"codex/0.0.0"}),
+                    "audit/capabilities" => json!({"protocolVersion":2}),
+                    "audit/start" | "audit/read" | "audit/cancel" => {
+                        if method == "audit/start" {
+                            starts += 1;
+                        }
+                        reads += 1;
+                        let complete = reads >= 4;
+                        json!({"run":{
+                            "runId":"retained-run","snapshotId":"snapshot","assignmentId":"assignment",
+                            "revision":if complete {3} else if reads >= 3 {2} else {1},
+                            "phase":if complete {if mode == "cancel" {"cancelled"} else {"completed"}} else {"reviewing"},
+                            "operationState":if complete {if mode == "cancel" {"failed"} else {"committed"}} else {"accepted"},
+                            "observationPending":reads < 3,"capacityReleased":false,
+                            "cancellationRequested":mode == "cancel","outcome":null,"rawResult":null,
+                            "report":if complete && mode != "cancel" {Some("# Recovered report\n")} else {None}
+                        }})
+                    }
+                    _ => anyhow::bail!("unexpected client request: {method}"),
+                };
+                stream
+                    .send(Message::Text(
+                        json!({"jsonrpc":"2.0","id":request["id"],"result":result})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await?;
+                if (2..4).contains(&reads) {
+                    // Duplicate hints must not create a busy read loop or reset
+                    // the fallback deadline on an unchanged pending revision.
+                    stream
+                        .send(Message::Text(
+                            json!({"jsonrpc":"2.0","method":"audit/progress",
+                        "params":{"runId":"retained-run","revision":1,"phase":"reviewing"}})
+                            .to_string()
+                            .into(),
+                        ))
+                        .await?;
+                }
+            }
+            anyhow::Ok((reads, starts))
+        });
+        let mut command = audit(&daemon);
+        match mode {
+            "attached" => {
+                command.arg("--file").arg(&source).args([
+                    "--model",
+                    "audit-test",
+                    "--provider",
+                    "audit_fixture",
+                ]);
+            }
+            "read" => {
+                command.args(["read", "retained-run"]);
+            }
+            "cancel" => {
+                command.args(["cancel", "retained-run"]);
+            }
+            _ => {
+                command.args(["read", "retained-run", "--follow"]);
+            }
+        }
+        let began = std::time::Instant::now();
+        let output = tokio::time::timeout(
+            Duration::from_secs(15),
+            tokio::task::spawn_blocking(move || command.output()),
+        )
+        .await???;
+        check(
+            &output,
+            if mode == "read" {
+                5
+            } else if mode == "cancel" {
+                3
+            } else {
+                0
+            },
+        )?;
+        if mode != "read" {
+            assert!(
+                began.elapsed() >= Duration::from_secs(5),
+                "unchanged hints must not force repeated reads"
+            );
+        }
+        assert!(String::from_utf8_lossy(&output.stderr).contains("observation pending"));
+        if mode == "follow" || mode == "attached" {
+            assert_eq!(output.stdout, b"# Recovered report\n");
+        }
+        let (reads, starts) = tokio::time::timeout(Duration::from_secs(5), peer).await???;
+        assert_eq!(reads, if mode == "read" { 1 } else { 4 });
+        assert_eq!(starts, usize::from(mode == "attached"));
         assert!(
             provider
                 .received_requests()

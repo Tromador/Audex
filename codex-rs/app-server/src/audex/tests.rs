@@ -1,4 +1,5 @@
 use super::result::AuditFindingV1;
+mod evidence_lines;
 use super::result::AuditResultV1;
 use super::result::FindingConfidence;
 use super::result::FindingEvidenceV1;
@@ -157,7 +158,7 @@ async fn migrations_pragmas_reopen_and_recovery_are_durable() {
     );
     assert_eq!(
         store.applied_migrations().await.expect("read migrations"),
-        vec![1, 2, 3, 4]
+        vec![1, 2, 3, 4, 5, 6, 7]
     );
     let created = store
         .create_run(&create_request(&snapshot, "reopen"))
@@ -414,7 +415,7 @@ async fn seeded_findings_persist_and_report_is_reproducible_after_reopen() {
     let raw = serde_json::to_vec(&valid_result(&snapshot, &created.assignment_id))
         .expect("serialize result");
     let committed = store
-        .commit_seeded_result(&created.operation_id, 3, snapshot.manifest(), &raw)
+        .commit_seeded_result(&created.operation_id, 3, &snapshot, &raw)
         .await
         .expect("commit result");
     let ResultCommitOutcome::Committed {
@@ -430,7 +431,7 @@ async fn seeded_findings_persist_and_report_is_reproducible_after_reopen() {
     assert!(temp.path().join("audex").join(relative_path).is_file());
     assert!(matches!(
         store
-            .commit_seeded_result(&created.operation_id, 3, snapshot.manifest(), &raw)
+            .commit_seeded_result(&created.operation_id, 3, &snapshot, &raw)
             .await
             .expect("repeat result commit"),
         ResultCommitOutcome::AlreadyCommitted { revision: 4, .. }
@@ -501,7 +502,7 @@ async fn empty_findings_succeed_and_invalid_seeded_results_fail_terminally() {
     .expect("serialize empty result");
     assert!(matches!(
         store
-            .commit_seeded_result(&empty.operation_id, 3, snapshot.manifest(), &raw)
+            .commit_seeded_result(&empty.operation_id, 3, &snapshot, &raw)
             .await
             .expect("commit empty result"),
         ResultCommitOutcome::Committed { revision: 4, .. }
@@ -518,7 +519,7 @@ async fn empty_findings_succeed_and_invalid_seeded_results_fail_terminally() {
     let raw = br#"{"schema_version":1,"not":"the required result"}"#;
     assert!(matches!(
         store
-            .commit_seeded_result(&invalid.operation_id, 3, snapshot.manifest(), raw)
+            .commit_seeded_result(&invalid.operation_id, 3, &snapshot, raw)
             .await
             .expect("record invalid result"),
         ResultCommitOutcome::Rejected { revision: 4, .. }

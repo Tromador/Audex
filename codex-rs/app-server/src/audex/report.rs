@@ -1,7 +1,7 @@
 use super::snapshot::manifest::sha256_hex;
 use serde::Serialize;
 
-pub(super) const REPORT_FORMAT_VERSION: u32 = 1;
+pub(super) const REPORT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Serialize)]
 pub(super) struct ReportInput {
@@ -28,6 +28,7 @@ pub(super) struct ReportFinding {
 
 #[derive(Serialize)]
 pub(super) struct ReportEvidence {
+    pub lines_verified: bool,
     pub ordinal: i64,
     pub description: String,
     pub manifest_path: String,
@@ -45,8 +46,8 @@ pub(super) struct RenderedReport {
 }
 
 pub(super) fn render(input: &ReportInput) -> Result<RenderedReport, serde_json::Error> {
-    let input_digest = sha256_hex(&serde_json::to_vec(input)?);
-    let id = format!("audex-report-v1:sha256:{input_digest}");
+    let input_digest = sha256_hex(&serde_json::to_vec(&(REPORT_FORMAT_VERSION, input))?);
+    let id = format!("audex-report-v{REPORT_FORMAT_VERSION}:sha256:{input_digest}");
     let mut markdown = String::new();
     push_line(&mut markdown, "# Audex Audit Report");
     push_line(&mut markdown, "");
@@ -118,7 +119,13 @@ pub(super) fn render(input: &ReportInput) -> Result<RenderedReport, serde_json::
                     evidence.end_byte
                 );
                 if let (Some(start), Some(end)) = (evidence.start_line, evidence.end_line) {
-                    line.push_str(&format!(", lines `{start}..{end}`"));
+                    if evidence.lines_verified {
+                        line.push_str(&format!(", verified lines `{start}..{end}`"));
+                    } else {
+                        line.push_str(&format!(
+                            ", reviewer line claim `{start}..{end}` (unverified)"
+                        ));
+                    }
                 }
                 line.push_str(&format!(": {}", escape_inline(&evidence.description)));
                 push_line(&mut markdown, &line);

@@ -2,10 +2,10 @@
 //! in the existing process-scoped app-server controller.
 use anyhow::{Context, bail, ensure};
 use clap::{ArgMatches, Args, Parser, Subcommand, parser::ValueSource};
-use codex_app_server_client::audit::{AuditClient, AuditClientError};
+use codex_app_server_client::audit::AuditClient;
 use codex_app_server_client::{
     AppServerEvent, RemoteAppServerClient, RemoteAppServerConnectArgs, RemoteAppServerEndpoint,
-    TypedRequestError, app_server_control_socket_path, verified_local_daemon_socket,
+    app_server_control_socket_path, verified_local_daemon_socket,
 };
 use codex_app_server_protocol::{
     AuditListParams, AuditOperationState, AuditRunPhase, AuditRunView, AuditSource,
@@ -80,18 +80,28 @@ enum Action {
     /// Read a durable run, writing its Markdown report to stdout when available.
     Read {
         run_id: String,
+        /// Keep observing through recoverable pending states; Ctrl-C only disconnects.
         #[arg(long)]
         follow: bool,
     },
-    /// List durable runs, independently of the submitting CLI process.
+    /// List durable run summaries, newest first, without opening reports or results.
     List {
         #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: u32,
+        /// Cursor returned by the previous page; continues towards older audits.
         #[arg(long)]
         after: Option<String>,
     },
     /// Commit cancellation intent, then follow the original operation to its outcome.
     Cancel { run_id: String },
+    /// Release an observation-pending run after cancellation; inference may still run or incur charges.
+    ReleaseSlot {
+        run_id: String,
+        #[arg(long, required = true)]
+        acknowledge_concurrent_execution_and_charges: bool,
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 pub(super) fn validate_options(root: &ArgMatches) -> Result<(), clap::Error> {
@@ -249,6 +259,12 @@ async fn execute(
                 })
                 .await?;
             for run in response.runs {
+                if run.capacity_released {
+                    eprintln!(
+                        "{}: capacity released by operator; this does not establish execution outcome",
+                        run.run_id
+                    );
+                }
                 println!(
                     "{}\t{}\t{}\trevision={}{}",
                     run.run_id,
@@ -276,6 +292,29 @@ async fn execute(
             // The server commits intent before returning; this client never sends
             // a thread interrupt or claims cancellation from an attempted request.
             (audits.cancel(run_id).await?, true)
+        }
+        Some(Action::ReleaseSlot {
+            run_id,
+            acknowledge_concurrent_execution_and_charges,
+            reason,
+        }) => {
+            ensure!(
+                acknowledge_concurrent_execution_and_charges,
+                "explicit acknowledgement is required"
+            );
+            let current = audits.read(run_id.clone()).await?;
+            *retained_run = Some(run_id.clone());
+            (
+                audits
+                    .release_slot(codex_app_server_protocol::AuditReleaseSlotParams {
+                        run_id,
+                        expected_revision: current.revision,
+                        reason,
+                        acknowledge_possible_concurrent_execution_and_charges: true,
+                    })
+                    .await?,
+                false,
+            )
         }
         None => {
             let (model, provider) = if command.model.is_some() && command.provider.is_some() {
@@ -315,8 +354,12 @@ async fn execute(
             };
             eprintln!("Audit request key: {request_key}");
             let run = audits.start(params).await.inspect_err(|error| {
-                if matches!(error, AuditClientError::Request(TypedRequestError::Transport {..} | TypedRequestError::Deserialize {..})) {
+                if error.start_acknowledgement_uncertain() {
                     eprintln!("Start acknowledgement is uncertain. Use `audex audit list` or repeat the exact input with --request-key {request_key}; do not submit a new key automatically.");
+                }
+                if let Some(id) = error.retained_run_id() {
+                    eprintln!("A durable run already exists: audex audit read {id} --follow");
+                    *retained_run = Some(id.to_owned());
                 }
             })?;
             *retained_run = Some(run.run_id.clone());
@@ -356,10 +399,15 @@ async fn follow_run(
         client.request_handle(),
     ));
     let mut shown = None;
-    let mut poll = tokio::time::interval(Duration::from_secs(1));
-    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut next_poll = tokio::time::Instant::now();
     loop {
         if shown != Some(view.revision) {
+            if view.capacity_released {
+                eprintln!(
+                    "{}: capacity released by operator; this does not establish execution outcome",
+                    view.run_id
+                );
+            }
             eprintln!(
                 "{}: {} / {} (revision {}){}{}",
                 view.run_id,
@@ -394,14 +442,14 @@ async fn follow_run(
             }
             return Ok(code);
         }
-        if view.observation_pending || !follow {
+        if !follow {
             return Ok(PENDING);
         }
         let refresh = tokio::select! {
-            _ = poll.tick() => true,
+            _ = tokio::time::sleep_until(next_poll) => true,
             event = client.next_event() => match event {
                 Some(AppServerEvent::ServerNotification(notification)) => matches!(*notification,
-                    ServerNotification::AuditProgress(progress) if progress.run_id == view.run_id),
+                    ServerNotification::AuditProgress(progress) if progress.run_id == view.run_id && progress.revision > view.revision),
                 Some(AppServerEvent::Lagged {..}) => true,
                 Some(AppServerEvent::ServerRequest(request)) => {
                     client.reject_server_request(request.id().clone(), JSONRPCErrorError {
@@ -415,6 +463,10 @@ async fn follow_run(
         };
         if refresh {
             view = audits.read(view.run_id.clone()).await?;
+            // Notifications wake immediately; pending fallback reads are slower.
+            // Keep an absolute deadline so unrelated events cannot postpone it.
+            next_poll = tokio::time::Instant::now()
+                + Duration::from_secs(if view.observation_pending { 5 } else { 1 });
         }
     }
 }

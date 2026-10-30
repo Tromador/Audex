@@ -210,6 +210,30 @@
             },
             "method": {
               "enum": [
+                "audit/capabilities"
+              ],
+              "title": "Audit/capabilitiesRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AuditCapabilitiesParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Audit/capabilitiesRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "audit/start"
               ],
               "title": "Audit/startRequestMethod",
@@ -297,6 +321,30 @@
             "params"
           ],
           "title": "Audit/cancelRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "audit/release-slot"
+              ],
+              "title": "Audit/releaseSlotRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AuditReleaseSlotParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Audit/releaseSlotRequest",
           "type": "object"
         },
         {
@@ -8371,6 +8419,27 @@
         "title": "AuditCancelResponse",
         "type": "object"
       },
+      "AuditCapabilitiesParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "title": "AuditCapabilitiesParams",
+        "type": "object"
+      },
+      "AuditCapabilitiesResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "protocolVersion": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "protocolVersion"
+        ],
+        "title": "AuditCapabilitiesResponse",
+        "type": "object"
+      },
       "AuditListParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "additionalProperties": false,
@@ -8409,6 +8478,7 @@
             "type": "integer"
           },
           "runs": {
+            "description": "Newest-first metadata summaries. Results and reports are absent; audit/read retrieves those artefacts with strict integrity verification.",
             "items": {
               "$ref": "#/definitions/v2/AuditRunView"
             },
@@ -8484,6 +8554,46 @@
         "title": "AuditReadResponse",
         "type": "object"
       },
+      "AuditReleaseSlotParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "acknowledgePossibleConcurrentExecutionAndCharges": {
+            "type": "boolean"
+          },
+          "expectedRevision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "runId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "acknowledgePossibleConcurrentExecutionAndCharges",
+          "expectedRevision",
+          "reason",
+          "runId"
+        ],
+        "title": "AuditReleaseSlotParams",
+        "type": "object"
+      },
+      "AuditReleaseSlotResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "run": {
+            "$ref": "#/definitions/v2/AuditRunView"
+          }
+        },
+        "required": [
+          "run"
+        ],
+        "title": "AuditReleaseSlotResponse",
+        "type": "object"
+      },
       "AuditRunPhase": {
         "enum": [
           "created",
@@ -8504,6 +8614,10 @@
             "type": "string"
           },
           "cancellationRequested": {
+            "type": "boolean"
+          },
+          "capacityReleased": {
+            "description": "The operator explicitly released capacity. This is not terminal evidence.",
             "type": "boolean"
           },
           "observationPending": {
@@ -8549,6 +8663,7 @@
         "required": [
           "assignmentId",
           "cancellationRequested",
+          "capacityReleased",
           "observationPending",
           "operationState",
           "phase",

@@ -151,7 +151,7 @@ mod tests {
             }
             let run: AuditRunView = serde_json::from_value(json!({
                 "runId":"report-run", "snapshotId":"snapshot", "assignmentId":"assignment", "phase":"completed",
-                "operationState":"committed", "observationPending":false, "revision":1, "cancellationRequested":false,
+                "operationState":"committed", "observationPending":false, "capacityReleased":false, "revision":1, "cancellationRequested":false,
                 "outcome":null, "rawResult":null, "report":"# Retained report\n\n## Finding 1\nEvidence"
             }))?;
             app.audit_updated(thread, &run, None);

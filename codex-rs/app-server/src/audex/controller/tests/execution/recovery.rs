@@ -22,7 +22,7 @@ async fn with_hooks(
     .await
 }
 
-async fn expire(controller: &AuditController, operation: &str) -> anyhow::Result<()> {
+pub(super) async fn expire(controller: &AuditController, operation: &str) -> anyhow::Result<()> {
     sqlx::query(
         "UPDATE operations SET lease_expires_at_ms=0 WHERE id=? AND lease_owner IS NOT NULL",
     )
@@ -44,7 +44,10 @@ async fn issue(
     )
 }
 
-async fn wait_completed(threads: &ThreadManager, thread: ThreadId) -> anyhow::Result<()> {
+pub(super) async fn wait_completed(
+    threads: &ThreadManager,
+    thread: ThreadId,
+) -> anyhow::Result<()> {
     let thread = threads.get_thread(thread).await?;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -530,7 +533,7 @@ fn stale_unsubmitted_observation_cannot_close_a_submitting_operation() -> anyhow
                         .await?
                 );
                 controller
-                    .reconcile_observation(&observed, &snapshot, fail())
+                    .reconcile_observation(&observed, Some(&snapshot), None, fail())
                     .await?;
                 assert_eq!(
                     store.load_run(&id).await?.operation_state,
@@ -539,7 +542,7 @@ fn stale_unsubmitted_observation_cannot_close_a_submitting_operation() -> anyhow
                 assert_eq!(store.load_run(&id).await?.revision, observed.revision);
             } else {
                 controller
-                    .reconcile_observation(&observed, &snapshot, fail())
+                    .reconcile_observation(&observed, Some(&snapshot), None, fail())
                     .await?;
                 assert!(
                     !store

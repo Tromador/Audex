@@ -391,6 +391,20 @@ class AuditCancelParams(BaseModel):
     run_id: Annotated[str, Field(alias="runId")]
 
 
+class AuditCapabilitiesParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+
+
+class AuditCapabilitiesResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    protocol_version: Annotated[int, Field(alias="protocolVersion", ge=0)]
+
+
 class AuditListParams(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -418,6 +432,19 @@ class AuditReadParams(BaseModel):
     run_id: Annotated[str, Field(alias="runId")]
 
 
+class AuditReleaseSlotParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    acknowledge_possible_concurrent_execution_and_charges: Annotated[
+        bool, Field(alias="acknowledgePossibleConcurrentExecutionAndCharges")
+    ]
+    expected_revision: Annotated[int, Field(alias="expectedRevision")]
+    reason: str
+    run_id: Annotated[str, Field(alias="runId")]
+
+
 class AuditRunPhase(Enum):
     created = "created"
     snapshot_bound = "snapshot_bound"
@@ -436,6 +463,13 @@ class AuditRunView(BaseModel):
     )
     assignment_id: Annotated[str, Field(alias="assignmentId")]
     cancellation_requested: Annotated[bool, Field(alias="cancellationRequested")]
+    capacity_released: Annotated[
+        bool,
+        Field(
+            alias="capacityReleased",
+            description="The operator explicitly released capacity. This is not terminal evidence.",
+        ),
+    ]
     observation_pending: Annotated[
         bool,
         Field(
@@ -7277,7 +7311,12 @@ class AuditListResponse(BaseModel):
             ge=0,
         ),
     ]
-    runs: list[AuditRunView]
+    runs: Annotated[
+        list[AuditRunView],
+        Field(
+            description="Newest-first metadata summaries. Results and reports are absent; audit/read retrieves those artefacts with strict integrity verification."
+        ),
+    ]
 
 
 class AuditProgressNotification(BaseModel):
@@ -7290,6 +7329,13 @@ class AuditProgressNotification(BaseModel):
 
 
 class AuditReadResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    run: AuditRunView
+
+
+class AuditReleaseSlotResponse(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
@@ -7336,6 +7382,15 @@ class CancelLoginAccountResponse(BaseModel):
     status: CancelLoginAccountStatus
 
 
+class AuditCapabilitiesRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["audit/capabilities"], Field(title="Audit/capabilitiesRequestMethod")]
+    params: AuditCapabilitiesParams
+
+
 class AuditStartRequest(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -7370,6 +7425,15 @@ class AuditCancelRequest(BaseModel):
     id: RequestId
     method: Annotated[Literal["audit/cancel"], Field(title="Audit/cancelRequestMethod")]
     params: AuditCancelParams
+
+
+class AuditReleaseSlotRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["audit/release-slot"], Field(title="Audit/releaseSlotRequestMethod")]
+    params: AuditReleaseSlotParams
 
 
 class InitializeRequest(BaseModel):
@@ -13436,10 +13500,12 @@ class ExternalAgentConfigImportRecordHistoryRequest(BaseModel):
 
 class ClientRequest(
     RootModel[
-        AuditStartRequest
+        AuditCapabilitiesRequest
+        | AuditStartRequest
         | AuditReadRequest
         | AuditListRequest
         | AuditCancelRequest
+        | AuditReleaseSlotRequest
         | InitializeRequest
         | ThreadStartRequest
         | ThreadResumeRequest
@@ -13549,10 +13615,12 @@ class ClientRequest(
     ]
 ):
     root: Annotated[
-        AuditStartRequest
+        AuditCapabilitiesRequest
+        | AuditStartRequest
         | AuditReadRequest
         | AuditListRequest
         | AuditCancelRequest
+        | AuditReleaseSlotRequest
         | InitializeRequest
         | ThreadStartRequest
         | ThreadResumeRequest

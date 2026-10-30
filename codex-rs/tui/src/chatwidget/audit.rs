@@ -5,6 +5,27 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 impl ChatWidget {
+    pub(crate) fn confirm_audit_release(
+        &mut self,
+        run: codex_app_server_protocol::AuditRunView,
+        decision: oneshot::Sender<bool>,
+    ) {
+        let decision = Arc::new(Mutex::new(Some(decision)));
+        let accept = Arc::clone(&decision);
+        let decline = Arc::clone(&decision);
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Release unresolved audit capacity?".to_owned()),
+            subtitle: Some(format!("Run: {}\nThe original reviewer may still start or continue inference and incur charges. Releasing this slot permits concurrent execution and additional charges. Its outcome stays unresolved; observation continues and any valid late result is retained. The original operation will never be resubmitted or reacquire capacity. Cancellation intent and unresolved observation are required. This action is permanent.", run.run_id)),
+            items: vec![
+                SelectionItem { name: "No, retain the capacity reservation".to_owned(), actions: vec![Box::new(move |_| decide(&decline, false))], dismiss_on_select: true, ..Default::default() },
+                SelectionItem { name: "Yes, acknowledge concurrent execution and charges".to_owned(), actions: vec![Box::new(move |_| decide(&accept, true))], dismiss_on_select: true, ..Default::default() },
+            ],
+            on_cancel: Some(Box::new(move |_| decide(&decision, false))),
+            ..SelectionViewParams::confirmation()
+        });
+        self.request_redraw();
+    }
+
     pub(crate) fn request_audit_command(&mut self, args: String) {
         if let Some(thread_id) = self.thread_id() {
             self.app_event_tx
@@ -137,6 +158,44 @@ mod tests {
             audex_guidance: None,
             agents_evidence: None,
         }
+    }
+
+    #[tokio::test]
+    async fn capacity_release_requires_explicit_confirmation_and_read_selection_does_not_release() {
+        for (keys, expected) in [
+            (vec![KeyCode::Enter], false),
+            (vec![KeyCode::Esc], false),
+            (vec![KeyCode::Down, KeyCode::Enter], true),
+        ] {
+            let (mut chat, _, _, mut ops) =
+                crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+            let run=serde_json::from_value(serde_json::json!({"runId":"run", "snapshotId":"snapshot", "assignmentId":"assignment", "phase":"reviewing","operationState":"accepted","observationPending":true,"capacityReleased":false,"revision":2,"cancellationRequested":true,"outcome":null,"rawResult":null,"report":null})).unwrap();
+            let (sender, receiver) = oneshot::channel();
+            chat.confirm_audit_release(run, sender);
+            let popup = crate::chatwidget::tests::render_bottom_popup(&chat, 100);
+            assert!(popup.contains("concurrent execution") && popup.contains("charges"));
+            for key in keys {
+                chat.handle_key_event(KeyEvent::from(key));
+            }
+            assert_eq!(receiver.await.unwrap(), expected);
+            assert!(ops.try_recv().is_err());
+        }
+        let (mut chat, _, mut events, _) =
+            crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+        let thread = ThreadId::new();
+        chat.thread_id = Some(thread);
+        let run=serde_json::from_value(serde_json::json!({"runId":"run", "snapshotId":"snapshot", "assignmentId":"assignment", "phase":"reviewing","operationState":"accepted","observationPending":true,"capacityReleased":false,"revision":2,"cancellationRequested":true,"outcome":null,"rawResult":null,"report":null})).unwrap();
+        chat.show_audit_list(AuditListResponse {
+            protocol_version: codex_app_server_protocol::AUDIT_PROTOCOL_VERSION,
+            runs: vec![run],
+            next_cursor: None,
+        });
+        chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+        chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .any(|e| matches!(e,AppEvent::AuditCommand {args,..} if args=="read run"))
+        );
     }
 
     #[tokio::test]

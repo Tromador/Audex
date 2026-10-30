@@ -14,6 +14,36 @@ pub enum AuditClientError {
     Incompatible(u32),
 }
 
+impl AuditClientError {
+    pub fn retained_run_id(&self) -> Option<&str> {
+        match self {
+            Self::Request(TypedRequestError::Server { source, .. }) => {
+                let data = source.data.as_ref()?;
+                (data.get("reason")?.as_str()? == "auditRunRetained")
+                    .then(|| data.get("runId")?.as_str())?
+            }
+            _ => None,
+        }
+    }
+
+    pub fn start_acknowledgement_uncertain(&self) -> bool {
+        match self {
+            Self::Request(
+                TypedRequestError::Transport { .. } | TypedRequestError::Deserialize { .. },
+            ) => true,
+            Self::Request(TypedRequestError::Server { source, .. }) => source
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reason"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|reason| {
+                    matches!(reason, "auditRunRetained" | "auditStartOutcomeUnconfirmed")
+                }),
+            _ => false,
+        }
+    }
+}
+
 impl fmt::Display for AuditClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -52,12 +82,14 @@ impl AuditClient {
     }
 
     pub async fn check_compatibility(&self) -> Result<(), AuditClientError> {
-        self.list(AuditListParams {
-            after: None,
-            limit: Some(1),
-        })
-        .await
-        .map(drop)
+        let response: codex_app_server_protocol::AuditCapabilitiesResponse = self
+            .handle
+            .request_typed(ClientRequest::AuditCapabilities {
+                request_id: request_id("capabilities"),
+                params: codex_app_server_protocol::AuditCapabilitiesParams {},
+            })
+            .await?;
+        require_audit_protocol_version(response.protocol_version)
     }
 
     pub async fn list(
@@ -104,6 +136,20 @@ impl AuditClient {
             .request_typed(ClientRequest::AuditCancel {
                 request_id: request_id("cancel"),
                 params: AuditCancelParams { run_id },
+            })
+            .await?;
+        Ok(response.run)
+    }
+
+    pub async fn release_slot(
+        &self,
+        params: codex_app_server_protocol::AuditReleaseSlotParams,
+    ) -> Result<AuditRunView, AuditClientError> {
+        let response: codex_app_server_protocol::AuditReleaseSlotResponse = self
+            .handle
+            .request_typed(ClientRequest::AuditReleaseSlot {
+                request_id: request_id("release-slot"),
+                params,
             })
             .await?;
         Ok(response.run)

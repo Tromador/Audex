@@ -106,5 +106,118 @@ stream_max_retries = 0
         ))
     );
     assert_eq!(server.received_requests().await.expect("requests").len(), 2);
+    let sqlite = codex_state::SqliteConfig::new_for_testing(
+        codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(home.path())?,
+    );
+    let pool = sqlite
+        .open_read_only_pool(
+            &home.path().join("audex/audit-state.sqlite3"),
+            Some(Duration::from_secs(5)),
+        )
+        .await?;
+    let reviewer: String = sqlx::query_scalar("SELECT thread_id FROM audit_execution")
+        .fetch_one(&pool)
+        .await?;
+    pool.close().await;
+    let private_path = codex_rollout::find_thread_path_by_id_str(home.path(), &reviewer, None)
+        .await?
+        .expect("private rollout path");
+    for (method, params) in [
+        (
+            "thread/read",
+            json!({"threadId":reviewer,"includeTurns":true}),
+        ),
+        (
+            "thread/resume",
+            json!({"threadId":reviewer,"developerInstructions":"Change private reviewer policy"}),
+        ),
+        ("thread/fork", json!({"threadId":reviewer})),
+        (
+            "thread/fork",
+            json!({"threadId":ordinary.thread.id,"path":private_path}),
+        ),
+        (
+            "thread/resume",
+            json!({"threadId":ordinary.thread.id,"path":private_path}),
+        ),
+        ("thread/archive", json!({"threadId":reviewer})),
+        ("thread/turns/list", json!({"threadId":reviewer})),
+        ("thread/attachment/list", json!({"threadId":reviewer})),
+        (
+            "thread/searchOccurrences",
+            json!({"threadId":reviewer,"searchTerm":"audit"}),
+        ),
+        (
+            "turn/start",
+            json!({"threadId":reviewer,"input":[{"type":"text","text":"Unsolicited extra inference"}]}),
+        ),
+        (
+            "turn/interrupt",
+            json!({"threadId":reviewer,"turnId":"private-turn"}),
+        ),
+    ] {
+        let _: ClientRequest =
+            serde_json::from_value(json!({"id":0,"method":method,"params":params}))
+                .expect("typed private-thread request");
+        let id = client.send_request(method, Some(params)).await?;
+        let denied = tokio::time::timeout(
+            Duration::from_secs(10),
+            client
+                .read_stream_until_error_message(codex_app_server_protocol::RequestId::Integer(id)),
+        )
+        .await??;
+        assert!(
+            denied
+                .error
+                .message
+                .contains("Audex reviewer threads are private"),
+            "{method}: {denied:?}"
+        );
+    }
+    let loaded: codex_app_server_protocol::ThreadLoadedListResponse = client
+        .request(|id| ClientRequest::ThreadLoadedList {
+            request_id: id,
+            params: Default::default(),
+        })
+        .await?;
+    assert!(!loaded.data.contains(&reviewer));
+    assert!(loaded.data.contains(&ordinary.thread.id));
+    assert_eq!(
+        server.received_requests().await.expect("requests").len(),
+        2,
+        "denied private-thread APIs must not submit inference"
+    );
+    client.shutdown_gracefully().await?;
+    let mut cold = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .build_initialized()
+        .await?;
+    let params = codex_app_server_protocol::ThreadResumeParams {
+        thread_id: reviewer,
+        ..Default::default()
+    };
+    let id = cold
+        .send_request("thread/resume", Some(serde_json::to_value(params)?))
+        .await?;
+    let denied = cold
+        .read_stream_until_error_message(codex_app_server_protocol::RequestId::Integer(id))
+        .await?;
+    assert!(
+        denied
+            .error
+            .message
+            .contains("Audex reviewer threads are private")
+    );
+    let retained: AuditReadResponse = cold
+        .request(|id| ClientRequest::AuditRead {
+            request_id: id,
+            params: codex_app_server_protocol::AuditReadParams { run_id },
+        })
+        .await?;
+    assert_eq!(
+        retained.run.phase,
+        AuditRunPhase::Completed,
+        "audit-owned retrieval remains available after restart"
+    );
     Ok(())
 }
