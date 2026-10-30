@@ -1,3 +1,11 @@
+# Audex
+
+Audex provides durable source auditing with isolated Codex reviewers, a command-line interface and a conversational TUI. For setup, commands, workflows, recovery and practical recipes, see the **[Audex User Guide](docs/audex-user-guide.md)**.
+
+The upstream Codex instructions below describe Codex; its installer does not install this Audex fork.
+
+---
+
 <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
