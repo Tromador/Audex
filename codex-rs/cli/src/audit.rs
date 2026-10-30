@@ -160,6 +160,7 @@ async fn connect() -> anyhow::Result<RemoteAppServerClient> {
         )
     };
     let args = RemoteAppServerConnectArgs {
+        required_human_approval: false,
         endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
         client_name: "audex-cli".to_string(),
         client_version: env!("CARGO_PKG_VERSION").to_string(),

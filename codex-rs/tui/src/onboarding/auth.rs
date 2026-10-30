@@ -71,11 +71,6 @@ pub(crate) fn mark_url_hyperlink(buf: &mut Buffer, area: Rect, url: &str) {
     crate::terminal_hyperlinks::mark_url_hyperlink(buf, area, url);
 }
 
-/// Marks any underlined buffer cells as an OSC 8 hyperlink.
-pub(crate) fn mark_underlined_hyperlink(buf: &mut Buffer, area: Rect, url: &str) {
-    crate::terminal_hyperlinks::mark_underlined_hyperlink(buf, area, url);
-}
-
 use super::onboarding_screen::StepState;
 
 mod headless_chatgpt_login;
@@ -1290,6 +1285,7 @@ mod tests {
             .unwrap();
         let mut auth_config = config.auth_config();
         let client = InProcessAppServerClient::start(InProcessClientStartArgs {
+            required_human_approval: true,
             arg0_paths: Arg0DispatchPaths::default(),
             config: Arc::new(config),
             cli_overrides: Vec::new(),

@@ -280,7 +280,7 @@ pub(super) async fn prepare(
         "version":1, "rules_digest":sha256_hex(AUDIT_RULES.as_bytes()),
         "snapshot_id":snapshot.snapshot_id(), "provider":request.provider,
         "model":request.model, "reasoning_effort":effort,
-        "model_metadata_digest":sha256_hex(&serde_json::to_vec(&model)?),
+        "model_metadata_digest":sha256_hex(&serde_json::to_vec(model.model.as_ref())?),
         "permission_profile":config.permissions.effective_permission_profile(),
         "approval_policy":"never", "project_doc_max_bytes":0,
         "tools":TOOL_NAMES.map(|name| format!("audex_source.{name}")),
