@@ -383,6 +383,139 @@ class AsyncUserInputQuestion(BaseModel):
     title: str
 
 
+class AuditActivityEntry(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    item_id: Annotated[str, Field(alias="itemId")]
+    kind: Annotated[
+        str, Field(description="Assistant text, source-tool activity and status remain distinct.")
+    ]
+    payload: Annotated[
+        str,
+        Field(
+            description="Exact retained public material. Activity is unvalidated, including JSON."
+        ),
+    ]
+    payload_digest: Annotated[str, Field(alias="payloadDigest")]
+    sequence: int
+    session_id: Annotated[str, Field(alias="sessionId")]
+    turn_id: Annotated[str, Field(alias="turnId")]
+
+
+class AuditAttemptAction(Enum):
+    cancel = "cancel"
+    ignore = "ignore"
+    retry = "retry"
+
+
+class AuditAttemptControlParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    acknowledge_possible_overlap: Annotated[
+        bool | None, Field(alias="acknowledgePossibleOverlap")
+    ] = False
+    action: AuditAttemptAction
+    action_key: Annotated[
+        str,
+        Field(
+            alias="actionKey",
+            description="Reuse the same key and payload after a lost acknowledgement.",
+        ),
+    ]
+    assignment_id: Annotated[str, Field(alias="assignmentId")]
+    authorise_retry: Annotated[bool | None, Field(alias="authoriseRetry")] = False
+    reason: str
+    run_id: Annotated[str, Field(alias="runId")]
+
+
+class AuditAttemptControlResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    action_key: Annotated[str, Field(alias="actionKey")]
+    assignment_id: Annotated[str, Field(alias="assignmentId")]
+    completed_won: Annotated[bool, Field(alias="completedWon")]
+    cutoff: int | None = None
+    disposition: str
+    possible_overlap: Annotated[bool, Field(alias="possibleOverlap")]
+    replacement_assignment_id: Annotated[str | None, Field(alias="replacementAssignmentId")] = None
+    replacement_operation_id: Annotated[str | None, Field(alias="replacementOperationId")] = None
+
+
+class AuditAttemptProgress(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    assignment_id: Annotated[str, Field(alias="assignmentId")]
+    output_sequence: Annotated[int, Field(alias="outputSequence")]
+    revision: int
+
+
+class AuditAttemptReadParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    after_sequence: Annotated[int | None, Field(alias="afterSequence")] = None
+    assignment_id: Annotated[str, Field(alias="assignmentId")]
+    limit: Annotated[int | None, Field(ge=0)] = None
+    run_id: Annotated[str, Field(alias="runId")]
+
+
+class AuditAttemptView(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    assignment_id: Annotated[str, Field(alias="assignmentId")]
+    assignment_state: Annotated[str, Field(alias="assignmentState")]
+    attempt_ordinal: Annotated[int, Field(alias="attemptOrdinal")]
+    capture_failure: Annotated[str | None, Field(alias="captureFailure")] = None
+    capture_gap: Annotated[str | None, Field(alias="captureGap")] = None
+    capture_truncated: Annotated[bool, Field(alias="captureTruncated")]
+    completed: Annotated[
+        bool,
+        Field(
+            description="True only for a canonical validated result, never inferred from activity."
+        ),
+    ]
+    current: bool
+    disposition: Annotated[
+        str, Field(description="Contribution disposition is independent of execution certainty.")
+    ]
+    model: str
+    operation_id: Annotated[str, Field(alias="operationId")]
+    operation_state: Annotated[str, Field(alias="operationState")]
+    output_cutoff: Annotated[int | None, Field(alias="outputCutoff")] = None
+    output_sequence: Annotated[int, Field(alias="outputSequence")]
+    owner_generation: Annotated[int, Field(alias="ownerGeneration")]
+    possible_overlap: Annotated[bool, Field(alias="possibleOverlap")]
+    provider: str
+    reasoning_effort: Annotated[str | None, Field(alias="reasoningEffort")] = None
+    reviewer_id: Annotated[str, Field(alias="reviewerId")]
+    reviewer_ordinal: Annotated[int, Field(alias="reviewerOrdinal")]
+    revision: int
+    run_id: Annotated[str, Field(alias="runId")]
+    snapshot_id: Annotated[str, Field(alias="snapshotId")]
+
+
+class AuditAttemptsParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    run_id: Annotated[str, Field(alias="runId")]
+
+
+class AuditAttemptsResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    attempts: list[AuditAttemptView]
+
+
 class AuditCancelParams(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -7312,6 +7445,22 @@ class AppsReadResponse(BaseModel):
     missing_app_ids: Annotated[list[str], Field(alias="missingAppIds")]
 
 
+class AuditAttemptReadResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    attempt: AuditAttemptView
+    entries: list[AuditActivityEntry]
+    next_sequence: Annotated[int, Field(alias="nextSequence")]
+    raw_result: Annotated[
+        str | None,
+        Field(
+            alias="rawResult",
+            description="The original terminal response, if retained; invalid JSON stays invalid.",
+        ),
+    ] = None
+
+
 class AuditCancelResponse(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -7344,6 +7493,7 @@ class AuditProgressNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    attempts: Annotated[list[AuditAttemptProgress] | None, Field(validate_default=True)] = []
     phase: AuditRunPhase
     revision: int
     run_id: Annotated[str, Field(alias="runId")]
@@ -7446,6 +7596,35 @@ class AuditCancelRequest(BaseModel):
     id: RequestId
     method: Annotated[Literal["audit/cancel"], Field(title="Audit/cancelRequestMethod")]
     params: AuditCancelParams
+
+
+class AuditAttemptsRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["audit/attempts"], Field(title="Audit/attemptsRequestMethod")]
+    params: AuditAttemptsParams
+
+
+class AuditAttemptReadRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["audit/attempt/read"], Field(title="Audit/attempt/readRequestMethod")]
+    params: AuditAttemptReadParams
+
+
+class AuditAttemptControlRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[
+        Literal["audit/attempt/control"], Field(title="Audit/attempt/controlRequestMethod")
+    ]
+    params: AuditAttemptControlParams
 
 
 class AuditReleaseSlotRequest(BaseModel):
@@ -13544,6 +13723,9 @@ class ClientRequest(
         | AuditReadRequest
         | AuditListRequest
         | AuditCancelRequest
+        | AuditAttemptsRequest
+        | AuditAttemptReadRequest
+        | AuditAttemptControlRequest
         | AuditReleaseSlotRequest
         | InitializeRequest
         | ThreadStartRequest
@@ -13659,6 +13841,9 @@ class ClientRequest(
         | AuditReadRequest
         | AuditListRequest
         | AuditCancelRequest
+        | AuditAttemptsRequest
+        | AuditAttemptReadRequest
+        | AuditAttemptControlRequest
         | AuditReleaseSlotRequest
         | InitializeRequest
         | ThreadStartRequest

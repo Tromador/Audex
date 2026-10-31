@@ -49,6 +49,7 @@ pub(super) struct CodexDispatch {
     cleanup: Option<Listen>,
     wake: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     store: OnceCell<AuditStore>,
+    captures: super::capture::CaptureHub,
     #[cfg(test)]
     pub hooks: DispatchTestHooks,
 }
@@ -170,6 +171,7 @@ impl CodexDispatch {
             cleanup: None,
             wake: std::sync::OnceLock::new(),
             store: OnceCell::new(),
+            captures: super::capture::CaptureHub::default(),
             #[cfg(test)]
             hooks: DispatchTestHooks::default(),
         }
@@ -374,6 +376,22 @@ impl CodexDispatch {
         }
         #[cfg(test)]
         self.checkpoint("reserved").await;
+        let capture = super::capture::CaptureHandle::new(
+            store.clone(),
+            super::store::activity::CaptureIdentity {
+                assignment_id: request.assignment_id.clone(),
+                session_id: thread_id.to_string(),
+                owner_generation: run.owner_generation,
+            },
+            self.wake.get().cloned(),
+        )
+        .await
+        .map_err(|e| DispatchFailure::new("prepare_capture", e, true))?;
+        self.captures.insert(request.operation_id.clone(), &capture);
+        prepared
+            .options
+            .thread_extension_init
+            .insert(capture.clone());
         prepared.options.reserved_thread_id = Some(thread_id);
         let thread = self
             .threads
@@ -383,6 +401,7 @@ impl CodexDispatch {
             .thread;
         #[cfg(test)]
         self.checkpoint("thread_created").await;
+        capture.bind_runtime(&thread);
         let preparation: Result<bool, DispatchFailure> = async {
         (self.listen)(thread_id, Arc::clone(&thread))
             .await
@@ -738,6 +757,27 @@ fn accepted(
 }
 
 impl Dispatch for CodexDispatch {
+    fn capture(&self, operation: &str) -> Option<super::capture::CaptureHandle> {
+        self.captures.get(operation)
+    }
+    fn request_interrupt(&self, operation: String) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            // No history read or join precedes this best-effort interrupt.
+            let Ok(store) = self.store().await else {
+                return;
+            };
+            let Ok(Some((thread, _, _))) = store.execution(&operation).await else {
+                return;
+            };
+            let Ok(id) = ThreadId::from_string(&thread) else {
+                return;
+            };
+            if let Ok(thread) = self.threads.get_thread(id).await {
+                let _ = thread.submit(Op::Interrupt).await;
+            }
+        })
+    }
+
     fn cleanup_preparation(&self, operation: String) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             let Ok(store) = self.store().await else {

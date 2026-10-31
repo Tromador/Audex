@@ -7,6 +7,9 @@ mod support;
 #[path = "audit/follow_progress.rs"]
 mod follow_progress;
 
+#[path = "audit/attempt_controls.rs"]
+mod attempt_controls;
+
 use anyhow::{Context, Result, ensure};
 use core_test_support::responses;
 use futures::{SinkExt, StreamExt};
@@ -22,6 +25,10 @@ use wiremock::{
 };
 
 fn configured(server: &MockServer) -> Result<TestDaemon> {
+    configured_url(&server.uri())
+}
+
+fn configured_url(url: &str) -> Result<TestDaemon> {
     // A caller can choose a roomy directory on the build filesystem to permit
     // hard links instead of copying a large debug CLI into a small /tmp tmpfs.
     let homes = std::env::var_os("AUDEX_TEST_TMPDIR")
@@ -55,7 +62,7 @@ wire_api = "responses"
 request_max_retries = 0
 stream_max_retries = 0
 "#,
-            server.uri()
+            url
         ),
     )?;
     std::fs::write(
@@ -690,7 +697,9 @@ async fn attached_clients_follow_pending_recovery_while_nonfollowing_reads_retur
                 let method = request["method"].as_str().context("method")?;
                 let result = match method {
                     "initialize" => json!({"userAgent":"codex/0.0.0"}),
-                    "audit/capabilities" => json!({"protocolVersion":2}),
+                    "audit/capabilities" => {
+                        json!({"protocolVersion":codex_app_server_protocol::AUDIT_PROTOCOL_VERSION})
+                    }
                     "audit/start" | "audit/read" | "audit/cancel" => {
                         if method == "audit/start" {
                             starts += 1;

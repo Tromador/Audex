@@ -1,0 +1,187 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AuditActivityEntry": {
+      "properties": {
+        "itemId": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "Assistant text, source-tool activity and status remain distinct.",
+          "type": "string"
+        },
+        "payload": {
+          "description": "Exact retained public material. Activity is unvalidated, including JSON.",
+          "type": "string"
+        },
+        "payloadDigest": {
+          "type": "string"
+        },
+        "sequence": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "itemId",
+        "kind",
+        "payload",
+        "payloadDigest",
+        "sequence",
+        "sessionId",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "AuditAttemptView": {
+      "properties": {
+        "assignmentId": {
+          "type": "string"
+        },
+        "assignmentState": {
+          "type": "string"
+        },
+        "attemptOrdinal": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "captureFailure": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "captureGap": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "captureTruncated": {
+          "type": "boolean"
+        },
+        "completed": {
+          "description": "True only for a canonical validated result, never inferred from activity.",
+          "type": "boolean"
+        },
+        "current": {
+          "type": "boolean"
+        },
+        "disposition": {
+          "description": "Contribution disposition is independent of execution certainty.",
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "operationState": {
+          "type": "string"
+        },
+        "outputCutoff": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "outputSequence": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "ownerGeneration": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "possibleOverlap": {
+          "type": "boolean"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewerId": {
+          "type": "string"
+        },
+        "reviewerOrdinal": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "snapshotId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assignmentId",
+        "assignmentState",
+        "attemptOrdinal",
+        "captureTruncated",
+        "completed",
+        "current",
+        "disposition",
+        "model",
+        "operationId",
+        "operationState",
+        "outputSequence",
+        "ownerGeneration",
+        "possibleOverlap",
+        "provider",
+        "reviewerId",
+        "reviewerOrdinal",
+        "revision",
+        "runId",
+        "snapshotId"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "attempt": {
+      "$ref": "#/definitions/AuditAttemptView"
+    },
+    "entries": {
+      "items": {
+        "$ref": "#/definitions/AuditActivityEntry"
+      },
+      "type": "array"
+    },
+    "nextSequence": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "rawResult": {
+      "description": "The original terminal response, if retained; invalid JSON stays invalid.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "attempt",
+    "entries",
+    "nextSequence"
+  ],
+  "title": "AuditAttemptReadResponse",
+  "type": "object"
+}

@@ -543,8 +543,36 @@
       ],
       "type": "object"
     },
+    "AuditAttemptProgress": {
+      "properties": {
+        "assignmentId": {
+          "type": "string"
+        },
+        "outputSequence": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "assignmentId",
+        "outputSequence",
+        "revision"
+      ],
+      "type": "object"
+    },
     "AuditProgressNotification": {
       "properties": {
+        "attempts": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/AuditAttemptProgress"
+          },
+          "type": "array"
+        },
         "phase": {
           "$ref": "#/definitions/AuditRunPhase"
         },

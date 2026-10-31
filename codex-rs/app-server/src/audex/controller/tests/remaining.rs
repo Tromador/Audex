@@ -70,7 +70,7 @@ async fn capabilities_and_listing_do_not_open_retained_artefacts() -> anyhow::Re
         let capability = api(&controller, "audit/capabilities", json!({}))
             .await
             .expect("capabilities");
-        assert_eq!(capability["protocolVersion"], 2);
+        assert_eq!(capability["protocolVersion"], AUDIT_PROTOCOL_VERSION);
         assert!(
             !controller
                 .root

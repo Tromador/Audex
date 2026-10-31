@@ -220,6 +220,94 @@
         }
       ]
     },
+    "AuditAttemptAction": {
+      "enum": [
+        "cancel",
+        "ignore",
+        "retry"
+      ],
+      "type": "string"
+    },
+    "AuditAttemptControlParams": {
+      "additionalProperties": false,
+      "properties": {
+        "acknowledgePossibleOverlap": {
+          "default": false,
+          "type": "boolean"
+        },
+        "action": {
+          "$ref": "#/definitions/AuditAttemptAction"
+        },
+        "actionKey": {
+          "description": "Reuse the same key and payload after a lost acknowledgement.",
+          "type": "string"
+        },
+        "assignmentId": {
+          "type": "string"
+        },
+        "authoriseRetry": {
+          "default": false,
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "actionKey",
+        "assignmentId",
+        "reason",
+        "runId"
+      ],
+      "type": "object"
+    },
+    "AuditAttemptReadParams": {
+      "additionalProperties": false,
+      "properties": {
+        "afterSequence": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "assignmentId": {
+          "type": "string"
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assignmentId",
+        "runId"
+      ],
+      "type": "object"
+    },
+    "AuditAttemptsParams": {
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "type": "object"
+    },
     "AuditCancelParams": {
       "additionalProperties": false,
       "properties": {
@@ -6604,6 +6692,78 @@
         "params"
       ],
       "title": "Audit/cancelRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "audit/attempts"
+          ],
+          "title": "Audit/attemptsRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AuditAttemptsParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Audit/attemptsRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "audit/attempt/read"
+          ],
+          "title": "Audit/attempt/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AuditAttemptReadParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Audit/attempt/readRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "audit/attempt/control"
+          ],
+          "title": "Audit/attempt/controlRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AuditAttemptControlParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Audit/attempt/controlRequest",
       "type": "object"
     },
     {

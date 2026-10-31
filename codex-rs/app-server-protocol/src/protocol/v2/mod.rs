@@ -1,6 +1,8 @@
 mod audit;
+mod audit_attempt;
 mod shared;
 pub use audit::*;
+pub use audit_attempt::*;
 
 mod account;
 mod application;

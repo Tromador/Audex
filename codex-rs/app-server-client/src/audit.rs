@@ -141,6 +141,45 @@ impl AuditClient {
         Ok(response.run)
     }
 
+    pub async fn attempts(
+        &self,
+        run_id: String,
+    ) -> Result<codex_app_server_protocol::AuditAttemptsResponse, AuditClientError> {
+        Ok(self
+            .handle
+            .request_typed(ClientRequest::AuditAttempts {
+                request_id: request_id("attempts"),
+                params: codex_app_server_protocol::AuditAttemptsParams { run_id },
+            })
+            .await?)
+    }
+
+    pub async fn read_attempt(
+        &self,
+        params: codex_app_server_protocol::AuditAttemptReadParams,
+    ) -> Result<codex_app_server_protocol::AuditAttemptReadResponse, AuditClientError> {
+        Ok(self
+            .handle
+            .request_typed(ClientRequest::AuditAttemptRead {
+                request_id: request_id("attempt-read"),
+                params,
+            })
+            .await?)
+    }
+
+    pub async fn control_attempt(
+        &self,
+        params: codex_app_server_protocol::AuditAttemptControlParams,
+    ) -> Result<codex_app_server_protocol::AuditAttemptControlResponse, AuditClientError> {
+        Ok(self
+            .handle
+            .request_typed(ClientRequest::AuditAttemptControl {
+                request_id: request_id("attempt-control"),
+                params,
+            })
+            .await?)
+    }
+
     pub async fn release_slot(
         &self,
         params: codex_app_server_protocol::AuditReleaseSlotParams,

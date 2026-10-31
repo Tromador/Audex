@@ -1,3 +1,4 @@
+pub(crate) mod capture;
 pub(crate) mod controller;
 mod dispatch;
 mod lifecycle;

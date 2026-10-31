@@ -176,6 +176,26 @@ audex audit cancel RUN
 - `read RUN --follow` waits through recoverable observation-pending states until a terminal outcome or Ctrl-C. Attached submissions, cancellation watches and TUI observation do the same. A plain `read RUN` returns immediately; it can report exit 5 while work is pending.
 - `cancel RUN` records cancellation intent and follows the original operation's outcome. Cancellation may race with completion; a completed result is retained.
 
+### Individual reviewer attempts
+
+Attempt commands address an exact assignment, so a delayed command cannot stop its replacement. Use `list` to obtain the current and historical assignment IDs:
+
+```bash
+audex audit attempt list RUN
+audex audit attempt read RUN ASSIGNMENT --after-sequence 0 --limit 64
+audex audit attempt cancel RUN ASSIGNMENT --action-key MY_STOP_KEY
+audex audit attempt ignore RUN ASSIGNMENT --action-key MY_IGNORE_KEY
+audex audit attempt retry RUN ASSIGNMENT --action-key MY_RETRY_KEY --authorise-retry
+```
+
+Cancel and Ignore acknowledge a durable decision: the available received prefix is frozen and the attempt's scheduling reservation is released. They return without waiting for the reviewer to terminate. Healthy siblings continue. A completed review that committed first remains completed.
+
+Retry creates a fresh attempt using the retained source and original brief, with fresh execution history. If the earlier request may still be active, the command warns about overlapping charges and also requires `--acknowledge-possible-overlap`. The superseded attempt's output remains available in history; it is not supplied to the replacement.
+
+Control commands print their action key before sending. If an acknowledgement is lost, repeat the same command with that key and identical arguments. The server returns the original decision without commissioning another attempt. A zero exit status acknowledges the control decision, not a successful review.
+
+`attempt read` returns committed activity as JSON, with the next sequence cursor and any output cutoff, capture gap, truncation or failure. Assistant fragments remain unvalidated material, including incomplete or invalid JSON. Source-tool readbacks and status entries are labelled separately. Only the canonical validated terminal result establishes a completed review. Capture runs without an open reader and retained entries survive daemon restart.
+
 ### CLI exit codes
 
 | Code | Meaning |

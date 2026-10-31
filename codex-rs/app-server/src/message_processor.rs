@@ -1210,6 +1210,9 @@ impl MessageProcessor {
             | ClientRequest::AuditRead { .. }
             | ClientRequest::AuditList { .. }
             | ClientRequest::AuditCancel { .. }
+            | ClientRequest::AuditAttempts { .. }
+            | ClientRequest::AuditAttemptRead { .. }
+            | ClientRequest::AuditAttemptControl { .. }
             | ClientRequest::AuditReleaseSlot { .. }) => self.audex.handle(request).await.map(Some),
             ClientRequest::ServerDiagnostics { .. } => Ok(Some(read_server_diagnostics().into())),
             ClientRequest::ConfigRead { params, .. } => self

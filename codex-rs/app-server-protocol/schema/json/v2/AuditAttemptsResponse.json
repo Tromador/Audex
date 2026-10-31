@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AuditAttemptView": {
+      "properties": {
+        "assignmentId": {
+          "type": "string"
+        },
+        "assignmentState": {
+          "type": "string"
+        },
+        "attemptOrdinal": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "captureFailure": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "captureGap": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "captureTruncated": {
+          "type": "boolean"
+        },
+        "completed": {
+          "description": "True only for a canonical validated result, never inferred from activity.",
+          "type": "boolean"
+        },
+        "current": {
+          "type": "boolean"
+        },
+        "disposition": {
+          "description": "Contribution disposition is independent of execution certainty.",
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "operationState": {
+          "type": "string"
+        },
+        "outputCutoff": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "outputSequence": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "ownerGeneration": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "possibleOverlap": {
+          "type": "boolean"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewerId": {
+          "type": "string"
+        },
+        "reviewerOrdinal": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "snapshotId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assignmentId",
+        "assignmentState",
+        "attemptOrdinal",
+        "captureTruncated",
+        "completed",
+        "current",
+        "disposition",
+        "model",
+        "operationId",
+        "operationState",
+        "outputSequence",
+        "ownerGeneration",
+        "possibleOverlap",
+        "provider",
+        "reviewerId",
+        "reviewerOrdinal",
+        "revision",
+        "runId",
+        "snapshotId"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "attempts": {
+      "items": {
+        "$ref": "#/definitions/AuditAttemptView"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "attempts"
+  ],
+  "title": "AuditAttemptsResponse",
+  "type": "object"
+}

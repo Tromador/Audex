@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AuditAttemptAction": {
+      "enum": [
+        "cancel",
+        "ignore",
+        "retry"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "acknowledgePossibleOverlap": {
+      "default": false,
+      "type": "boolean"
+    },
+    "action": {
+      "$ref": "#/definitions/AuditAttemptAction"
+    },
+    "actionKey": {
+      "description": "Reuse the same key and payload after a lost acknowledgement.",
+      "type": "string"
+    },
+    "assignmentId": {
+      "type": "string"
+    },
+    "authoriseRetry": {
+      "default": false,
+      "type": "boolean"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "runId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "action",
+    "actionKey",
+    "assignmentId",
+    "reason",
+    "runId"
+  ],
+  "title": "AuditAttemptControlParams",
+  "type": "object"
+}

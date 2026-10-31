@@ -534,6 +534,10 @@ async fn start_listener(
                         }
                     };
 
+                    if let Some(capture) = conversation.thread_extension_data().get::<crate::audex::capture::CaptureHandle>() {
+                        capture.observe(&event).await;
+                    }
+
                     if let Some(worker) = &turn_cost_worker {
                         worker.observe_event(
                             conversation_id,

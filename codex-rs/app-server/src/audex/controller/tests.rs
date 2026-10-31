@@ -1,5 +1,6 @@
 use super::*;
 
+mod attempts;
 mod corrections;
 mod execution;
 mod foundations;
@@ -19,6 +20,7 @@ struct Fake {
     observations: AtomicUsize,
     starts: AtomicUsize,
     work: StdMutex<HashMap<String, Observation>>,
+    captures: StdMutex<HashMap<String, crate::audex::capture::CaptureHandle>>,
     root: StdMutex<Option<AbsolutePathBuf>>,
     pause_start: AtomicBool,
     entered: Notify,
@@ -42,6 +44,22 @@ impl Fake {
 }
 
 impl Dispatch for Fake {
+    fn capture(&self, operation: &str) -> Option<crate::audex::capture::CaptureHandle> {
+        self.captures
+            .lock()
+            .expect("captures")
+            .get(operation)
+            .cloned()
+    }
+    fn request_interrupt(&self, _operation: String) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.interrupt_entered.notify_one();
+            if self.pause_interrupt.swap(false, Ordering::SeqCst) {
+                self.interrupt_release.notified().await;
+            }
+        })
+    }
+
     fn start(&self, request: DispatchRequest) -> BoxFuture<'_, Observation> {
         Box::pin(async move {
             self.starts.fetch_add(1, Ordering::SeqCst);

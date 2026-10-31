@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "actionKey": {
+      "type": "string"
+    },
+    "assignmentId": {
+      "type": "string"
+    },
+    "completedWon": {
+      "type": "boolean"
+    },
+    "cutoff": {
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "disposition": {
+      "type": "string"
+    },
+    "possibleOverlap": {
+      "type": "boolean"
+    },
+    "replacementAssignmentId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "replacementOperationId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "actionKey",
+    "assignmentId",
+    "completedWon",
+    "disposition",
+    "possibleOverlap"
+  ],
+  "title": "AuditAttemptControlResponse",
+  "type": "object"
+}

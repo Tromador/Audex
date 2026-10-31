@@ -278,7 +278,7 @@ impl AuditStore {
                     a.id AS assignment_id, a.state AS assignment_state,
                     a.result_digest, a.result_path, a.provider, a.model, a.reasoning_effort,
                     v.id AS reviewer_id, v.ordinal AS reviewer_ordinal,
-                    t.ordinal AS attempt_ordinal, t.revision AS attempt_revision, t.owner_generation,
+                    t.ordinal AS attempt_ordinal, t.revision AS attempt_revision, t.owner_generation, v.current_assignment_id=a.id AS current,
                     o.id AS operation_id, o.state AS operation_state, o.retry_classification,
                     EXISTS (SELECT 1 FROM audit_capacity_releases c WHERE c.operation_id=o.id) AS capacity_released
              FROM audit_runs r
@@ -305,6 +305,7 @@ impl AuditStore {
             reviewer_ordinal: row.try_get("reviewer_ordinal")?,
             attempt_ordinal: row.try_get("attempt_ordinal")?,
             attempt_revision: row.try_get("attempt_revision")?,
+            current: row.try_get("current")?,
             owner_generation: row.try_get("owner_generation")?,
             provider: row.try_get("provider")?,
             model: row.try_get("model")?,
@@ -366,7 +367,7 @@ impl AuditStore {
             JOIN audit_reviewers v ON v.run_id=r.id JOIN audit_attempts t ON t.assignment_id=v.current_assignment_id
             JOIN operations o ON o.assignment_id=t.assignment_id JOIN reviewer_assignments a ON a.id=t.assignment_id
             WHERE r.phase NOT IN ('completed','completed_with_failures','failed','cancelled')
-            AND (a.state IN ('planned','thread_ready','dispatching','running') OR (r.phase='reporting' AND v.ordinal=0))
+            AND ((t.disposition='active' AND t.output_cutoff IS NULL AND a.state IN ('planned','thread_ready','dispatching','running')) OR (r.phase='reporting' AND v.ordinal=0))
             ORDER BY r.created_at_ms,r.id,v.ordinal,t.ordinal")
             .fetch_all(&self.pool).await?)
     }

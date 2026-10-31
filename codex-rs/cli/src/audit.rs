@@ -1,5 +1,6 @@
 //! Operator client only. Snapshot capture, inference and workflow authority stay
 //! in the existing process-scoped app-server controller.
+mod attempts;
 use anyhow::{Context, bail, ensure};
 use clap::{ArgMatches, Args, Parser, Subcommand, parser::ValueSource};
 use codex_app_server_client::audit::AuditClient;
@@ -77,6 +78,11 @@ struct SourceArgs {
 
 #[derive(Debug, Subcommand)]
 enum Action {
+    /// Control one reviewer attempt or read its retained, unvalidated activity.
+    Attempt {
+        #[command(subcommand)]
+        action: attempts::AttemptCommand,
+    },
     /// Read a durable run, writing its Markdown report to stdout when available.
     Read {
         run_id: String,
@@ -252,6 +258,7 @@ async fn execute(
         )?;
     }
     let (view, follow) = match command.action {
+        Some(Action::Attempt { action }) => return attempts::run(&audits, action).await,
         Some(Action::List { limit, after }) => {
             let response = audits
                 .list(AuditListParams {

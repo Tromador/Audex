@@ -330,6 +330,78 @@
             },
             "method": {
               "enum": [
+                "audit/attempts"
+              ],
+              "title": "Audit/attemptsRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AuditAttemptsParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Audit/attemptsRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "audit/attempt/read"
+              ],
+              "title": "Audit/attempt/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AuditAttemptReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Audit/attempt/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "audit/attempt/control"
+              ],
+              "title": "Audit/attempt/controlRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AuditAttemptControlParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Audit/attempt/controlRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "audit/release-slot"
               ],
               "title": "Audit/releaseSlotRequestMethod",
@@ -8427,6 +8499,370 @@
         ],
         "type": "object"
       },
+      "AuditActivityEntry": {
+        "properties": {
+          "itemId": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "Assistant text, source-tool activity and status remain distinct.",
+            "type": "string"
+          },
+          "payload": {
+            "description": "Exact retained public material. Activity is unvalidated, including JSON.",
+            "type": "string"
+          },
+          "payloadDigest": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "itemId",
+          "kind",
+          "payload",
+          "payloadDigest",
+          "sequence",
+          "sessionId",
+          "turnId"
+        ],
+        "type": "object"
+      },
+      "AuditAttemptAction": {
+        "enum": [
+          "cancel",
+          "ignore",
+          "retry"
+        ],
+        "type": "string"
+      },
+      "AuditAttemptControlParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "acknowledgePossibleOverlap": {
+            "default": false,
+            "type": "boolean"
+          },
+          "action": {
+            "$ref": "#/definitions/v2/AuditAttemptAction"
+          },
+          "actionKey": {
+            "description": "Reuse the same key and payload after a lost acknowledgement.",
+            "type": "string"
+          },
+          "assignmentId": {
+            "type": "string"
+          },
+          "authoriseRetry": {
+            "default": false,
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "runId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "actionKey",
+          "assignmentId",
+          "reason",
+          "runId"
+        ],
+        "title": "AuditAttemptControlParams",
+        "type": "object"
+      },
+      "AuditAttemptControlResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "actionKey": {
+            "type": "string"
+          },
+          "assignmentId": {
+            "type": "string"
+          },
+          "completedWon": {
+            "type": "boolean"
+          },
+          "cutoff": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "disposition": {
+            "type": "string"
+          },
+          "possibleOverlap": {
+            "type": "boolean"
+          },
+          "replacementAssignmentId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replacementOperationId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "actionKey",
+          "assignmentId",
+          "completedWon",
+          "disposition",
+          "possibleOverlap"
+        ],
+        "title": "AuditAttemptControlResponse",
+        "type": "object"
+      },
+      "AuditAttemptProgress": {
+        "properties": {
+          "assignmentId": {
+            "type": "string"
+          },
+          "outputSequence": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "assignmentId",
+          "outputSequence",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "AuditAttemptReadParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "afterSequence": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "assignmentId": {
+            "type": "string"
+          },
+          "limit": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "runId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "assignmentId",
+          "runId"
+        ],
+        "title": "AuditAttemptReadParams",
+        "type": "object"
+      },
+      "AuditAttemptReadResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "attempt": {
+            "$ref": "#/definitions/v2/AuditAttemptView"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/definitions/v2/AuditActivityEntry"
+            },
+            "type": "array"
+          },
+          "nextSequence": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "rawResult": {
+            "description": "The original terminal response, if retained; invalid JSON stays invalid.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "attempt",
+          "entries",
+          "nextSequence"
+        ],
+        "title": "AuditAttemptReadResponse",
+        "type": "object"
+      },
+      "AuditAttemptView": {
+        "properties": {
+          "assignmentId": {
+            "type": "string"
+          },
+          "assignmentState": {
+            "type": "string"
+          },
+          "attemptOrdinal": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "captureFailure": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "captureGap": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "captureTruncated": {
+            "type": "boolean"
+          },
+          "completed": {
+            "description": "True only for a canonical validated result, never inferred from activity.",
+            "type": "boolean"
+          },
+          "current": {
+            "type": "boolean"
+          },
+          "disposition": {
+            "description": "Contribution disposition is independent of execution certainty.",
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "operationState": {
+            "type": "string"
+          },
+          "outputCutoff": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "outputSequence": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ownerGeneration": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "possibleOverlap": {
+            "type": "boolean"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "reasoningEffort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reviewerId": {
+            "type": "string"
+          },
+          "reviewerOrdinal": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "runId": {
+            "type": "string"
+          },
+          "snapshotId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "assignmentId",
+          "assignmentState",
+          "attemptOrdinal",
+          "captureTruncated",
+          "completed",
+          "current",
+          "disposition",
+          "model",
+          "operationId",
+          "operationState",
+          "outputSequence",
+          "ownerGeneration",
+          "possibleOverlap",
+          "provider",
+          "reviewerId",
+          "reviewerOrdinal",
+          "revision",
+          "runId",
+          "snapshotId"
+        ],
+        "type": "object"
+      },
+      "AuditAttemptsParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "runId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "AuditAttemptsParams",
+        "type": "object"
+      },
+      "AuditAttemptsResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "attempts": {
+            "items": {
+              "$ref": "#/definitions/v2/AuditAttemptView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "attempts"
+        ],
+        "title": "AuditAttemptsResponse",
+        "type": "object"
+      },
       "AuditCancelParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "additionalProperties": false,
@@ -8543,6 +8979,13 @@
       "AuditProgressNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "attempts": {
+            "default": [],
+            "items": {
+              "$ref": "#/definitions/v2/AuditAttemptProgress"
+            },
+            "type": "array"
+          },
           "phase": {
             "$ref": "#/definitions/v2/AuditRunPhase"
           },

@@ -525,6 +525,21 @@ client_request_definitions! {
         serialization: None,
         response: v2::AuditCancelResponse,
     },
+    AuditAttempts => "audit/attempts" {
+        params: v2::AuditAttemptsParams,
+        serialization: None,
+        response: v2::AuditAttemptsResponse,
+    },
+    AuditAttemptRead => "audit/attempt/read" {
+        params: v2::AuditAttemptReadParams,
+        serialization: None,
+        response: v2::AuditAttemptReadResponse,
+    },
+    AuditAttemptControl => "audit/attempt/control" {
+        params: v2::AuditAttemptControlParams,
+        serialization: None,
+        response: v2::AuditAttemptControlResponse,
+    },
     AuditReleaseSlot => "audit/release-slot" {
         params: v2::AuditReleaseSlotParams,
         serialization: None,

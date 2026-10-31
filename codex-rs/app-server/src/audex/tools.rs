@@ -10,17 +10,19 @@ use codex_tools::{
 use codex_tools::{ResponsesApiNamespace, ResponsesApiNamespaceTool};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 pub(super) const TOOL_NAMES: [&str; 3] = ["list", "read", "search"];
 
 pub(super) struct SourceTools {
     tools: Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>>,
+    capture: Arc<OnceLock<super::capture::CaptureHandle>>,
 }
 
 impl SourceTools {
     pub(super) fn new(snapshot: &SnapshotHandle) -> anyhow::Result<Self> {
         let mut tools: Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> = Vec::new();
+        let capture = Arc::new(OnceLock::new());
         for name in TOOL_NAMES {
             let properties = match name {
                 "list" => json!({}),
@@ -51,6 +53,7 @@ impl SourceTools {
             };
             tools.push(Arc::new(SourceTool {
                 name,
+                capture: capture.clone(),
                 access: snapshot.access(AccessLimits::default()),
                 spec: ToolSpec::Namespace(ResponsesApiNamespace {
                     name: "audex_source".to_string(),
@@ -60,7 +63,7 @@ impl SourceTools {
                 }),
             }));
         }
-        Ok(Self { tools })
+        Ok(Self { tools, capture })
     }
 }
 
@@ -68,14 +71,18 @@ impl ToolContributor for SourceTools {
     fn tools(
         &self,
         _: &ExtensionData,
-        _: &ExtensionData,
+        thread: &ExtensionData,
     ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
+        if let Some(capture) = thread.get::<super::capture::CaptureHandle>() {
+            let _ = self.capture.set((*capture).clone());
+        }
         self.tools.clone()
     }
 }
 
 struct SourceTool {
     name: &'static str,
+    capture: Arc<OnceLock<super::capture::CaptureHandle>>,
     access: SnapshotAccess,
     spec: ToolSpec,
 }
@@ -187,7 +194,44 @@ impl<'call> ToolExecutor<ToolCall<'call>> for SourceTool {
         'call: 'a,
     {
         Box::pin(async move {
-            let value = self.execute(call.function_arguments()?).await?;
+            let arguments = call.function_arguments()?;
+            if let Some(capture) = self.capture.get() {
+                if !capture.allowed().await {
+                    return Err(FunctionCallError::RespondToModel(
+                        "reviewer attempt is stopped".to_owned(),
+                    ));
+                }
+                capture
+                    .tool(
+                        &call.turn_id,
+                        &call.call_id,
+                        "tool_start",
+                        json!({"tool":self.name}).to_string(),
+                    )
+                    .await
+                    .map_err(|_| {
+                        FunctionCallError::RespondToModel("activity capture unavailable".to_owned())
+                    })?;
+            }
+            let value = self.execute(arguments).await?;
+            if let Some(capture) = self.capture.get() {
+                if !capture.allowed().await {
+                    return Err(FunctionCallError::RespondToModel(
+                        "reviewer attempt is stopped".to_owned(),
+                    ));
+                }
+                capture
+                    .tool(
+                        &call.turn_id,
+                        &call.call_id,
+                        "tool_result",
+                        value.to_string(),
+                    )
+                    .await
+                    .map_err(|_| {
+                        FunctionCallError::RespondToModel("activity capture unavailable".to_owned())
+                    })?;
+            }
             Ok(Box::new(JsonToolOutput::new(value).with_external_context()) as Box<dyn ToolOutput>)
         })
     }

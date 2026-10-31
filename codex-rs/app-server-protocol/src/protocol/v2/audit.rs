@@ -2,7 +2,7 @@ use crate::{JsonSchema, TS};
 use serde::{Deserialize, Serialize};
 
 /// Audex CLI contract, independent of the Codex executable's package version.
-pub const AUDIT_PROTOCOL_VERSION: u32 = 2;
+pub const AUDIT_PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -168,4 +168,6 @@ pub struct AuditProgressNotification {
     pub run_id: String,
     pub revision: i64,
     pub phase: AuditRunPhase,
+    #[serde(default)]
+    pub attempts: Vec<super::AuditAttemptProgress>,
 }

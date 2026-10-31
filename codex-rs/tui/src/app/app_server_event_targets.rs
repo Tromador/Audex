@@ -309,6 +309,7 @@ mod tests {
                 run_id: ThreadId::new().to_string(),
                 revision: 1,
                 phase: codex_app_server_protocol::AuditRunPhase::Reviewing,
+                attempts: Vec::new(),
             },
         );
 

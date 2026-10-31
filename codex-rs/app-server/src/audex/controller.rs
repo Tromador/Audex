@@ -1,4 +1,5 @@
 //! Process-owned workflow. Codex execution uses the same durable boundary as deterministic tests.
+mod attempts;
 use super::reviewer;
 use super::snapshot::manifest::sha256_hex;
 use super::snapshot::{
@@ -69,6 +70,14 @@ pub(super) trait Dispatch: Send + Sync {
     fn available(&self) -> bool {
         true
     }
+    fn capture(&self, _operation: &str) -> Option<super::capture::CaptureHandle> {
+        None
+    }
+    fn request_interrupt(&self, operation: String) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let _ = self.interrupt(operation).await;
+        })
+    }
     fn start(&self, request: DispatchRequest) -> BoxFuture<'_, Observation>;
     fn inspect(&self, operation_id: String) -> BoxFuture<'_, Observation>;
     fn interrupt(&self, operation_id: String) -> BoxFuture<'_, Observation>;
@@ -100,7 +109,7 @@ pub(super) struct ReviewerSelection {
     pub reasoning_effort: Option<String>,
 }
 
-type ProgressVersion = (i64, Vec<(String, i64, i64)>);
+type ProgressVersion = (i64, Vec<(String, i64, i64, i64)>);
 
 pub(crate) struct AuditController {
     root: AbsolutePathBuf,
@@ -122,6 +131,8 @@ pub(crate) struct AuditController {
     notify: Arc<dyn Fn(AuditProgressNotification) + Send + Sync>,
     #[cfg(test)]
     fail_start_response: AtomicBool,
+    #[cfg(test)]
+    fail_control_response: AtomicBool,
 }
 
 impl AuditController {
@@ -191,6 +202,8 @@ impl AuditController {
             attempt_gates: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             fail_start_response: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_control_response: AtomicBool::new(false),
         })
     }
 
@@ -396,6 +409,15 @@ impl AuditController {
                     run: self.view(&params.run_id).await?,
                 }
                 .into())
+            }
+            ClientRequest::AuditAttempts { params, .. } => {
+                Ok(self.attempt_views(&params.run_id).await?.into())
+            }
+            ClientRequest::AuditAttemptRead { params, .. } => {
+                Ok(self.read_attempt(params).await?.into())
+            }
+            ClientRequest::AuditAttemptControl { params, .. } => {
+                Ok(self.control_attempt(params).await?.into())
             }
             _ => anyhow::bail!("not an audit request"),
         }
@@ -716,6 +738,29 @@ impl AuditController {
         if terminal(run.phase) {
             return Ok(());
         }
+        let capture_state = store.capture_state(&run.assignment_id).await?;
+        if capture_state.disposition != "active" {
+            return Ok(());
+        }
+        if let Some(failure) = capture_state.failure {
+            if !matches!(
+                run.assignment_state,
+                AssignmentState::Succeeded
+                    | AssignmentState::Failed
+                    | AssignmentState::Cancelled
+                    | AssignmentState::Unknown
+            ) {
+                store
+                    .finish_operation(
+                        &run.operation_id,
+                        run.attempt_revision,
+                        AssignmentState::Failed,
+                        &failure,
+                    )
+                    .await?;
+                return self.progress(id).await;
+            }
+        }
         if run.phase == RunPhase::Reporting {
             store.publish_report(id, run.revision).await?;
             return self.progress(id).await;
@@ -903,6 +948,15 @@ impl AuditController {
             {
                 return Ok(());
             }
+            if self.dispatch.capture(&run.operation_id).is_none() {
+                store
+                    .note_unavailable_capture_owner(
+                        &run.operation_id,
+                        &self.owner,
+                        chrono::Utc::now().timestamp_millis(),
+                    )
+                    .await?;
+            }
             drop(_gate);
             // Bound observation only, never submission. A stalled old runtime
             // cannot indefinitely monopolise the serial recovery worker.
@@ -946,6 +1000,16 @@ impl AuditController {
         );
         // A result already committed by another drive wins over any older
         // inspection or interruption. Reporting must not regress either.
+        if self
+            .store()
+            .await?
+            .capture_state(&current.assignment_id)
+            .await?
+            .disposition
+            != "active"
+        {
+            return Ok(());
+        }
         if terminal(current.phase)
             || current.phase == RunPhase::Reporting
             || matches!(
@@ -1161,10 +1225,35 @@ impl AuditController {
                         .await?;
                     return Ok(());
                 };
-                match store
-                    .commit_seeded_result(&run.operation_id, revision, snapshot, &raw)
-                    .await
-                {
+                let capture = self.dispatch.capture(&run.operation_id);
+                if let Some(failure) = capture.as_ref().and_then(|capture| capture.failure()) {
+                    store
+                        .finish_operation(
+                            &run.operation_id,
+                            revision,
+                            AssignmentState::Failed,
+                            failure,
+                        )
+                        .await?;
+                    return Ok(());
+                }
+                let prefix = capture.as_ref().map(|capture| capture.control_prefix());
+                let committed = store
+                    .commit_result_with_prefix(
+                        &run.operation_id,
+                        revision,
+                        snapshot,
+                        &raw,
+                        capture
+                            .as_ref()
+                            .zip(prefix.as_ref())
+                            .map(|(capture, prefix)| (capture.identity(), prefix.as_slice())),
+                    )
+                    .await;
+                if let Some(capture) = &capture {
+                    capture.completion_finished(committed.is_ok());
+                }
+                match committed {
                     Err(super::store::AuditStoreError::Snapshot(_)) => {
                         store
                             .record_observation_issue(
@@ -1180,14 +1269,13 @@ impl AuditController {
                 }
             }
             WorkState::Failed(reason) => {
-                store
-                    .finish_operation(
-                        &run.operation_id,
-                        revision,
-                        AssignmentState::Failed,
-                        &reason,
-                    )
-                    .await?;
+                self.finish_observed_operation(
+                    &run.operation_id,
+                    revision,
+                    AssignmentState::Failed,
+                    &reason,
+                )
+                .await?;
             }
             WorkState::Interrupted => {
                 let state = if run.control_intent == "cancel_requested" {
@@ -1195,8 +1283,7 @@ impl AuditController {
                 } else {
                     AssignmentState::Failed
                 };
-                store
-                    .finish_operation(&run.operation_id, revision, state, "interrupted")
+                self.finish_observed_operation(&run.operation_id, revision, state, "interrupted")
                     .await?;
             }
             WorkState::Ambiguous => {
@@ -1208,17 +1295,62 @@ impl AuditController {
         Ok(())
     }
 
+    async fn finish_observed_operation(
+        &self,
+        operation: &str,
+        revision: i64,
+        state: AssignmentState,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        let capture = self.dispatch.capture(operation);
+        let prefix = capture.as_ref().map(|capture| capture.control_prefix());
+        let result = self
+            .store()
+            .await?
+            .finish_operation_with_prefix(
+                operation,
+                revision,
+                state,
+                reason,
+                capture
+                    .as_ref()
+                    .zip(prefix.as_ref())
+                    .map(|(capture, prefix)| (capture.identity(), prefix.as_slice())),
+            )
+            .await;
+        if let Some(capture) = capture {
+            capture.completion_finished(result.is_ok());
+        }
+        result?;
+        Ok(())
+    }
+
     async fn progress(&self, id: &str) -> anyhow::Result<()> {
         let run = self.store().await?.load_run_metadata(id).await?;
         let mut notified = self.notified_revisions.lock().await;
         let attempts = self.store().await?.attempts(id).await?;
-        let version = (
-            run.revision,
-            attempts
-                .into_iter()
-                .map(|a| (a.assignment_id, a.attempt_revision, a.owner_generation))
-                .collect(),
-        );
+        let mut stamps = Vec::with_capacity(attempts.len());
+        let mut progress = Vec::with_capacity(attempts.len());
+        for attempt in attempts {
+            let sequence = self
+                .store()
+                .await?
+                .capture_state(&attempt.assignment_id)
+                .await?
+                .sequence;
+            progress.push(AuditAttemptProgress {
+                assignment_id: attempt.assignment_id.clone(),
+                revision: attempt.attempt_revision,
+                output_sequence: sequence,
+            });
+            stamps.push((
+                attempt.assignment_id,
+                attempt.attempt_revision,
+                attempt.owner_generation,
+                sequence,
+            ));
+        }
+        let version = (run.revision, stamps);
         if notified.get(id) == Some(&version) {
             return Ok(());
         }
@@ -1227,6 +1359,7 @@ impl AuditController {
             run_id: run.run_id,
             revision: run.revision,
             phase: phase(run.phase),
+            attempts: progress,
         });
         Ok(())
     }
