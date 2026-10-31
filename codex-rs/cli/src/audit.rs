@@ -402,7 +402,7 @@ async fn follow_run(
     let mut shown = None;
     let mut next_poll = tokio::time::Instant::now();
     loop {
-        if shown != Some(view.revision) {
+        if shown.as_ref() != Some(&view) {
             if view.capacity_released {
                 eprintln!(
                     "{}: capacity released by operator; this does not establish execution outcome",
@@ -426,7 +426,7 @@ async fn follow_run(
                     ""
                 }
             );
-            shown = Some(view.revision);
+            shown = Some(view.clone());
         }
         if let Some(code) = terminal_code(&view) {
             if let Some(report) = &view.report {

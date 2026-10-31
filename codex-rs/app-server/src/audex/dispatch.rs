@@ -235,7 +235,7 @@ impl CodexDispatch {
     async fn prepare(&self, operation: &str) -> anyhow::Result<(SnapshotHandle, PreparedReviewer)> {
         let store = self.store().await?;
         let run = store.run_for_operation(operation).await?;
-        let (input, _, policy, _) = store.controller_input(&run.run_id).await?;
+        let (input, _, policy, _) = store.attempt_input(operation).await?;
         let input: RetainedInput = serde_json::from_str(&input)?;
         anyhow::ensure!(input.version == 1, "unsupported retained audit input");
         let snapshot = SnapshotStore::new(
@@ -538,7 +538,7 @@ impl CodexDispatch {
         // Observation does not construct a reviewer, consult mutable provider
         // configuration, or resolve today's model catalogue. Verify retained evidence.
         let (_, policy_json, retained_digest, _) = store
-            .controller_input(&run.run_id)
+            .attempt_input(operation)
             .await
             .map_err(|e| DispatchFailure::new("retained_policy", e, false))?;
         if super::snapshot::manifest::sha256_hex(policy_json.as_bytes()) != retained_digest

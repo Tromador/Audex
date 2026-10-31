@@ -158,7 +158,7 @@ async fn migrations_pragmas_reopen_and_recovery_are_durable() {
     );
     assert_eq!(
         store.applied_migrations().await.expect("read migrations"),
-        vec![1, 2, 3, 4, 5, 6, 7]
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
     );
     let created = store
         .create_run(&create_request(&snapshot, "reopen"))
@@ -338,7 +338,16 @@ async fn cancellation_prevents_claim_and_dispatch_even_with_an_existing_lease() 
     );
     assert!(matches!(
         store
-            .record_dispatch(&created.operation_id, "owner", revision, 200)
+            .record_dispatch(
+                &created.operation_id,
+                "owner",
+                store
+                    .load_run_metadata(&created.run_id)
+                    .await
+                    .expect("attempt revision")
+                    .attempt_revision,
+                200
+            )
             .await,
         Err(AuditStoreError::InvalidTransition(_))
     ));
@@ -437,13 +446,20 @@ async fn seeded_findings_persist_and_report_is_reproducible_after_reopen() {
         ResultCommitOutcome::AlreadyCommitted { revision: 4, .. }
     ));
     let published = store
-        .publish_report(&created.run_id, revision)
+        .publish_report(
+            &created.run_id,
+            store
+                .load_run_metadata(&created.run_id)
+                .await
+                .expect("run revision")
+                .revision,
+        )
         .await
         .expect("publish report");
     let ReportPublishOutcome::Published { revision, report } = published else {
         panic!("expected published report");
     };
-    assert_eq!(revision, 5);
+    assert_eq!(revision, 4);
     let report_bytes = store.read_report(&report).expect("read report");
     assert_eq!(report.content_digest, sha256_hex(&report_bytes));
     assert!(
@@ -478,7 +494,7 @@ async fn seeded_findings_persist_and_report_is_reproducible_after_reopen() {
             .await
             .expect("repeat publication"),
         ReportPublishOutcome::AlreadyPublished {
-            revision: 5,
+            revision: 4,
             report
         }
     );
@@ -509,10 +525,10 @@ async fn empty_findings_succeed_and_invalid_seeded_results_fail_terminally() {
     ));
     assert!(matches!(
         store
-            .publish_report(&empty.run_id, 4)
+            .publish_report(&empty.run_id, 3)
             .await
             .expect("publish empty report"),
-        ReportPublishOutcome::Published { revision: 5, .. }
+        ReportPublishOutcome::Published { revision: 4, .. }
     ));
 
     let invalid = create_accepted_run(&store, &snapshot, "invalid-result").await;

@@ -6,18 +6,21 @@ use super::snapshot::{
     SnapshotId, SnapshotPath, SnapshotStore,
 };
 use super::store::{
-    AssignmentState, AuditRunRecord, AuditStore, ClaimOutcome, CreateRunRequest, OperationState,
-    RunPhase,
+    AssignmentState, AuditRunRecord, AuditStore, ClaimOutcome, CreateRunRequest, DEFAULT_WORKERS,
+    OperationState, RunPhase,
 };
 use codex_app_server_protocol::*;
 use codex_core::config::Config;
 use codex_exec_server::LocalFileSystem;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use futures::StreamExt;
 use futures::future::BoxFuture;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::result::Result;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, Notify, OnceCell};
 use tokio_util::sync::CancellationToken;
@@ -76,13 +79,28 @@ pub(super) trait Dispatch: Send + Sync {
 
 /// Keep local recovery from observing a dispatch whose acceptance call has not
 /// returned. This is advisory runtime state; cross-process recovery uses the lease.
-struct PendingDispatch<'a>(&'a AtomicBool);
+struct PendingDispatch<'a> {
+    pending: &'a StdMutex<HashSet<String>>,
+    operation: String,
+}
 
 impl Drop for PendingDispatch<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.pending
+            .lock()
+            .expect("pending attempts lock")
+            .remove(&self.operation);
     }
 }
+
+#[derive(Clone, serde::Serialize)]
+pub(super) struct ReviewerSelection {
+    pub provider: String,
+    pub model: String,
+    pub reasoning_effort: Option<String>,
+}
+
+type ProgressVersion = (i64, Vec<(String, i64, i64)>);
 
 pub(crate) struct AuditController {
     root: AbsolutePathBuf,
@@ -93,11 +111,14 @@ pub(crate) struct AuditController {
     owner: String,
     stop: CancellationToken,
     wake: Arc<Notify>,
-    polling: Mutex<HashMap<String, (i64, tokio::time::Instant, u32)>>,
-    notified_revisions: Mutex<HashMap<String, i64>>,
+    polling: Mutex<HashMap<String, ((i64, i64), tokio::time::Instant, u32)>>,
+    notified_revisions: Mutex<HashMap<String, ProgressVersion>>,
     /// Orders local start/cancel/shutdown against crossing the dispatch boundary.
     gate: Mutex<()>,
-    dispatch_pending: AtomicBool,
+    dispatch_pending: StdMutex<HashSet<String>>,
+    scheduled_attempts: StdMutex<HashSet<String>>,
+    worker_limit: u32,
+    attempt_gates: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
     notify: Arc<dyn Fn(AuditProgressNotification) + Send + Sync>,
     #[cfg(test)]
     fail_start_response: AtomicBool,
@@ -140,6 +161,17 @@ impl AuditController {
         dispatch: Arc<dyn Dispatch>,
         notify: Arc<dyn Fn(AuditProgressNotification) + Send + Sync>,
     ) -> Arc<Self> {
+        Self::new_with_worker_limit(config, models, dispatch, notify, DEFAULT_WORKERS)
+    }
+
+    fn new_with_worker_limit(
+        config: Arc<Config>,
+        models: SharedModelsManager,
+        dispatch: Arc<dyn Dispatch>,
+        notify: Arc<dyn Fn(AuditProgressNotification) + Send + Sync>,
+        worker_limit: u32,
+    ) -> Arc<Self> {
+        assert!(worker_limit > 0);
         Arc::new(Self {
             root: config.codex_home.join("audex"),
             config,
@@ -153,7 +185,10 @@ impl AuditController {
             polling: Mutex::new(HashMap::new()),
             notified_revisions: Mutex::new(HashMap::new()),
             gate: Mutex::new(()),
-            dispatch_pending: AtomicBool::new(false),
+            dispatch_pending: StdMutex::new(HashSet::new()),
+            scheduled_attempts: StdMutex::new(HashSet::new()),
+            worker_limit,
+            attempt_gates: StdMutex::new(HashMap::new()),
             #[cfg(test)]
             fail_start_response: AtomicBool::new(false),
         })
@@ -287,123 +322,15 @@ impl AuditController {
             }
             .into()),
             ClientRequest::AuditStart { params, .. } => {
-                let _gate = self.gate.lock().await;
-                let capture = CaptureRequest {
-                    source: match &params.source {
-                        AuditSource::Snippet { name, content } => CaptureSource::Snippet {
-                            logical_path: SnapshotPath::new(name.clone())?,
-                            bytes: content.as_bytes().to_vec(),
-                        },
-                        AuditSource::File { name, path } => CaptureSource::File {
-                            logical_path: SnapshotPath::new(name.clone())?,
-                            source_path: AbsolutePathBuf::from_absolute_path(path)?,
-                        },
-                    },
-                    context_documents: ContextDocuments {
-                        audex_guidance: params
-                            .audex_guidance
-                            .as_ref()
-                            .map(|text| text.as_bytes().to_vec()),
-                        agents_evidence: params
-                            .agents_evidence
-                            .as_ref()
-                            .map(|text| text.as_bytes().to_vec()),
-                    },
+                let selection = ReviewerSelection {
+                    provider: params.provider.clone(),
+                    model: params.model.clone(),
+                    reasoning_effort: params.reasoning_effort.clone(),
                 };
-                let snapshots = self.snapshots();
-                let captured = snapshots.capture(capture).await?;
-                let snapshot = snapshots.open(captured.snapshot_id()).await?;
-                let identity = sha256_hex(&serde_json::to_vec(&serde_json::json!({
-                    "version":1,"snapshotId":snapshot.snapshot_id(),"brief":params.brief,
-                    "provider":params.provider,"model":params.model,"reasoningEffort":params.reasoning_effort,
-                }))?);
-                *start_identity = Some(identity.clone());
-                if let Some(existing) = self
-                    .store()
-                    .await?
-                    .find_idempotent_request(&params.request_key, &identity)
-                    .await?
-                {
-                    return Ok(AuditStartResponse {
-                        run: self.view(&existing.run_id).await?,
-                    }
-                    .into());
-                }
-                anyhow::ensure!(!self.stop.is_cancelled(), "server is quiescing");
-                anyhow::ensure!(
-                    self.dispatch.available(),
-                    "reviewer execution is unavailable"
-                );
-                // IDs are not policy fields. Prepare once for preflight before creating durable work;
-                // later dispatch construction uses the durable run and assignment identifiers.
-                let prepared = Box::pin(reviewer::prepare(
-                    &self.config,
-                    self.models.as_ref(),
-                    &snapshot,
-                    reviewer::ReviewerRequest {
-                        run_id: "preflight".to_string(),
-                        assignment_id: "preflight".to_string(),
-                        brief: params.brief.clone(),
-                        provider: params.provider.clone(),
-                        model: params.model.clone(),
-                        reasoning_effort: params
-                            .reasoning_effort
-                            .as_deref()
-                            .map(str::parse)
-                            .transpose()
-                            .map_err(anyhow::Error::msg)?,
-                    },
-                    Arc::new(|_| {}),
-                ))
-                .await?;
-                let policy_json = serde_json::to_string(&prepared.policy)?;
-                // Source and project documents remain immutable snapshot objects, not
-                // duplicate large blobs in SQLite. Recovery needs only this audit input.
-                let request_json = serde_json::to_string(&serde_json::json!({
-                    "version":1, "brief":params.brief, "provider":params.provider,
-                    "model":params.model,
-                    "reasoningEffort":prepared.options.config.model_reasoning_effort,
-                }))?;
-                let request_digest = sha256_hex(request_json.as_bytes());
-                let created = self
-                    .store()
-                    .await?
-                    .create_run_with_input(
-                        &CreateRunRequest {
-                            request_key: params.request_key.clone(),
-                            snapshot_id: snapshot.snapshot_id().to_string(),
-                            manifest_digest: sha256_hex(&snapshot.manifest().to_pretty_bytes()?),
-                            manifest_path: format!(
-                                "snapshots/{}/manifest.json",
-                                snapshot.snapshot_id().digest()
-                            ),
-                            brief_digest: sha256_hex(params.brief.as_bytes()),
-                            policy_digest: prepared.policy_digest.clone(),
-                            input_digest: request_digest.clone(),
-                            provider: params.provider,
-                            model: params.model,
-                            reasoning_effort: prepared
-                                .options
-                                .config
-                                .model_reasoning_effort
-                                .as_ref()
-                                .map(ToString::to_string),
-                            reviewer_input_digest: sha256_hex(
-                                format!("{request_digest}:{}", prepared.policy_digest).as_bytes(),
-                            ),
-                            operation_input_digest: request_digest,
-                        },
-                        Some((&request_json, &policy_json, &identity)),
-                    )
-                    .await?;
-                self.wake.notify_one();
-                #[cfg(test)]
-                anyhow::ensure!(
-                    !self.fail_start_response.load(Ordering::SeqCst),
-                    "injected acknowledgement failure"
-                );
                 Ok(AuditStartResponse {
-                    run: self.view(&created.run_id).await?,
+                    run: self
+                        .commission_roster(params, vec![selection], start_identity)
+                        .await?,
                 }
                 .into())
             }
@@ -474,6 +401,137 @@ impl AuditController {
         }
     }
 
+    /// Internal foundation commissioning. Frontends retain their current single-reviewer contract.
+    async fn commission_roster(
+        &self,
+        params: AuditStartParams,
+        reviewers: Vec<ReviewerSelection>,
+        start_identity: &mut Option<String>,
+    ) -> anyhow::Result<AuditRunView> {
+        anyhow::ensure!(
+            !reviewers.is_empty() && reviewers.len() <= 64,
+            "reviewer roster must contain 1..64 entries"
+        );
+        let _gate = self.gate.lock().await;
+        let capture = CaptureRequest {
+            source: match &params.source {
+                AuditSource::Snippet { name, content } => CaptureSource::Snippet {
+                    logical_path: SnapshotPath::new(name.clone())?,
+                    bytes: content.as_bytes().to_vec(),
+                },
+                AuditSource::File { name, path } => CaptureSource::File {
+                    logical_path: SnapshotPath::new(name.clone())?,
+                    source_path: AbsolutePathBuf::from_absolute_path(path)?,
+                },
+            },
+            context_documents: ContextDocuments {
+                audex_guidance: params
+                    .audex_guidance
+                    .as_ref()
+                    .map(|text| text.as_bytes().to_vec()),
+                agents_evidence: params
+                    .agents_evidence
+                    .as_ref()
+                    .map(|text| text.as_bytes().to_vec()),
+            },
+        };
+        let snapshots = self.snapshots();
+        let captured = snapshots.capture(capture).await?;
+        let snapshot = snapshots.open(captured.snapshot_id()).await?;
+        let mut identity = sha256_hex(&serde_json::to_vec(&serde_json::json!({
+            "version":1,"snapshotId":snapshot.snapshot_id(),"brief":params.brief,
+            "provider":reviewers[0].provider,"model":reviewers[0].model,"reasoningEffort":reviewers[0].reasoning_effort,
+        }))?);
+        if reviewers.len() != 1 {
+            identity = sha256_hex(&serde_json::to_vec(&serde_json::json!({
+                "snapshotId": snapshot.snapshot_id(), "brief": params.brief, "reviewers": reviewers,
+            }))?);
+        }
+        *start_identity = Some(identity.clone());
+        if let Some(existing) = self
+            .store()
+            .await?
+            .find_idempotent_request(&params.request_key, &identity)
+            .await?
+        {
+            return self.view(&existing.run_id).await;
+        }
+        anyhow::ensure!(!self.stop.is_cancelled(), "server is quiescing");
+        anyhow::ensure!(
+            self.dispatch.available(),
+            "reviewer execution is unavailable"
+        );
+        let mut commissions = Vec::with_capacity(reviewers.len());
+        for selection in reviewers {
+            // Preflight never starts a thread; all attempts are commissioned together.
+            let prepared = Box::pin(reviewer::prepare(
+                &self.config,
+                self.models.as_ref(),
+                &snapshot,
+                reviewer::ReviewerRequest {
+                    run_id: "preflight".to_owned(),
+                    assignment_id: "preflight".to_owned(),
+                    brief: params.brief.clone(),
+                    provider: selection.provider.clone(),
+                    model: selection.model.clone(),
+                    reasoning_effort: selection
+                        .reasoning_effort
+                        .as_deref()
+                        .map(str::parse)
+                        .transpose()
+                        .map_err(anyhow::Error::msg)?,
+                },
+                Arc::new(|_| {}),
+            ))
+            .await?;
+            let policy_json = serde_json::to_string(&prepared.policy)?;
+            let request_json = serde_json::to_string(&serde_json::json!({
+                "version":1, "brief":params.brief, "provider":selection.provider, "model":selection.model,
+                "reasoningEffort":prepared.options.config.model_reasoning_effort,
+            }))?;
+            let request_digest = sha256_hex(request_json.as_bytes());
+            commissions.push(super::store::ReviewerCommission {
+                request: CreateRunRequest {
+                    request_key: params.request_key.clone(),
+                    snapshot_id: snapshot.snapshot_id().to_string(),
+                    manifest_digest: sha256_hex(&snapshot.manifest().to_pretty_bytes()?),
+                    manifest_path: format!(
+                        "snapshots/{}/manifest.json",
+                        snapshot.snapshot_id().digest()
+                    ),
+                    brief_digest: sha256_hex(params.brief.as_bytes()),
+                    policy_digest: prepared.policy_digest.clone(),
+                    input_digest: request_digest.clone(),
+                    provider: selection.provider,
+                    model: selection.model,
+                    reasoning_effort: prepared
+                        .options
+                        .config
+                        .model_reasoning_effort
+                        .as_ref()
+                        .map(ToString::to_string),
+                    reviewer_input_digest: sha256_hex(
+                        format!("{request_digest}:{}", prepared.policy_digest).as_bytes(),
+                    ),
+                    operation_input_digest: request_digest,
+                },
+                input: Some((request_json, policy_json)),
+            });
+        }
+        let created = self
+            .store()
+            .await?
+            .create_roster(&commissions, Some(&identity))
+            .await?;
+        self.wake.notify_one();
+        #[cfg(test)]
+        anyhow::ensure!(
+            !self.fail_start_response.load(Ordering::SeqCst),
+            "injected acknowledgement failure"
+        );
+        self.view(&created.run_id).await
+    }
+
     async fn view(&self, id: &str) -> anyhow::Result<AuditRunView> {
         self.run_view(id, true).await
     }
@@ -527,58 +585,111 @@ impl AuditController {
     }
 
     #[cfg(test)]
-    async fn tick(&self) -> anyhow::Result<()> {
+    async fn tick(self: &Arc<Self>) -> anyhow::Result<()> {
         self.recover_runs(false).await
     }
 
-    async fn recover_runs(&self, scheduled: bool) -> anyhow::Result<()> {
-        let store = self.store().await?;
-        for (id, before_revision) in store.recovery_candidates().await? {
+    async fn recover_runs(self: &Arc<Self>, scheduled: bool) -> anyhow::Result<()> {
+        let candidates = self.store().await?.attempt_candidates().await?;
+        if !scheduled {
+            let results = futures::stream::iter(candidates)
+                .map(|(id, _, _)| async move { self.drive_operation(&id).await })
+                .buffer_unordered(64)
+                .collect::<Vec<_>>()
+                .await;
+            for result in results {
+                result?;
+            }
+            return Ok(());
+        }
+        for (operation, run_revision, attempt_revision) in candidates {
             if self.stop.is_cancelled() {
                 break;
             }
-            let previous = self.polling.lock().await.get(&id).copied();
-            if scheduled
-                && previous.is_some_and(|(revision, due, _)| {
-                    revision == before_revision && due > tokio::time::Instant::now()
+            let version = (run_revision, attempt_revision);
+            if self
+                .polling
+                .lock()
+                .await
+                .get(&operation)
+                .is_some_and(|(previous, due, _)| {
+                    *previous == version && *due > tokio::time::Instant::now()
                 })
             {
                 continue;
             }
-            let mut failed = if let Err(error) = self.drive(&id).await {
-                tracing::warn!(run_id=%id, %error, "Audex run retained for recovery");
-                true
-            } else {
-                false
-            };
-            let mut after = store.load_run_metadata(&id).await?;
-            if scheduled && !failed && after.phase == RunPhase::Reporting {
-                // Local rendering needs no further observation delay. An artefact
-                // failure parks only this run, not every later recovery candidate.
-                if let Err(error) = self.drive(&id).await {
-                    tracing::warn!(run_id=%id,%error,"Audex reporting retained for recovery");
-                    failed = true;
-                }
-                after = store.load_run_metadata(&id).await?;
+            if !self
+                .scheduled_attempts
+                .lock()
+                .expect("scheduled attempts lock")
+                .insert(operation.clone())
+            {
+                continue;
             }
-            let attempt = if failed || after.observation_pending {
-                previous.map_or(1, |(_, _, n)| n.saturating_add(1))
-            } else {
-                0
-            };
-            let seconds = if attempt > 0 {
-                2u64.pow(attempt.min(6)).min(60)
-            } else {
-                1
-            };
-            self.polling.lock().await.insert(
-                id,
-                (
-                    after.revision,
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(seconds),
-                    attempt,
-                ),
-            );
+            let controller = self.clone();
+            tokio::spawn(async move {
+                let _pending = PendingDispatch {
+                    pending: &controller.scheduled_attempts,
+                    operation: operation.clone(),
+                };
+                let previous = controller.polling.lock().await.get(&operation).copied();
+                let result = async {
+                    controller.drive_operation(&operation).await?;
+                    let after = controller
+                        .store()
+                        .await?
+                        .load_operation_metadata(&operation)
+                        .await?;
+                    if after.phase == RunPhase::Reporting {
+                        // Rendering is local work and needs no further observation delay.
+                        controller.drive_operation(&operation).await?;
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await;
+                let failed = if let Err(error) = result {
+                    tracing::warn!(operation_id=%operation, %error, "Audex attempt retained for recovery");
+                    true
+                } else {
+                    false
+                };
+                if let Ok(after) = controller
+                    .store()
+                    .await
+                    .expect("initialised store")
+                    .load_operation_metadata(&operation)
+                    .await
+                {
+                    let n = if failed || after.observation_pending {
+                        previous.map_or(1, |(_, _, n)| n.saturating_add(1))
+                    } else {
+                        0
+                    };
+                    let delay = if n > 0 { 2u64.pow(n.min(6)).min(60) } else { 1 };
+                    controller.polling.lock().await.insert(
+                        operation,
+                        (
+                            (after.revision, after.attempt_revision),
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(delay),
+                            n,
+                        ),
+                    );
+                }
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    async fn drive(&self, id: &str) -> anyhow::Result<()> {
+        let attempts = self.store().await?.attempts(id).await?;
+        let results = futures::stream::iter(attempts)
+            .map(|attempt| async move { self.drive_operation(&attempt.operation_id).await })
+            .buffer_unordered(64)
+            .collect::<Vec<_>>()
+            .await;
+        for result in results {
+            result?;
         }
         Ok(())
     }
@@ -587,13 +698,21 @@ impl AuditController {
         clippy::await_holding_invalid_type,
         reason = "serialize local workflow transitions; release the gate before every dispatcher await"
     )]
-    async fn drive(&self, id: &str) -> anyhow::Result<()> {
-        let _gate = self.gate.lock().await;
-        if self.dispatch_pending.load(Ordering::SeqCst) {
+    async fn drive_operation(&self, operation: &str) -> anyhow::Result<()> {
+        let gate = self.attempt_gate(operation);
+        let _gate = gate.lock().await;
+        if self
+            .dispatch_pending
+            .lock()
+            .expect("pending attempts lock")
+            .contains(operation)
+        {
             return Ok(());
         }
         let store = self.store().await?;
-        let mut run = store.load_run(id).await?;
+        let mut run = store.run_for_operation(operation).await?;
+        let id = run.run_id.clone();
+        let id = id.as_str();
         if terminal(run.phase) {
             return Ok(());
         }
@@ -607,7 +726,7 @@ impl AuditController {
             store
                 .finish_operation(
                     &run.operation_id,
-                    run.revision,
+                    run.attempt_revision,
                     AssignmentState::Cancelled,
                     "cancelled_before_dispatch",
                 )
@@ -633,7 +752,7 @@ impl AuditController {
                     store
                         .finish_operation(
                             &run.operation_id,
-                            run.revision,
+                            run.attempt_revision,
                             AssignmentState::Failed,
                             "snapshot_integrity_failure",
                         )
@@ -651,13 +770,13 @@ impl AuditController {
         };
         // Do not recapture a file or reread its original working directory on restart.
         let (_, policy_json, policy_digest, manifest_digest) =
-            match store.controller_input(id).await {
+            match store.attempt_input(operation).await {
                 Ok(input) => input,
                 Err(_) => {
                     store
                         .record_observation_issue(
                             &run.operation_id,
-                            run.revision,
+                            run.attempt_revision,
                             "retained_execution_input_unavailable",
                         )
                         .await?;
@@ -668,7 +787,7 @@ impl AuditController {
             store
                 .record_observation_issue(
                     &run.operation_id,
-                    run.revision,
+                    run.attempt_revision,
                     "retained_policy_integrity_failure",
                 )
                 .await?;
@@ -689,21 +808,27 @@ impl AuditController {
                 store
                     .record_observation_issue(
                         &run.operation_id,
-                        run.revision,
+                        run.attempt_revision,
                         snapshot_issue.unwrap_or("snapshot_unavailable"),
                     )
                     .await?;
                 return self.progress(id).await;
             }
-            store.bind_snapshot(id, run.revision).await?;
-            run = store.load_run(id).await?;
+            {
+                let _binding = self.gate.lock().await;
+                let current = store.run_for_operation(operation).await?;
+                if current.phase == RunPhase::Created {
+                    store.bind_snapshot(id, current.revision).await?;
+                }
+            }
+            run = store.run_for_operation(operation).await?;
         }
         if run.operation_state == OperationState::Planned {
             if run.control_intent == "cancel_requested" {
                 store
                     .finish_operation(
                         &run.operation_id,
-                        run.revision,
+                        run.attempt_revision,
                         AssignmentState::Cancelled,
                         "cancelled_before_dispatch",
                     )
@@ -712,28 +837,40 @@ impl AuditController {
                 store
                     .record_observation_issue(
                         &run.operation_id,
-                        run.revision,
+                        run.attempt_revision,
                         snapshot_issue.unwrap_or("snapshot_unavailable"),
                     )
                     .await?;
             } else if self.dispatch.available() && !self.stop.is_cancelled() {
                 let now = chrono::Utc::now().timestamp_millis();
                 if store
-                    .claim_operation(&run.operation_id, &self.owner, now, now + 30_000)
+                    .claim_operation_with_limit(
+                        &run.operation_id,
+                        &self.owner,
+                        now,
+                        now + 30_000,
+                        self.worker_limit,
+                    )
                     .await?
                     != ClaimOutcome::Acquired
                 {
                     return Ok(());
                 }
                 store
-                    .record_dispatch(&run.operation_id, &self.owner, run.revision, now)
+                    .record_dispatch(&run.operation_id, &self.owner, run.attempt_revision, now)
                     .await?;
                 if self.stop.is_cancelled() {
                     return Ok(());
                 }
-                run = store.load_run(id).await?;
-                self.dispatch_pending.store(true, Ordering::SeqCst);
-                let _pending = PendingDispatch(&self.dispatch_pending);
+                run = store.run_for_operation(operation).await?;
+                self.dispatch_pending
+                    .lock()
+                    .expect("pending attempts lock")
+                    .insert(operation.to_owned());
+                let _pending = PendingDispatch {
+                    pending: &self.dispatch_pending,
+                    operation: operation.to_owned(),
+                };
                 drop(_gate);
                 // Dispatching is durable before this boundary. No recovery path repeats it.
                 let observation = self
@@ -795,8 +932,13 @@ impl AuditController {
         snapshot_issue: Option<&str>,
         observation: Observation,
     ) -> anyhow::Result<()> {
-        let _gate = self.gate.lock().await;
-        let current = self.store().await?.load_run(&observed_run.run_id).await?;
+        let gate = self.attempt_gate(&observed_run.operation_id);
+        let _gate = gate.lock().await;
+        let current = self
+            .store()
+            .await?
+            .run_for_operation(&observed_run.operation_id)
+            .await?;
         anyhow::ensure!(
             current.operation_id == observed_run.operation_id
                 && current.snapshot_id == observed_run.snapshot_id,
@@ -804,10 +946,22 @@ impl AuditController {
         );
         // A result already committed by another drive wins over any older
         // inspection or interruption. Reporting must not regress either.
-        if terminal(current.phase) || current.phase == RunPhase::Reporting {
+        if terminal(current.phase)
+            || current.phase == RunPhase::Reporting
+            || matches!(
+                current.assignment_state,
+                AssignmentState::Succeeded
+                    | AssignmentState::Failed
+                    | AssignmentState::Cancelled
+                    | AssignmentState::Unknown
+            )
+        {
             return Ok(());
         }
-        if current.revision != observed_run.revision {
+        if current.attempt_revision != observed_run.attempt_revision
+            || current.control_intent != observed_run.control_intent
+            || current.owner_generation != observed_run.owner_generation
+        {
             let positive_evidence = matches!(
                 &observation,
                 Observation::Accepted { operation_id, snapshot_id, receipt, .. }
@@ -852,6 +1006,15 @@ impl AuditController {
         Ok(())
     }
 
+    fn attempt_gate(&self, operation: &str) -> Arc<Mutex<()>> {
+        self.attempt_gates
+            .lock()
+            .expect("attempt gates lock")
+            .entry(operation.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     async fn apply(
         &self,
         run: &AuditRunRecord,
@@ -865,7 +1028,7 @@ impl AuditController {
                 store
                     .finish_unsubmitted_operation(
                         &run.operation_id,
-                        run.revision,
+                        run.attempt_revision,
                         if run.control_intent == "cancel_requested" {
                             AssignmentState::Cancelled
                         } else {
@@ -880,7 +1043,7 @@ impl AuditController {
                 store
                     .record_observation_issue(
                         &run.operation_id,
-                        run.revision,
+                        run.attempt_revision,
                         snapshot_issue.unwrap_or(&diagnostic),
                     )
                     .await?;
@@ -890,7 +1053,7 @@ impl AuditController {
                 store
                     .finish_operation(
                         &run.operation_id,
-                        run.revision,
+                        run.attempt_revision,
                         AssignmentState::Unknown,
                         &diagnostic,
                     )
@@ -912,7 +1075,7 @@ impl AuditController {
                 store
                     .finish_operation(
                         &run.operation_id,
-                        run.revision,
+                        run.attempt_revision,
                         if run.control_intent == "cancel_requested" {
                             AssignmentState::Cancelled
                         } else {
@@ -931,7 +1094,7 @@ impl AuditController {
                 store
                     .finish_operation(
                         &run.operation_id,
-                        run.revision,
+                        run.attempt_revision,
                         AssignmentState::Unknown,
                         "acceptance_identity_contradiction",
                     )
@@ -942,7 +1105,7 @@ impl AuditController {
                 store
                     .finish_operation(
                         &run.operation_id,
-                        run.revision,
+                        run.attempt_revision,
                         AssignmentState::Unknown,
                         &format!("rejection_contradicts_acceptance: {reason}"),
                     )
@@ -953,14 +1116,14 @@ impl AuditController {
                 store
                     .record_observation_issue(
                         &run.operation_id,
-                        run.revision,
+                        run.attempt_revision,
                         "acceptance_or_outcome_unconfirmed",
                     )
                     .await?;
                 return Ok(());
             }
         };
-        let mut revision = run.revision;
+        let mut revision = run.attempt_revision;
         if run.operation_state == OperationState::Dispatching {
             store
                 .record_acceptance(
@@ -970,7 +1133,10 @@ impl AuditController {
                     &receipt,
                 )
                 .await?;
-            revision = store.load_run(&run.run_id).await?.revision;
+            revision = store
+                .run_for_operation(&run.operation_id)
+                .await?
+                .attempt_revision;
         }
         match state {
             WorkState::Live => {
@@ -1045,10 +1211,18 @@ impl AuditController {
     async fn progress(&self, id: &str) -> anyhow::Result<()> {
         let run = self.store().await?.load_run_metadata(id).await?;
         let mut notified = self.notified_revisions.lock().await;
-        if notified.get(id) == Some(&run.revision) {
+        let attempts = self.store().await?.attempts(id).await?;
+        let version = (
+            run.revision,
+            attempts
+                .into_iter()
+                .map(|a| (a.assignment_id, a.attempt_revision, a.owner_generation))
+                .collect(),
+        );
+        if notified.get(id) == Some(&version) {
             return Ok(());
         }
-        notified.insert(id.to_owned(), run.revision);
+        notified.insert(id.to_owned(), version);
         (self.notify)(AuditProgressNotification {
             run_id: run.run_id,
             revision: run.revision,

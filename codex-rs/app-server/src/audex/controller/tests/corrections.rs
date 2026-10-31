@@ -205,7 +205,11 @@ async fn healthy_observation_clears_pending_idempotently_and_rejects_stale_relea
     controller.drive(&id).await?;
     let healthy = store.load_run(&id).await?;
     assert!(!healthy.observation_pending);
-    assert_eq!(healthy.revision, bad.revision + 1);
+    assert_eq!(
+        healthy.revision, bad.revision,
+        "attempt health does not advance the run revision"
+    );
+    assert_eq!(healthy.attempt_revision, bad.attempt_revision + 1);
     controller.drive(&id).await?;
     assert_eq!(store.load_run(&id).await?.revision, healthy.revision);
     assert!(release(&controller, &id, bad.revision, true).await.is_err());
@@ -225,7 +229,7 @@ async fn completion_before_release_preserves_terminal_outcome_without_releasing_
     let run = store.load_run(&id).await?;
     assert!(release(&controller, &id, run.revision, true).await.is_err());
     store
-        .record_observation_issue(&run.operation_id, run.revision, "lost observation")
+        .record_observation_issue(&run.operation_id, run.attempt_revision, "lost observation")
         .await?;
     let pending = store.load_run(&id).await?;
     assert!(
@@ -264,7 +268,7 @@ async fn release_while_completion_observation_is_suspended_retains_both_audits()
     let store = controller.store().await?;
     let run = store.load_run(&id).await?;
     store
-        .record_observation_issue(&run.operation_id, run.revision, "lost observation")
+        .record_observation_issue(&run.operation_id, run.attempt_revision, "lost observation")
         .await?;
     api(&controller, "audit/cancel", json!({"runId":id}))
         .await
@@ -303,7 +307,7 @@ async fn release_while_completion_observation_is_suspended_retains_both_audits()
 async fn stalled_released_observation_cannot_permanently_block_worker_dispatch()
 -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
-    let (controller, fake, _) = fixture(&temp).await;
+    let (controller, fake, notifications) = fixture(&temp).await;
     let id = start(&controller, "stalled-released").await;
     controller.drive(&id).await?;
     let store = controller.store().await?;
@@ -322,6 +326,23 @@ async fn stalled_released_observation_cannot_permanently_block_worker_dispatch()
     let driver = controller.clone();
     let task = tokio::spawn(async move { driver.tick().await });
     fake.interrupt_entered.notified().await;
+    // tick drives peers concurrently. Finish the sibling's durable acceptance
+    // and progress reads before advancing time past SQLx's acquisition timeout.
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let accepted = store.load_run(&next).await?.operation_state == OperationState::Accepted;
+            let notified = notifications
+                .lock()
+                .expect("notifications")
+                .iter()
+                .any(|event| event.run_id == next && event.phase == AuditRunPhase::Reviewing);
+            if accepted && notified {
+                break anyhow::Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
     tokio::time::pause();
     tokio::time::advance(OBSERVATION_TIMEOUT + std::time::Duration::from_secs(1)).await;
     tokio::time::resume();

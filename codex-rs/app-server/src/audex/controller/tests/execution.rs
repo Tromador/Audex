@@ -17,6 +17,7 @@ use wiremock::{
 };
 
 mod corrections;
+mod foundations;
 mod preparation;
 mod recovery;
 
@@ -720,7 +721,7 @@ fn cancellation_or_terminal_classification_during_real_startup_prevents_sampling
                 store
                     .finish_operation(
                         &run.operation_id,
-                        run.revision,
+                        run.attempt_revision,
                         AssignmentState::Unknown,
                         "acceptance_or_outcome_unknown",
                     )

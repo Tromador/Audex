@@ -32,8 +32,20 @@ async fn migration_keeps_legacy_submission_uncertainty_and_positive_evidence() -
                 .bind(name).bind(name).bind(turn).execute(&pool).await?;
         }
     }
-    pool.close().await;
-    let store = AuditStore::open(root).await?;
+    Migrator::with_migrations(
+        AUDEX_MIGRATOR
+            .iter()
+            .filter(|m| m.version <= 7)
+            .cloned()
+            .collect(),
+    )
+    .run(&pool)
+    .await?;
+    let store = AuditStore {
+        database_path: root.join(DATABASE_FILENAME).into_path_buf(),
+        root,
+        pool,
+    };
     assert_eq!(
         store.submission_boundary("planned").await?,
         SubmissionBoundary::Unsubmitted

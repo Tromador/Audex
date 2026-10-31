@@ -2,6 +2,7 @@ use super::*;
 
 mod corrections;
 mod execution;
+mod foundations;
 mod remaining;
 mod residual;
 use codex_models_manager::{ModelOrigin, manager::StaticModelsManager};
@@ -54,7 +55,7 @@ impl Dispatch for Fake {
                 .await
                 .expect("open observer store");
             let run = store
-                .load_run(&request.run_id)
+                .run_for_operation(&request.operation_id)
                 .await
                 .expect("durable run before dispatch");
             assert_eq!(run.operation_state, OperationState::Dispatching);
@@ -171,11 +172,12 @@ async fn fixture(
     let notifications = Arc::new(StdMutex::new(Vec::new()));
     let sink = notifications.clone();
     (
-        AuditController::new(
+        AuditController::new_with_worker_limit(
             Arc::new(config),
             models,
             fake.clone(),
             Arc::new(move |event| sink.lock().expect("sink").push(event)),
+            1, // Exercise the existing single-worker option in legacy compatibility tests.
         ),
         fake,
         notifications,
@@ -321,7 +323,19 @@ async fn competing_controllers_dispatch_once_and_reopen_reporting_locally() {
         .await
         .expect("run");
     fake.replace(&run.operation_id, WorkState::Completed(empty_result(&run)));
-    first.tick().await.expect("commit without report");
+    // Either controller can win the lease; only that live owner observes work
+    // during its unexpired lease. Completion must not assume an ordering winner.
+    let owner: String = sqlx::query_scalar("SELECT lease_owner FROM operations WHERE id=?")
+        .bind(&run.operation_id)
+        .fetch_one(&first.store().await.expect("store").pool_for_tests())
+        .await
+        .expect("lease holder");
+    let holder = if owner == first.owner {
+        &first
+    } else {
+        &second
+    };
+    holder.tick().await.expect("commit without report");
     assert_eq!(read(&first, &id).await["phase"], "reporting");
     drop(first);
     second.tick().await.expect("report after restart");

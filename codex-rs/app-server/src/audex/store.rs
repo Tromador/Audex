@@ -25,7 +25,12 @@ use uuid::Uuid;
 
 static AUDEX_MIGRATOR: Migrator = sqlx_macros::migrate!("./migrations/audex");
 #[cfg(test)]
+mod foundation_tests;
+mod foundations;
+#[cfg(test)]
 mod submission_tests;
+pub(super) use foundations::{DEFAULT_WORKERS, ReviewerCommission};
+use foundations::{single_reviewer, update_attempt_revision};
 const DATABASE_FILENAME: &str = "audit-state.sqlite3";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_IDENTIFIER_BYTES: usize = 512;
@@ -190,6 +195,14 @@ pub(crate) struct AuditRunRecord {
     pub phase: RunPhase,
     pub control_intent: String,
     pub revision: i64,
+    pub reviewer_id: String,
+    pub reviewer_ordinal: i64,
+    pub attempt_ordinal: i64,
+    pub attempt_revision: i64,
+    pub owner_generation: i64,
+    pub provider: String,
+    pub model: String,
+    pub reasoning_effort: Option<String>,
     pub outcome: Option<String>,
     pub assignment_id: String,
     pub assignment_state: AssignmentState,
@@ -289,6 +302,7 @@ struct OperationContext {
     run_phase: RunPhase,
     control_intent: String,
     run_revision: i64,
+    attempt_revision: i64,
     assignment_state: AssignmentState,
     operation_state: OperationState,
     lease_owner: Option<String>,
@@ -438,10 +452,11 @@ where
 {
     let row = sqlx::query(
         "SELECT r.id AS run_id, r.snapshot_id, r.phase, r.control_intent, r.revision,
-                a.id AS assignment_id, a.state AS assignment_state,
+                a.id AS assignment_id, a.state AS assignment_state, t.revision AS attempt_revision,
                 o.state AS operation_state, o.lease_owner, o.lease_expires_at_ms
          FROM operations o
          JOIN reviewer_assignments a ON a.id=o.assignment_id
+         JOIN audit_attempts t ON t.assignment_id=a.id
          JOIN audit_runs r ON r.id=a.run_id
          WHERE o.id=?",
     )
@@ -455,6 +470,7 @@ where
         run_phase: RunPhase::parse(row.try_get("phase")?)?,
         control_intent: row.try_get("control_intent")?,
         run_revision: row.try_get("revision")?,
+        attempt_revision: row.try_get("attempt_revision")?,
         assignment_state: AssignmentState::parse(row.try_get("assignment_state")?)?,
         operation_state: OperationState::parse(row.try_get("operation_state")?)?,
         lease_owner: row.try_get("lease_owner")?,
@@ -899,7 +915,7 @@ pub(crate) enum AuditStoreError {
     InvalidInput(String),
     #[error("audit-store state transition is invalid: {0}")]
     InvalidTransition(String),
-    #[error("run revision conflict: expected {expected}, found {actual}")]
+    #[error("audit revision conflict: expected {expected}, found {actual}")]
     RevisionConflict { expected: i64, actual: i64 },
     #[error("idempotency key conflicts with a different operation: {0}")]
     IdempotencyConflict(String),
@@ -950,9 +966,8 @@ impl AuditStore {
         &self,
         operation: &str,
     ) -> Result<AuditRunRecord, AuditStoreError> {
-        let id: String = sqlx::query_scalar("SELECT a.run_id FROM operations o JOIN reviewer_assignments a ON a.id=o.assignment_id WHERE o.id=?")
-            .bind(operation).fetch_one(&self.pool).await?;
-        self.load_run(&id).await
+        let record = self.load_operation_metadata(operation).await?;
+        self.verify_record(record).await
     }
 
     pub(super) async fn execution(
@@ -1028,11 +1043,20 @@ impl AuditStore {
     ) -> Result<i64, AuditStoreError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let state = read_operation_context(&mut *tx, operation).await?;
-        if state.run_phase.is_terminal() || state.run_phase == RunPhase::Reporting {
+        if state.run_phase.is_terminal()
+            || state.run_phase == RunPhase::Reporting
+            || matches!(
+                state.assignment_state,
+                AssignmentState::Succeeded
+                    | AssignmentState::Failed
+                    | AssignmentState::Cancelled
+                    | AssignmentState::Unknown
+            )
+        {
             tx.commit().await?;
-            return Ok(state.run_revision);
+            return Ok(state.attempt_revision);
         }
-        require_revision(expected_revision, state.run_revision)?;
+        require_revision(expected_revision, state.attempt_revision)?;
         let previous: (Option<String>, Option<String>) =
             sqlx::query_as("SELECT error,retry_classification FROM operations WHERE id=?")
                 .bind(operation)
@@ -1043,14 +1067,20 @@ impl AuditStore {
             && previous.1.as_deref() == Some("observe_only")
         {
             tx.commit().await?;
-            return Ok(state.run_revision);
+            return Ok(state.attempt_revision);
         }
         let now = now_millis();
         sqlx::query("UPDATE operations SET error=?,retry_classification='observe_only',updated_at_ms=? WHERE id=?")
             .bind(diagnostic).bind(now).bind(operation).execute(&mut *tx).await?;
-        update_run_revision(&mut tx, &state.run_id, state.run_revision + 1, now).await?;
+        update_attempt_revision(
+            &mut tx,
+            &state.assignment_id,
+            state.attempt_revision + 1,
+            now,
+        )
+        .await?;
         tx.commit().await?;
-        Ok(state.run_revision + 1)
+        Ok(state.attempt_revision + 1)
     }
 
     pub(super) async fn clear_observation_issue(
@@ -1060,12 +1090,12 @@ impl AuditStore {
     ) -> Result<i64, AuditStoreError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let state = read_operation_context(&mut *tx, operation).await?;
-        require_revision(expected_revision, state.run_revision)?;
+        require_revision(expected_revision, state.attempt_revision)?;
         let updated = sqlx::query("UPDATE operations SET error=NULL,retry_classification=NULL,updated_at_ms=? WHERE id=? AND retry_classification='observe_only'")
             .bind(now_millis()).bind(operation).execute(&mut *tx).await?.rows_affected();
-        let revision = state.run_revision + i64::from(updated != 0);
+        let revision = state.attempt_revision + i64::from(updated != 0);
         if updated != 0 {
-            update_run_revision(&mut tx, &state.run_id, revision, now_millis()).await?;
+            update_attempt_revision(&mut tx, &state.assignment_id, revision, now_millis()).await?;
         }
         tx.commit().await?;
         Ok(revision)
@@ -1191,29 +1221,6 @@ impl AuditStore {
         Ok(held_by.as_deref() == Some(owner) || expires.is_none_or(|expiry| expiry <= now))
     }
 
-    pub(super) async fn controller_input(
-        &self,
-        run_id: &str,
-    ) -> Result<(String, String, String, String), AuditStoreError> {
-        let row = sqlx::query(
-            "SELECT i.request_json, i.policy_json, r.policy_digest, r.manifest_digest, r.input_digest
-             FROM audit_inputs i JOIN audit_runs r ON r.id=i.run_id WHERE i.run_id=?",
-        ).bind(run_id).fetch_one(&self.pool).await?;
-        let request_json: String = row.try_get("request_json")?;
-        let input_digest: String = row.try_get("input_digest")?;
-        if sha256_hex(request_json.as_bytes()) != input_digest {
-            return Err(AuditStoreError::InvalidPersistedState(
-                "retained audit input digest mismatch".to_string(),
-            ));
-        }
-        Ok((
-            request_json,
-            row.try_get("policy_json")?,
-            row.try_get("policy_digest")?,
-            row.try_get("manifest_digest")?,
-        ))
-    }
-
     pub(super) async fn list_run_ids(
         &self,
         after: &str,
@@ -1299,7 +1306,7 @@ impl AuditStore {
                     .await?;
             if boundary != "unsubmitted" {
                 tx.commit().await?;
-                return Ok(state.run_revision);
+                return Ok(state.attempt_revision);
             }
         }
         // A concurrently committed result wins; repeated terminal observations are harmless.
@@ -1311,9 +1318,9 @@ impl AuditStore {
                 | AssignmentState::Unknown
         ) {
             tx.commit().await?;
-            return Ok(state.run_revision);
+            return Ok(state.attempt_revision);
         }
-        require_revision(expected_revision, state.run_revision)?;
+        require_revision(expected_revision, state.attempt_revision)?;
         let (assignment, operation, phase) = match terminal {
             AssignmentState::Cancelled => ("cancelled", "failed", "cancelled"),
             AssignmentState::Unknown => ("unknown", "unknown", "failed"),
@@ -1338,10 +1345,19 @@ impl AuditStore {
         .bind(&state.assignment_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("UPDATE audit_runs SET phase=?, outcome=?, revision=revision+1, updated_at_ms=? WHERE id=?")
-            .bind(phase).bind(reason).bind(now).bind(&state.run_id).execute(&mut *tx).await?;
+        update_attempt_revision(
+            &mut tx,
+            &state.assignment_id,
+            state.attempt_revision + 1,
+            now,
+        )
+        .await?;
+        if single_reviewer(&mut tx, &state.run_id).await? {
+            sqlx::query("UPDATE audit_runs SET phase=?, outcome=?, revision=revision+1, updated_at_ms=? WHERE id=?")
+                .bind(phase).bind(reason).bind(now).bind(&state.run_id).execute(&mut *tx).await?;
+        }
         tx.commit().await?;
-        Ok(state.run_revision + 1)
+        Ok(state.attempt_revision + 1)
     }
 
     pub(crate) async fn open(root: AbsolutePathBuf) -> Result<Self, AuditStoreError> {
@@ -1349,6 +1365,10 @@ impl AuditStore {
         let database_path = root.join(DATABASE_FILENAME).into_path_buf();
         let pool = open_pool(&database_path).await?;
         if let Err(error) = verify_database(&pool).await {
+            pool.close().await;
+            return Err(error);
+        }
+        if let Err(error) = foundations::preflight_upgrade(&pool).await {
             pool.close().await;
             return Err(error);
         }
@@ -1383,100 +1403,12 @@ impl AuditStore {
         request: &CreateRunRequest,
         input: Option<(&str, &str, &str)>,
     ) -> Result<CreatedRun, AuditStoreError> {
-        validate_create_request(request)?;
-        let now = now_millis();
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        if let Some(existing) =
-            read_created_run_by_request_key(&mut transaction, &request.request_key).await?
-        {
-            let retained: Option<String> = sqlx::query_scalar(
-                "SELECT request_identity_digest FROM audit_inputs WHERE run_id=?",
-            )
-            .bind(&existing.run_id)
-            .fetch_optional(&mut *transaction)
-            .await?
-            .flatten();
-            if let (Some(retained), Some((_, _, digest))) = (retained, input) {
-                if retained != digest {
-                    return Err(AuditStoreError::IdempotencyConflict(
-                        request.request_key.clone(),
-                    ));
-                }
-            } else {
-                verify_idempotent_create(&mut transaction, request, &existing).await?;
-            }
-            transaction.commit().await?;
-            return Ok(existing);
-        }
-
-        let created = CreatedRun {
-            run_id: new_id("run"),
-            assignment_id: new_id("assignment"),
-            operation_id: new_id("operation"),
-            revision: 0,
+        let commission = ReviewerCommission {
+            request: request.clone(),
+            input: input.map(|(request, policy, _)| (request.to_owned(), policy.to_owned())),
         };
-        sqlx::query(
-            "INSERT INTO audit_runs (
-                id, request_key, snapshot_id, manifest_digest, manifest_path,
-                brief_digest, policy_digest, input_digest, phase, control_intent,
-                revision, created_at_ms, updated_at_ms
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'created', 'active', 0, ?, ?)",
-        )
-        .bind(&created.run_id)
-        .bind(&request.request_key)
-        .bind(&request.snapshot_id)
-        .bind(&request.manifest_digest)
-        .bind(&request.manifest_path)
-        .bind(&request.brief_digest)
-        .bind(&request.policy_digest)
-        .bind(&request.input_digest)
-        .bind(now)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query(
-            "INSERT INTO reviewer_assignments (
-                id, run_id, ordinal, snapshot_id, provider, model, reasoning_effort,
-                reviewer_input_digest, state, created_at_ms, updated_at_ms
-             ) VALUES (?, ?, 0, ?, ?, ?, ?, ?, 'planned', ?, ?)",
-        )
-        .bind(&created.assignment_id)
-        .bind(&created.run_id)
-        .bind(&request.snapshot_id)
-        .bind(&request.provider)
-        .bind(&request.model)
-        .bind(&request.reasoning_effort)
-        .bind(&request.reviewer_input_digest)
-        .bind(now)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query(
-            "INSERT INTO operations (
-                id, assignment_id, kind, state, attempt, input_digest,
-                created_at_ms, updated_at_ms, submission_boundary
-             ) VALUES (?, ?, 'review', 'planned', 0, ?, ?, ?, 'unsubmitted')",
-        )
-        .bind(&created.operation_id)
-        .bind(&created.assignment_id)
-        .bind(&request.operation_input_digest)
-        .bind(now)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await?;
-        if let Some((request_json, policy_json, request_identity_digest)) = input {
-            sqlx::query(
-                "INSERT INTO audit_inputs(run_id, request_json, policy_json,request_identity_digest) VALUES (?, ?, ?, ?)",
-            )
-            .bind(&created.run_id)
-            .bind(request_json)
-            .bind(policy_json)
-            .bind(request_identity_digest)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        transaction.commit().await?;
-        Ok(created)
+        self.create_roster(&[commission], input.map(|(_, _, identity)| identity))
+            .await
     }
 
     pub(crate) async fn bind_snapshot(
@@ -1499,6 +1431,8 @@ impl AuditStore {
         .bind(run_id)
         .execute(&mut *transaction)
         .await?;
+        sqlx::query("UPDATE audit_attempts SET revision=revision+1 WHERE assignment_id IN (SELECT id FROM reviewer_assignments WHERE run_id=?)")
+            .bind(run_id).execute(&mut *transaction).await?;
         transaction.commit().await?;
         Ok(next_revision)
     }
@@ -1510,6 +1444,29 @@ impl AuditStore {
         now_ms: i64,
         lease_until_ms: i64,
     ) -> Result<ClaimOutcome, AuditStoreError> {
+        self.claim_operation_with_limit(
+            operation_id,
+            owner,
+            now_ms,
+            lease_until_ms,
+            foundations::DEFAULT_WORKERS,
+        )
+        .await
+    }
+
+    pub(super) async fn claim_operation_with_limit(
+        &self,
+        operation_id: &str,
+        owner: &str,
+        now_ms: i64,
+        lease_until_ms: i64,
+        worker_limit: u32,
+    ) -> Result<ClaimOutcome, AuditStoreError> {
+        if worker_limit == 0 {
+            return Err(AuditStoreError::InvalidInput(
+                "worker limit must be positive".to_owned(),
+            ));
+        }
         validate_nonempty("lease owner", owner, MAX_IDENTIFIER_BYTES)?;
         if lease_until_ms <= now_ms {
             return Err(AuditStoreError::InvalidInput(
@@ -1540,7 +1497,9 @@ impl AuditStore {
                 "unknown run control intent {control_intent}"
             )));
         }
-        if state != OperationState::Planned || phase != RunPhase::SnapshotBound {
+        if state != OperationState::Planned
+            || !matches!(phase, RunPhase::SnapshotBound | RunPhase::Reviewing)
+        {
             transaction.commit().await?;
             return Ok(ClaimOutcome::NotClaimable(state));
         }
@@ -1554,17 +1513,28 @@ impl AuditStore {
             transaction.commit().await?;
             return Ok(ClaimOutcome::NotClaimable(state));
         }
-        let other_active: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM operations WHERE id<>?
+        let active: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM operations WHERE id<>?
                 AND NOT EXISTS (SELECT 1 FROM audit_capacity_releases c WHERE c.operation_id=operations.id) AND (
                 state IN ('dispatching', 'accepted') OR
-                (state='planned' AND lease_owner IS NOT NULL AND lease_expires_at_ms>?)))",
+                (state='planned' AND lease_owner IS NOT NULL AND lease_expires_at_ms>?))",
         )
-        .bind(operation_id)
-        .bind(now_ms)
-        .fetch_one(&mut *transaction)
-        .await?;
-        if other_active {
+        .bind(operation_id).bind(now_ms).fetch_one(&mut *transaction).await?;
+        // Visit the durable commissioning order. Parallel preparation must not
+        // let a later entry consume capacity reserved for earlier eligible work.
+        let earlier: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM operations p
+             JOIN reviewer_assignments a ON a.id=p.assignment_id JOIN audit_runs r ON r.id=a.run_id
+             WHERE p.state='planned' AND r.phase IN ('snapshot_bound','reviewing') AND r.control_intent='active'
+             AND (p.lease_owner IS NULL OR p.lease_expires_at_ms<=?)
+             AND COALESCE(p.retry_classification,'')<>'observe_only'
+             AND NOT EXISTS(SELECT 1 FROM audit_capacity_releases c WHERE c.operation_id=p.id)
+             AND (r.created_at_ms,r.id,a.ordinal)<(
+                SELECT target_run.created_at_ms,target_run.id,target_assignment.ordinal
+                FROM operations target JOIN reviewer_assignments target_assignment ON target_assignment.id=target.assignment_id
+                JOIN audit_runs target_run ON target_run.id=target_assignment.run_id WHERE target.id=?)"
+        ).bind(now_ms).bind(operation_id).fetch_one(&mut *transaction).await?;
+        if active + earlier >= i64::from(worker_limit) {
             transaction.commit().await?;
             return Ok(ClaimOutcome::Busy);
         }
@@ -1575,6 +1545,12 @@ impl AuditStore {
         {
             transaction.commit().await?;
             return Ok(ClaimOutcome::Busy);
+        }
+        if existing_owner.as_deref() != Some(owner)
+            || existing_expiry.is_none_or(|expiry| expiry <= now_ms)
+        {
+            sqlx::query("UPDATE audit_attempts SET owner_generation=owner_generation+1 WHERE assignment_id=(SELECT assignment_id FROM operations WHERE id=?)")
+                .bind(operation_id).execute(&mut *transaction).await?;
         }
         sqlx::query(
             "UPDATE operations
@@ -1600,8 +1576,15 @@ impl AuditStore {
     ) -> Result<i64, AuditStoreError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let state = read_operation_context(&mut *transaction, operation_id).await?;
-        require_revision(expected_revision, state.run_revision)?;
-        require_phase(state.run_phase, RunPhase::SnapshotBound)?;
+        require_revision(expected_revision, state.attempt_revision)?;
+        if !matches!(
+            state.run_phase,
+            RunPhase::SnapshotBound | RunPhase::Reviewing
+        ) {
+            return Err(AuditStoreError::InvalidTransition(
+                "dispatch requires a bound active run".to_owned(),
+            ));
+        }
         require_assignment_state(state.assignment_state, AssignmentState::Planned)?;
         require_operation_state(state.operation_state, OperationState::Planned)?;
         let fenced: bool = sqlx::query_scalar(
@@ -1629,7 +1612,7 @@ impl AuditStore {
                 "dispatch requires the caller's unexpired operation lease".to_string(),
             ));
         }
-        let next_revision = state.run_revision + 1;
+        let next_revision = state.attempt_revision + 1;
         let now = now_millis();
         sqlx::query(
             "UPDATE operations
@@ -1647,14 +1630,17 @@ impl AuditStore {
         .bind(&state.assignment_id)
         .execute(&mut *transaction)
         .await?;
-        update_run_phase(
-            &mut transaction,
-            &state.run_id,
-            RunPhase::Reviewing,
-            next_revision,
-            now,
-        )
-        .await?;
+        update_attempt_revision(&mut transaction, &state.assignment_id, next_revision, now).await?;
+        if state.run_phase == RunPhase::SnapshotBound {
+            update_run_phase(
+                &mut transaction,
+                &state.run_id,
+                RunPhase::Reviewing,
+                state.run_revision + 1,
+                now,
+            )
+            .await?;
+        }
         transaction.commit().await?;
         Ok(next_revision)
     }
@@ -1696,15 +1682,15 @@ impl AuditStore {
             }
             transaction.commit().await?;
             return Ok(ObservationOutcome::Duplicate {
-                revision: context.run_revision,
+                revision: context.attempt_revision,
             });
         }
 
-        require_revision(expected_revision, context.run_revision)?;
+        require_revision(expected_revision, context.attempt_revision)?;
         require_phase(context.run_phase, RunPhase::Reviewing)?;
         require_assignment_state(context.assignment_state, AssignmentState::Dispatching)?;
         require_operation_state(context.operation_state, OperationState::Dispatching)?;
-        let next_revision = context.run_revision + 1;
+        let next_revision = context.attempt_revision + 1;
         let now = now_millis();
         sqlx::query(
             "INSERT INTO lifecycle_observations (
@@ -1732,7 +1718,8 @@ impl AuditStore {
             .bind(&context.assignment_id)
             .execute(&mut *transaction)
             .await?;
-        update_run_revision(&mut transaction, &context.run_id, next_revision, now).await?;
+        update_attempt_revision(&mut transaction, &context.assignment_id, next_revision, now)
+            .await?;
         transaction.commit().await?;
         Ok(ObservationOutcome::Applied {
             revision: next_revision,
@@ -1794,7 +1781,8 @@ impl AuditStore {
             ));
         }
         let existing = read_result_status(&self.pool, &initial.assignment_id).await?;
-        if let Some(outcome) = existing_result_outcome(existing, &digest, initial.run_revision)? {
+        if let Some(outcome) = existing_result_outcome(existing, &digest, initial.attempt_revision)?
+        {
             match &outcome {
                 ResultCommitOutcome::AlreadyCommitted {
                     digest,
@@ -1814,7 +1802,7 @@ impl AuditStore {
             }
             return Ok(outcome);
         }
-        require_revision(expected_revision, initial.run_revision)?;
+        require_revision(expected_revision, initial.attempt_revision)?;
         require_phase(initial.run_phase, RunPhase::Reviewing)?;
         require_assignment_state(initial.assignment_state, AssignmentState::Running)?;
         require_operation_state(initial.operation_state, OperationState::Accepted)?;
@@ -1857,7 +1845,7 @@ impl AuditStore {
             AssignmentState::Succeeded | AssignmentState::Failed
         ) {
             let existing = read_result_status(&mut *transaction, &context.assignment_id).await?;
-            let outcome = existing_result_outcome(existing, &digest, context.run_revision)?
+            let outcome = existing_result_outcome(existing, &digest, context.attempt_revision)?
                 .ok_or_else(|| {
                     AuditStoreError::InvalidPersistedState(
                         "terminal assignment has no recorded result".to_string(),
@@ -1883,11 +1871,11 @@ impl AuditStore {
             }
             return Ok(outcome);
         }
-        require_revision(expected_revision, context.run_revision)?;
+        require_revision(expected_revision, context.attempt_revision)?;
         require_phase(context.run_phase, RunPhase::Reviewing)?;
         require_assignment_state(context.assignment_state, AssignmentState::Running)?;
         require_operation_state(context.operation_state, OperationState::Accepted)?;
-        let next_revision = context.run_revision + 1;
+        let next_revision = context.attempt_revision + 1;
         let now = now_millis();
         sqlx::query("UPDATE operations SET state='observed_terminal', updated_at_ms=? WHERE id=?")
             .bind(now)
@@ -1918,14 +1906,18 @@ impl AuditStore {
         .bind(&context.assignment_id)
         .execute(&mut *transaction)
         .await?;
-        update_run_phase(
-            &mut transaction,
-            &context.run_id,
-            RunPhase::Reporting,
-            next_revision,
-            now,
-        )
-        .await?;
+        update_attempt_revision(&mut transaction, &context.assignment_id, next_revision, now)
+            .await?;
+        if single_reviewer(&mut transaction, &context.run_id).await? {
+            update_run_phase(
+                &mut transaction,
+                &context.run_id,
+                RunPhase::Reporting,
+                context.run_revision + 1,
+                now,
+            )
+            .await?;
+        }
         transaction.commit().await?;
         Ok(ResultCommitOutcome::Committed {
             revision: next_revision,
@@ -1950,14 +1942,14 @@ impl AuditStore {
                 && existing.failure.as_deref() == Some("invalid_result")
             {
                 transaction.commit().await?;
-                return Ok(context.run_revision);
+                return Ok(context.attempt_revision);
             }
         }
-        require_revision(expected_revision, context.run_revision)?;
+        require_revision(expected_revision, context.attempt_revision)?;
         require_phase(context.run_phase, RunPhase::Reviewing)?;
         require_assignment_state(context.assignment_state, AssignmentState::Running)?;
         require_operation_state(context.operation_state, OperationState::Accepted)?;
-        let next_revision = context.run_revision + 1;
+        let next_revision = context.attempt_revision + 1;
         let now = now_millis();
         let error_text = bounded_error(error.to_string());
         sqlx::query(
@@ -1983,17 +1975,12 @@ impl AuditStore {
         .bind(&context.assignment_id)
         .execute(&mut *transaction)
         .await?;
-        sqlx::query(
-            "UPDATE audit_runs
-             SET phase='completed_with_failures', outcome='invalid_result',
-                 revision=?, updated_at_ms=?
-             WHERE id=?",
-        )
-        .bind(next_revision)
-        .bind(now)
-        .bind(&context.run_id)
-        .execute(&mut *transaction)
-        .await?;
+        update_attempt_revision(&mut transaction, &context.assignment_id, next_revision, now)
+            .await?;
+        if single_reviewer(&mut transaction, &context.run_id).await? {
+            sqlx::query("UPDATE audit_runs SET phase='completed_with_failures', outcome='invalid_result', revision=revision+1, updated_at_ms=? WHERE id=?")
+                .bind(now).bind(&context.run_id).execute(&mut *transaction).await?;
+        }
         transaction.commit().await?;
         Ok(next_revision)
     }
@@ -2075,7 +2062,13 @@ impl AuditStore {
 
     pub(crate) async fn load_run(&self, run_id: &str) -> Result<AuditRunRecord, AuditStoreError> {
         let record = self.load_run_metadata(run_id).await?;
-        let mut record = record;
+        self.verify_record(record).await
+    }
+
+    async fn verify_record(
+        &self,
+        mut record: AuditRunRecord,
+    ) -> Result<AuditRunRecord, AuditStoreError> {
         record.findings = read_findings(&self.pool, &record.assignment_id).await?;
         match (&record.result_digest, &record.result_path) {
             (Some(digest), Some(path)) => {
@@ -2108,50 +2101,7 @@ impl AuditStore {
         &self,
         run_id: &str,
     ) -> Result<AuditRunRecord, AuditStoreError> {
-        let row = sqlx::query(
-            "SELECT r.snapshot_id, r.phase, r.control_intent, r.revision, r.outcome,
-                    a.id AS assignment_id, a.state AS assignment_state,
-                    a.result_digest, a.result_path,
-                    o.id AS operation_id, o.state AS operation_state, o.retry_classification,
-                    EXISTS (SELECT 1 FROM audit_capacity_releases c WHERE c.operation_id=o.id) AS capacity_released
-             FROM audit_runs r
-             JOIN reviewer_assignments a ON a.run_id=r.id
-             JOIN operations o ON o.assignment_id=a.id
-             WHERE r.id=? AND a.ordinal=0",
-        )
-        .bind(run_id)
-        .fetch_one(&self.pool)
-        .await?;
-        let assignment_id: String = row.try_get("assignment_id")?;
-        let phase = RunPhase::parse(row.try_get("phase")?)?;
-        let operation_state = OperationState::parse(row.try_get("operation_state")?)?;
-        let record = AuditRunRecord {
-            run_id: run_id.to_string(),
-            snapshot_id: row.try_get("snapshot_id")?,
-            phase,
-            control_intent: row.try_get("control_intent")?,
-            revision: row.try_get("revision")?,
-            outcome: row.try_get("outcome")?,
-            assignment_id: assignment_id.clone(),
-            assignment_state: AssignmentState::parse(row.try_get("assignment_state")?)?,
-            operation_id: row.try_get("operation_id")?,
-            operation_state,
-            capacity_released: row.try_get("capacity_released")?,
-            observation_pending: !phase.is_terminal()
-                && matches!(
-                    operation_state,
-                    OperationState::Dispatching | OperationState::Accepted
-                )
-                && row
-                    .try_get::<Option<String>, _>("retry_classification")?
-                    .as_deref()
-                    == Some("observe_only"),
-            result_digest: row.try_get("result_digest")?,
-            result_path: row.try_get("result_path")?,
-            report: self.read_report_record(run_id).await?,
-            findings: Vec::new(),
-        };
-        Ok(record)
+        self.load_selected_metadata(run_id, None).await
     }
 
     pub(crate) async fn list_non_terminal_runs(&self) -> Result<Vec<String>, AuditStoreError> {
@@ -2162,11 +2112,6 @@ impl AuditStore {
         )
         .fetch_all(&self.pool)
         .await?)
-    }
-
-    pub(super) async fn recovery_candidates(&self) -> Result<Vec<(String, i64)>, AuditStoreError> {
-        Ok(sqlx::query_as("SELECT id,revision FROM audit_runs WHERE phase NOT IN ('completed','completed_with_failures','failed','cancelled') ORDER BY id")
-            .fetch_all(&self.pool).await?)
     }
 
     pub(crate) fn read_report(&self, report: &ReportRecord) -> Result<Vec<u8>, AuditStoreError> {

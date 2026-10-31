@@ -4,6 +4,9 @@
 #[path = "app_server_daemon/support.rs"]
 mod support;
 
+#[path = "audit/follow_progress.rs"]
+mod follow_progress;
+
 use anyhow::{Context, Result, ensure};
 use core_test_support::responses;
 use futures::{SinkExt, StreamExt};

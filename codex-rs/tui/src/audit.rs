@@ -464,7 +464,7 @@ pub(crate) async fn observe(
         }
         match audits.read(view.run_id.clone()).await {
             Ok(next) => {
-                if next.revision != view.revision && next.report.is_none() {
+                if next != view && next.report.is_none() {
                     events.send(AppEvent::AuditUpdated {
                         thread_id,
                         run: next.clone(),

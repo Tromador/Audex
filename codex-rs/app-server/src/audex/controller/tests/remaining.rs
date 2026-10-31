@@ -1,5 +1,25 @@
 use super::*;
 
+async fn scheduled_tick(controller: &Arc<AuditController>) -> anyhow::Result<()> {
+    controller.recover_runs(true).await?;
+    // Scheduled work now runs independently; observe its completion explicitly.
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if controller
+                .scheduled_attempts
+                .lock()
+                .expect("scheduled attempts")
+                .is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn damaged_reporting_work_does_not_starve_unrelated_dispatch() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
@@ -20,7 +40,7 @@ async fn damaged_reporting_work_does_not_starve_unrelated_dispatch() -> anyhow::
     }
     std::fs::write(path.as_path(), b"damaged raw result")?;
     let good = start(&controller, "independent-reporting").await;
-    controller.recover_runs(true).await?;
+    scheduled_tick(&controller).await?;
     assert_eq!(
         store.load_run_metadata(&bad).await?.phase,
         RunPhase::Reporting
@@ -36,7 +56,7 @@ async fn damaged_reporting_work_does_not_starve_unrelated_dispatch() -> anyhow::
             .is_err()
     );
     assert!(
-        controller.polling.lock().await[&bad].2 > 0,
+        controller.polling.lock().await[&run.operation_id].2 > 0,
         "the damaged run is backed off rather than retried every worker tick"
     );
     Ok(())
@@ -226,13 +246,13 @@ async fn recovery_backoff_and_progress_deduplication_do_not_delay_explicit_cance
     let temp = tempfile::tempdir()?;
     let (controller, fake, notifications) = fixture(&temp).await;
     let id = start(&controller, "backoff").await;
-    controller.recover_runs(true).await?;
+    scheduled_tick(&controller).await?;
     let store = controller.store().await?;
     let run = store.load_run(&id).await?;
     fake.work.lock().expect("work").remove(&run.operation_id);
     let count = notifications.lock().expect("notifications").len();
     for _ in 0..10 {
-        controller.recover_runs(true).await?;
+        scheduled_tick(&controller).await?;
         controller.progress(&id).await?;
     }
     assert_eq!(notifications.lock().expect("notifications").len(), count);
@@ -242,22 +262,22 @@ async fn recovery_backoff_and_progress_deduplication_do_not_delay_explicit_cance
             .polling
             .lock()
             .await
-            .get_mut(&id)
+            .get_mut(&run.operation_id)
             .expect("schedule")
             .1 = tokio::time::Instant::now();
-        controller.recover_runs(true).await?;
+        scheduled_tick(&controller).await?;
     }
-    let (_, due, attempts) = controller.polling.lock().await[&id];
+    let (_, due, attempts) = controller.polling.lock().await[&run.operation_id];
     assert!(attempts >= 6 && due.duration_since(tokio::time::Instant::now()).as_secs() >= 59);
     let count = fake.observations.load(Ordering::SeqCst);
     for _ in 0..10 {
-        controller.recover_runs(true).await?;
+        scheduled_tick(&controller).await?;
     }
     assert_eq!(fake.observations.load(Ordering::SeqCst), count);
     api(&controller, "audit/cancel", json!({"runId":id}))
         .await
         .expect("durable cancel");
-    controller.recover_runs(true).await?;
+    scheduled_tick(&controller).await?;
     assert_eq!(fake.observations.load(Ordering::SeqCst), count + 1);
     assert_eq!(fake.starts.load(Ordering::SeqCst), 1);
     assert!(store.load_run(&id).await?.observation_pending);
