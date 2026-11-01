@@ -4,6 +4,8 @@ use codex_app_server_protocol::{AuditListResponse, AuditSource, AuditStartParams
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
+const AUDIT_ATTEMPT_CONFIRMATION_VIEW_ID: &str = "audit_attempt_control_confirmation";
+
 impl ChatWidget {
     pub(crate) fn confirm_audit_release(
         &mut self,
@@ -169,22 +171,40 @@ impl ChatWidget {
         let Some(thread_id) = self.thread_id() else {
             return;
         };
+        let activity_target = target.clone();
         let run = target.run_id.clone();
         let assignment = target.assignment_id.clone();
-        let mut items = vec![SelectionItem {
-            name: "Observe / Wait for this exact attempt".to_owned(),
-            description: Some(
-                "No inference, no control, and no following replacement attempts.".to_owned(),
-            ),
-            actions: vec![Box::new(move |tx| {
-                tx.send(AppEvent::AuditCommand {
-                    thread_id,
-                    args: format!("attempt wait {run} {assignment}"),
-                })
-            })],
-            dismiss_on_select: true,
-            ..Default::default()
-        }];
+        let mut items = vec![
+            SelectionItem {
+                name: "View retained reviewer activity".to_owned(),
+                description: Some(
+                    "Scroll or follow this exact attempt; historical attempts remain readable."
+                        .to_owned(),
+                ),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::AuditActivityOpen {
+                        thread_id,
+                        attempt: activity_target.clone(),
+                    })
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Observe / Wait for this exact attempt".to_owned(),
+                description: Some(
+                    "No inference, no control, and no following replacement attempts.".to_owned(),
+                ),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::AuditCommand {
+                        thread_id,
+                        args: format!("attempt wait {run} {assignment}"),
+                    })
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+        ];
         for action in crate::audit::attempt_actions(&target) {
             let run = target.run_id.clone();
             let assignment = target.assignment_id.clone();
@@ -240,11 +260,53 @@ impl ChatWidget {
             confirmation.disclosure(),
             "Yes, authorise this reviewer control",
             decision,
+            Some(AUDIT_ATTEMPT_CONFIRMATION_VIEW_ID),
         );
     }
 
+    /// Route only chooser keys to the established confirmation. No composer fallback.
+    pub(crate) fn handle_audit_activity_confirmation_key(&mut self, key: KeyEvent) {
+        use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+        if !self.audit_activity_confirmation_active() || key.kind != KeyEventKind::Press {
+            return;
+        }
+        let chooser = key.modifiers.is_empty()
+            && matches!(
+                key.code,
+                KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Tab
+                    | KeyCode::BackTab
+                    | KeyCode::Enter
+                    | KeyCode::Esc
+            );
+        let cancel = key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c');
+        if chooser || cancel {
+            self.bottom_pane.handle_key_event(key);
+        }
+    }
+
+    pub(crate) fn audit_activity_confirmation_active(&self) -> bool {
+        self.active_view_is(AUDIT_ATTEMPT_CONFIRMATION_VIEW_ID)
+            && !self.bottom_pane.keymap_contexts().is_warnings()
+    }
+
+    pub(crate) fn dismiss_audit_activity_confirmation(&mut self) {
+        self.bottom_pane
+            .dismiss_view_by_id(AUDIT_ATTEMPT_CONFIRMATION_VIEW_ID);
+    }
+
+    pub(crate) fn render_audit_activity_confirmation(&self, area: Rect, buf: &mut Buffer) {
+        if self.audit_activity_confirmation_active() {
+            let height = self.bottom_pane.desired_height(area.width).min(area.height);
+            let panel = Rect::new(area.x, area.bottom() - height, area.width, height);
+            ratatui::widgets::Clear.render(panel, buf);
+            self.bottom_pane.render(panel, buf);
+        }
+    }
+
     pub(crate) fn confirm_audit_abort(&mut self, run_id: String, decision: oneshot::Sender<bool>) {
-        self.confirm_audit_decision("Abort the whole audit?".to_owned(),format!("Run: {run_id}\nAbort stops wanting every outstanding reviewer and prevents queued/future inference. Accepted completed reviews and eligible received partials are preserved in an aborted report. Stop acknowledgement does not wait for remote termination or publication. This authority remains until terminal publication; a report already published stays final. Closing the TUI or Ctrl-C merely disconnects and never authorises Abort."),"Yes, Abort the whole audit",decision);
+        self.confirm_audit_decision("Abort the whole audit?".to_owned(),format!("Run: {run_id}\nAbort stops wanting every outstanding reviewer and prevents queued/future inference. Accepted completed reviews and eligible received partials are preserved in an aborted report. Stop acknowledgement does not wait for remote termination or publication. This authority remains until terminal publication; a report already published stays final. Closing the TUI or Ctrl-C merely disconnects and never authorises Abort."),"Yes, Abort the whole audit",decision,None);
     }
 
     fn confirm_audit_decision(
@@ -253,6 +315,7 @@ impl ChatWidget {
         disclosure: String,
         accept_label: &str,
         decision: oneshot::Sender<bool>,
+        view_id: Option<&'static str>,
     ) {
         self.add_info_message(disclosure.clone(), None);
         let decision = Arc::new(Mutex::new(Some(decision)));
@@ -260,6 +323,7 @@ impl ChatWidget {
         let decline = Arc::clone(&decision);
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: Some(title),
+            view_id,
             subtitle: Some(disclosure),
             items: vec![
                 SelectionItem {
@@ -640,6 +704,7 @@ mod management_tests {
         assert!(!selected.current);
         assert!(ops.try_recv().is_err());
         chat.show_audit_attempt(current);
+        chat.handle_key_event(KeyEvent::from(KeyCode::Down));
         chat.handle_key_event(KeyEvent::from(KeyCode::Down));
         chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
         assert!(std::iter::from_fn(||events.try_recv().ok()).any(|event|matches!(event,AppEvent::AuditCommand {args,..} if args=="attempt cancel run-1 assignment-original")));

@@ -1,5 +1,6 @@
 //! Operator audit actions. Workflow authority, snapshots and reviewers remain in app-server.
 
+pub(crate) mod activity;
 mod attempts;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;

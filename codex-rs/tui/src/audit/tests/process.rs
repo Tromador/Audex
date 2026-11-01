@@ -1,4 +1,6 @@
 //! S3 main-TUI request/confirmation paths over disposable daemon IPC. Loopback only.
+#[path = "activity_process.rs"]
+mod activity;
 use super::execution::Result;
 use super::*;
 use crate::app_server_session::{AppServerSession, ThreadParamsMode};

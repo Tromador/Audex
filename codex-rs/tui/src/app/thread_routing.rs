@@ -1536,6 +1536,9 @@ impl App {
                 ThreadBufferedEvent::FeedbackSubmission(event) => {
                     self.enqueue_thread_feedback_event(thread_id, event).await;
                 }
+                ThreadBufferedEvent::AuditControlOutcome(result) => {
+                    self.enqueue_audit_control_outcome(thread_id, result).await;
+                }
             }
         }
         self.chat_widget
@@ -2009,6 +2012,9 @@ impl App {
             ThreadBufferedEvent::FeedbackSubmission(event) => {
                 self.handle_feedback_thread_event(event);
             }
+            ThreadBufferedEvent::AuditControlOutcome(result) => {
+                self.show_audit_control_outcome(result)
+            }
         }
         if needs_refresh {
             self.refresh_status_line();
@@ -2038,6 +2044,9 @@ impl App {
             }
             ThreadBufferedEvent::FeedbackSubmission(event) => {
                 self.handle_feedback_thread_event(event);
+            }
+            ThreadBufferedEvent::AuditControlOutcome(result) => {
+                self.show_audit_control_outcome(result)
             }
         }
     }

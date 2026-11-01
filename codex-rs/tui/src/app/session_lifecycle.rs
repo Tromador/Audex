@@ -458,16 +458,25 @@ impl App {
             }
         };
         self.agents_overview.activity.remove(&thread_id);
-        let recap_progress =
-            if live_attached && let Some(channel) = self.thread_event_channels.remove(&thread_id) {
-                let store = channel.store.lock().await;
-                if let Some(input) = store.input_state.clone() {
-                    self.agents_overview.input_states.insert(thread_id, input);
-                }
-                store.recap_progress()
-            } else {
-                Default::default()
-            };
+        let mut control_receipts = Vec::new();
+        let recap_progress = if live_attached
+            && let Some(channel) = self.thread_event_channels.remove(&thread_id)
+        {
+            let store = channel.store.lock().await;
+            control_receipts.extend(
+                store
+                    .buffer
+                    .iter()
+                    .filter(|event| matches!(event, ThreadBufferedEvent::AuditControlOutcome(_)))
+                    .cloned(),
+            );
+            if let Some(input) = store.input_state.clone() {
+                self.agents_overview.input_states.insert(thread_id, input);
+            }
+            store.recap_progress()
+        } else {
+            Default::default()
+        };
         let channel = self.ensure_thread_channel(thread_id);
         if !live_attached {
             if was_external_writer {
@@ -478,6 +487,9 @@ impl App {
         }
         let mut store = channel.store.lock().await;
         store.set_session(session, turns);
+        for receipt in control_receipts {
+            store.push_buffered_event(receipt);
+        }
         store.merge_recap_progress(recap_progress);
         store.rebase_buffer_after_session_refresh();
         Ok(live_attached)
@@ -915,6 +927,7 @@ impl App {
                         server_request_thread_id(request) == Some(thread_id)
                     }
                     ThreadBufferedEvent::HistoryEntryResponse(_)
+                    | ThreadBufferedEvent::AuditControlOutcome(_)
                     | ThreadBufferedEvent::FeedbackSubmission(_) => true,
                 });
                 let previous_pending = std::mem::take(&mut self.pending_app_server_requests);

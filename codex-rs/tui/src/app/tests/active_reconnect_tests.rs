@@ -11,6 +11,9 @@ use tokio::net::TcpListener;
 
 use super::disconnect::serve_reconnect_requests;
 
+#[path = "active_reconnect_tests/audit_control_receipts.rs"]
+mod audit_control_receipts;
+
 #[tokio::test]
 async fn reconnect_restores_launch_reviewer_without_a_profile_override() -> Result<()> {
     let (mut app, _events, _ops) = make_test_app_with_channels().await;

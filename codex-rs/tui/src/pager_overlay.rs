@@ -45,6 +45,7 @@ pub(crate) enum Overlay {
     Transcript(TranscriptOverlay),
     Static(StaticOverlay),
     Analytics(Box<crate::analytics::AnalyticsView>),
+    AuditActivity(Box<crate::audit::activity::ActivityViewer>),
 }
 
 impl Overlay {
@@ -88,12 +89,14 @@ impl Overlay {
         let mouse_capture = match self {
             Overlay::Transcript(_) | Overlay::Analytics(_) => tui::MouseCapture::Enabled,
             Overlay::Static(_) => tui::MouseCapture::Disabled,
+            Overlay::AuditActivity(_) => tui::MouseCapture::Enabled,
         };
         tui.set_mouse_capture(mouse_capture)?;
         let result = match self {
             Overlay::Transcript(o) => o.handle_event(tui, event).map(drop),
             Overlay::Static(o) => o.handle_event(tui, event),
             Overlay::Analytics(o) => o.handle_event(tui, event),
+            Overlay::AuditActivity(o) => o.transcript.handle_event(tui, event).map(drop),
         };
         if result.is_err() || self.is_done() {
             let restore = tui.set_mouse_capture(tui::MouseCapture::Inherit);
@@ -107,6 +110,7 @@ impl Overlay {
             Overlay::Transcript(o) => o.is_done(),
             Overlay::Static(o) => o.is_done(),
             Overlay::Analytics(o) => o.is_done,
+            Overlay::AuditActivity(o) => o.transcript.is_done(),
         }
     }
 }

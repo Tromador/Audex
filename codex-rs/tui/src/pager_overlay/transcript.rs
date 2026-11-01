@@ -173,6 +173,15 @@ impl TranscriptOverlay {
         }
     }
 
+    pub(crate) fn activity_cursor(&self) -> Option<(u16, u16)> {
+        self.cursor
+    }
+
+    pub(crate) fn prepare_activity_search(&mut self, width: u16) -> bool {
+        self.view.prepare_width(width);
+        self.view.advance_search(&self.cells)
+    }
+
     pub(crate) fn draw(&mut self, tui: &mut tui::Tui) -> Result<()> {
         let mut scanning = false;
         tui.draw(u16::MAX, |frame| {

@@ -85,6 +85,7 @@ impl App {
                     | AppEvent::TranscriptCopyClosed
                     | AppEvent::ConfirmDaemonUpdate(_)
                     | AppEvent::RunDaemonUpdate(_)
+                    | AppEvent::AuditActivityControlFinished { .. }
                     | AppEvent::InsertHistoryCell(_)
                     | AppEvent::CommitRealtimeTranscriptHistory
                     | AppEvent::ResetTranscriptForThreadSwitch
@@ -176,6 +177,23 @@ impl App {
                 if self.current_displayed_thread_id()==Some(thread_id) {self.chat_widget.show_audit_attempts(run_id,attempts);}
             }
             AppEvent::AuditAttemptSelected {thread_id,attempt,watch} => self.audit_attempt_selected(app_server,thread_id,attempt,watch),
+            AppEvent::AuditActivityOpen {thread_id,attempt} => self.open_audit_activity(tui,app_server,thread_id,attempt),
+            AppEvent::AuditActivityPage {viewer_id,reader_epoch,page,consumed} => {
+                if let Some(Overlay::AuditActivity(viewer))=&mut self.overlay && viewer.id==viewer_id && viewer.reader_epoch==reader_epoch {
+                    viewer.apply(*page);
+                    let _=consumed.send(());
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            AppEvent::AuditActivityControlFinished {viewer_id,thread_id,result} => {
+                let origin_displayed=self.current_displayed_thread_id()==Some(thread_id);
+                if let Some(Overlay::AuditActivity(viewer))=&mut self.overlay && viewer.id==viewer_id && viewer.thread_id==thread_id && origin_displayed {
+                    viewer.finish_control(match result {Ok(message)|Err(message)=>message});
+                    tui.frame_requester().schedule_frame();
+                } else {
+                    self.enqueue_audit_control_outcome(thread_id,result).await;
+                }
+            }
             AppEvent::AuditAttemptObserved {thread_id,attempt,error} => {
                 if self.current_displayed_thread_id()==Some(thread_id) {
                     self.chat_widget.add_info_message(crate::audit::attempt_summary(&attempt),None);
@@ -183,7 +201,15 @@ impl App {
                 }
             }
             AppEvent::AuditAttemptConfirm {thread_id,confirmation,decision} => {
-                if self.current_displayed_thread_id()==Some(thread_id) && self.audit_available(app_server) {
+                let viewer_allows = match &mut self.overlay {
+                    Some(Overlay::AuditActivity(viewer)) => {
+                        let matches=viewer.control_pending && viewer.thread_id==thread_id && viewer.target.assignment_id==confirmation.target.assignment_id && viewer.target.run_id==confirmation.target.run_id;
+                        if matches {viewer.confirmation_visible=true;}
+                        matches
+                    }
+                    _ => true,
+                };
+                if !decision.is_closed() && viewer_allows && self.current_displayed_thread_id()==Some(thread_id) && self.audit_available(app_server) {
                     self.chat_widget.confirm_audit_attempt(confirmation,decision);
                 } else {let _=decision.send(false);}
             }

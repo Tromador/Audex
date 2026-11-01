@@ -209,6 +209,7 @@ mod agents_overview_threads;
 mod agents_overview_usage;
 mod agents_overview_view;
 mod audit;
+mod audit_activity;
 pub(crate) use agents_overview::AGENTS_OVERVIEW_VIEW_ID;
 mod activity_groups;
 mod app_server_event_targets;
@@ -870,6 +871,10 @@ impl App {
         app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<AppRunControl> {
+        if matches!(self.overlay, Some(Overlay::AuditActivity(_))) {
+            self.handle_audit_activity_event(tui, app_server, event)?;
+            return Ok(AppRunControl::Continue);
+        }
         self.transcript_view
             .sync_patch_approval(self.chat_widget.current_patch_approval());
         tui.link_hover.observe(&event);

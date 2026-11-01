@@ -312,6 +312,21 @@ pub(crate) enum AppEvent {
         attempt: codex_app_server_protocol::AuditAttemptView,
         watch: bool,
     },
+    AuditActivityOpen {
+        thread_id: ThreadId,
+        attempt: codex_app_server_protocol::AuditAttemptView,
+    },
+    AuditActivityPage {
+        viewer_id: uuid::Uuid,
+        reader_epoch: u64,
+        page: Box<Result<codex_app_server_protocol::AuditAttemptReadResponse, String>>,
+        consumed: tokio::sync::oneshot::Sender<()>,
+    },
+    AuditActivityControlFinished {
+        viewer_id: uuid::Uuid,
+        thread_id: ThreadId,
+        result: Result<String, String>,
+    },
     AuditAttemptObserved {
         thread_id: ThreadId,
         attempt: codex_app_server_protocol::AuditAttemptView,

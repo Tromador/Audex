@@ -8,10 +8,16 @@ pub(super) struct AuditUiState {
     attempt_watches:
         HashMap<(ThreadId, String, String), (JoinHandle<()>, Arc<tokio::sync::Notify>)>,
     pub(super) reports: crate::audit::ReportContexts,
+    pub(super) activity_wake: Option<(String, Arc<tokio::sync::Notify>)>,
 }
 
 impl AuditUiState {
     pub(super) fn wake(&self, progress: &AuditProgressNotification) {
+        if let Some((run, wake)) = &self.activity_wake
+            && run == &progress.run_id
+        {
+            wake.notify_one();
+        }
         for ((_, run, _), (_, wake)) in &self.attempt_watches {
             if run == &progress.run_id {
                 wake.notify_one();

@@ -386,6 +386,7 @@ impl App {
         session.worktree_source_config_builder = app_server.worktree_source_config_builder.clone();
         session.inherit_task_tool_capabilities(app_server);
         *app_server = session;
+        self.reconnect_audit_activity(app_server);
         #[cfg(any(target_os = "windows", test))]
         let interrupted_windows_setup = self.windows_sandbox.pending_setup.take().is_some();
         #[cfg(any(target_os = "windows", test))]
@@ -464,9 +465,13 @@ impl App {
             store.pending_interactive_replay = Default::default();
             store.pending_interrupt_turn_id = None;
             store.active = false;
-            store
-                .buffer
-                .retain(|event| matches!(event, ThreadBufferedEvent::Notification(_)));
+            store.buffer.retain(|event| {
+                matches!(
+                    event,
+                    ThreadBufferedEvent::Notification(_)
+                        | ThreadBufferedEvent::AuditControlOutcome(_)
+                )
+            });
             if let Some(input) = store.input_state.as_mut() {
                 input.reconnect_pending = true;
             }
@@ -503,10 +508,28 @@ impl App {
             if started.blocks_direct_input {
                 self.agent_navigation.mark_parent_owned(id);
             }
+            // Resumed server history replaces cached notifications, but local control receipts
+            // have no server-history counterpart and must survive the fresh live channel too.
+            let receipts = if let Some(cached) = self.thread_event_channels.get(&id) {
+                cached
+                    .store
+                    .lock()
+                    .await
+                    .buffer
+                    .iter()
+                    .filter(|event| matches!(event, ThreadBufferedEvent::AuditControlOutcome(_)))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             let channel = ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY);
             {
                 let mut store = channel.store.lock().await;
                 store.set_session(started.session, started.turns);
+                for receipt in receipts {
+                    store.push_buffered_event(receipt);
+                }
                 store.input_state = input.clone();
             }
             self.thread_event_channels.insert(id, channel);
