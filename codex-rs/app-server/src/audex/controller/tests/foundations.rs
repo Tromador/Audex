@@ -16,6 +16,7 @@ pub(super) async fn roster(
             provider: controller.config.model_provider_id.clone(),
             model: format!("audit-reviewer-{ordinal}"),
             reasoning_effort: None,
+            expected_served_model: None,
         })
         .collect();
     Ok(controller

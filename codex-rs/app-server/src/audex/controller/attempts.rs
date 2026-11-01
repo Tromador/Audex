@@ -41,6 +41,7 @@ impl AuditController {
     async fn attempt_view(&self, record: &AuditRunRecord) -> anyhow::Result<AuditAttemptView> {
         let store = self.store().await?;
         let capture = store.capture_state(&record.assignment_id).await?;
+        let retained = store.retained_selection(&record.assignment_id).await?;
         Ok(AuditAttemptView {
             run_id: record.run_id.clone(),
             reviewer_id: record.reviewer_id.clone(),
@@ -51,10 +52,29 @@ impl AuditController {
             snapshot_id: record.snapshot_id.clone(),
             provider: record.provider.clone(),
             model: record.model.clone(),
+            requested_model: record.model.clone(),
+            resolved_model: retained["resolvedModel"]
+                .as_str()
+                .unwrap_or(&record.model)
+                .to_owned(),
+            expected_served_model: retained["expectedServedModel"].as_str().map(str::to_owned),
             reasoning_effort: record.reasoning_effort.clone(),
             revision: record.attempt_revision,
             owner_generation: record.owner_generation,
             current: record.current,
+            retry_eligible: record.current
+                && !record.collection_ready
+                && record.control_intent == "active"
+                && matches!(record.phase, RunPhase::SnapshotBound | RunPhase::Reviewing)
+                && record.phase != RunPhase::Reporting
+                && record.assignment_state != AssignmentState::Succeeded
+                && capture.disposition != "ignored",
+            execution_adapter: AuditExecutionAdapter::Native,
+            authentication_route: retained["authenticationRoute"]
+                .as_str()
+                .unwrap_or("native_legacy_unspecified")
+                .to_owned(),
+            model_evidence: store.model_evidence(&record.assignment_id).await?,
             disposition: capture.disposition,
             assignment_state: match record.assignment_state {
                 AssignmentState::Planned => "planned",

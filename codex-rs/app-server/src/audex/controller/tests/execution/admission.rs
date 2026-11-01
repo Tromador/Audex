@@ -50,7 +50,11 @@ enum Provider {
     Websocket(responses::WebSocketTestServer),
 }
 impl Provider {
-    async fn new(websocket: bool, events: Vec<Value>) -> Self {
+    async fn new(websocket: bool, mut events: Vec<Value>) -> Self {
+        events.insert(
+            0,
+            json!({"type":"codex.response.metadata","headers":{"OpenAI-Model":"audit-test"}}),
+        );
         if websocket {
             Self::Websocket(
                 responses::start_websocket_server_with_headers(vec![
@@ -58,12 +62,16 @@ impl Provider {
                         requests: vec![
                             events,
                             vec![
+                                json!({"type":"codex.response.metadata","headers":{"OpenAI-Model":"audit-test"}}),
                                 ev_response_created("second-generation"),
                                 ev_assistant_message("final", "invalid final JSON"),
                                 ev_completed("second-generation"),
                             ],
                         ],
-                        response_headers: Vec::new(),
+                        response_headers: vec![(
+                            "OpenAI-Model".to_owned(),
+                            "audit-test".to_owned(),
+                        )],
                         accept_delay: None,
                         close_after_requests: false,
                     },

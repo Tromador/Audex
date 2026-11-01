@@ -310,8 +310,12 @@ impl ResponsesWebsocketConnection {
                 reason = "the guard serializes exclusive use of the websocket stream for the lifetime of the response stream"
             )]
             async move {
-                if let Some(model) = server_model {
-                    let _ = tx_event.send(Ok(ResponseEvent::ServerModel(model))).await;
+                if admission.is_none()
+                    && let Some(model) = &server_model
+                {
+                    let _ = tx_event
+                        .send(Ok(ResponseEvent::ServerModel(model.clone())))
+                        .await;
                 }
                 if server_reasoning_included {
                     let _ = tx_event
@@ -370,6 +374,7 @@ impl ResponsesWebsocketConnection {
                         interrupt.clone(),
                         &mut completion,
                         admission.as_ref(),
+                        server_model.as_deref(),
                     );
                     tokio::pin!(response);
 
@@ -792,6 +797,7 @@ async fn run_websocket_response_stream(
     interrupt: impl Future<Output = ResponseInterrupt> + Clone + Unpin,
     completion: &mut Option<ResponseEvent>,
     admission: Option<&crate::GenerationRequest>,
+    transport_model: Option<&str>,
 ) -> Result<(), ApiError> {
     let mut last_server_model: Option<String> = None;
     let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
@@ -804,6 +810,14 @@ async fn run_websocket_response_stream(
     }
     if let Some(admission) = admission {
         admission.admit("native_websocket").await?;
+        if let Some(model) = transport_model {
+            // A disqualifying handshake identity must fence the create frame,
+            // rather than rely on the asynchronous event consumer winning a race.
+            admission.check_connection_model(model).await?;
+            // Ordinary sessions receive the existing warning event above. Audex
+            // requires fresh response metadata for each generation; replaying a
+            // connection header into that event path would manufacture evidence.
+        }
     }
     if matches!(
         interrupt.clone().now_or_never(),

@@ -54,6 +54,8 @@ fn conversational_audits_use_tools_with_strict_arguments() {
 #[test]
 fn audit_report_is_untrusted_conversation_context_not_an_instruction_override() {
     let view = AuditRunView {
+        collection: Default::default(),
+        reviewers: Vec::new(),
         run_id: "run".into(),
         snapshot_id: "snapshot".into(),
         assignment_id: "assignment".into(),

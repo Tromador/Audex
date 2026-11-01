@@ -13,6 +13,26 @@ pub type AdmissionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>>
 pub trait GenerationAdmission: Debug + Send + Sync {
     fn admit<'a>(&'a self, request_id: &'a str, transport: &'a str) -> AdmissionFuture<'a, ()>;
     fn may_send<'a>(&'a self, request_id: &'a str) -> AdmissionFuture<'a, bool>;
+    /// Connection metadata can disqualify a send, but cannot attest a generation.
+    fn check_connection_model<'a>(
+        &'a self,
+        _request_id: &'a str,
+        _model: &'a str,
+    ) -> AdmissionFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    /// Authoritative response/transport metadata for this generation, never a catalogue guess.
+    fn observe_model<'a>(
+        &'a self,
+        _request_id: &'a str,
+        _model: &'a str,
+    ) -> AdmissionFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    /// Must establish attribution before a completion can authorise a continuation.
+    fn finish_generation<'a>(&'a self, _request_id: &'a str) -> AdmissionFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
     fn confirm<'a>(
         &'a self,
         request_id: &'a str,
@@ -72,6 +92,30 @@ impl GenerationRequest {
             ));
         }
         Ok(())
+    }
+
+    pub async fn check_connection_model(&self, model: &str) -> Result<(), TransportError> {
+        self.control
+            .0
+            .check_connection_model(&self.request_id, model)
+            .await
+            .map_err(TransportError::GenerationDenied)
+    }
+
+    pub async fn observe_model(&self, model: &str) -> Result<(), TransportError> {
+        self.control
+            .0
+            .observe_model(&self.request_id, model)
+            .await
+            .map_err(TransportError::GenerationDenied)
+    }
+
+    pub async fn finish_generation(&self) -> Result<(), TransportError> {
+        self.control
+            .0
+            .finish_generation(&self.request_id)
+            .await
+            .map_err(TransportError::GenerationDenied)
     }
 
     pub async fn confirm(&self, response_id: Option<&str>) -> Result<(), TransportError> {

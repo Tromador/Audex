@@ -7,7 +7,6 @@ use codex_login::CodexAuth;
 use codex_protocol::ThreadId;
 use core_test_support::responses::{
     self, ev_assistant_message, ev_completed, ev_function_call_with_namespace, ev_response_created,
-    sse,
 };
 use core_test_support::test_codex::run_test_with_large_stack;
 use std::time::Duration;
@@ -21,6 +20,19 @@ mod corrections;
 mod foundations;
 mod preparation;
 mod recovery;
+
+// These native fixtures explicitly attest the model they serve. Missing/mismatch
+// policies are exercised separately through the public S2 transport fixtures.
+fn sse_for_model(model: &str, mut events: Vec<Value>) -> String {
+    events.insert(
+        0,
+        json!({"type":"codex.response.metadata","headers":{"OpenAI-Model":model}}),
+    );
+    responses::sse(events)
+}
+fn sse(events: Vec<Value>) -> String {
+    sse_for_model("audit-test", events)
+}
 
 async fn real_fixture(
     temp: &tempfile::TempDir,
@@ -605,21 +617,27 @@ fn subscription_custom_provider_and_luna_catalogue_use_the_normal_execution_path
             let mock = responses::mount_sse_sequence(
                 &server,
                 vec![
-                    sse(vec![
-                        ev_response_created("read"),
-                        ev_function_call_with_namespace(
-                            "read",
-                            "audex_source",
-                            "read",
-                            r#"{"path":"example.rs","offset":0,"max_bytes":64}"#,
-                        ),
-                        ev_completed("read"),
-                    ]),
-                    sse(vec![
-                        ev_response_created("final"),
-                        ev_assistant_message("answer", &raw),
-                        responses::ev_completed_with_tokens("final", 32),
-                    ]),
+                    sse_for_model(
+                        model,
+                        vec![
+                            ev_response_created("read"),
+                            ev_function_call_with_namespace(
+                                "read",
+                                "audex_source",
+                                "read",
+                                r#"{"path":"example.rs","offset":0,"max_bytes":64}"#,
+                            ),
+                            ev_completed("read"),
+                        ],
+                    ),
+                    sse_for_model(
+                        model,
+                        vec![
+                            ev_response_created("final"),
+                            ev_assistant_message("answer", &raw),
+                            responses::ev_completed_with_tokens("final", 32),
+                        ],
+                    ),
                 ],
             )
             .await;

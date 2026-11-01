@@ -52,13 +52,27 @@ pub(super) async fn update_attempt_revision(
 }
 
 impl AuditStore {
-    /// Commission the complete ordered roster atomically. This is a foundation
-    /// boundary; public roster selection/report presentation is a later slice.
+    /// Commission the complete ordered roster atomically using automatic scheduling.
     pub(in crate::audex) async fn create_roster(
         &self,
         commissions: &[ReviewerCommission],
         identity: Option<&str>,
     ) -> Result<CreatedRun, AuditStoreError> {
+        self.create_roster_with_scheduling(commissions, identity, "automatic")
+            .await
+    }
+
+    pub(in crate::audex) async fn create_roster_with_scheduling(
+        &self,
+        commissions: &[ReviewerCommission],
+        identity: Option<&str>,
+        scheduling: &str,
+    ) -> Result<CreatedRun, AuditStoreError> {
+        if !matches!(scheduling, "automatic" | "sequential") {
+            return Err(AuditStoreError::InvalidInput(
+                "unsupported audit scheduling policy".to_owned(),
+            ));
+        }
         if commissions.is_empty() || commissions.len() > MAX_REVIEWERS {
             return Err(AuditStoreError::InvalidInput(format!(
                 "reviewer roster must contain 1..{MAX_REVIEWERS} entries"
@@ -94,6 +108,17 @@ impl AuditStore {
             read_created_run_by_request_key(&mut transaction, &request.request_key).await?
         {
             verify_idempotent_create(&mut transaction, request, &existing).await?;
+            let retained_schedule: String =
+                sqlx::query_scalar("SELECT scheduling FROM audit_runs WHERE id=?")
+                    .bind(&existing.run_id)
+                    .fetch_one(&mut *transaction)
+                    .await?;
+            if retained_schedule != scheduling {
+                return Err(AuditStoreError::IdempotencyConflict(
+                    request.request_key.clone(),
+                ));
+            }
+
             let retained: Vec<(String, String, Option<String>, String, String, String)> = sqlx::query_as(
                 "SELECT a.provider,a.model,a.reasoning_effort,a.reviewer_input_digest,o.input_digest,t.policy_digest
                  FROM audit_reviewers v JOIN reviewer_assignments a ON a.id=v.current_assignment_id
@@ -154,6 +179,11 @@ impl AuditStore {
         .execute(&mut *transaction)
         .await?;
 
+        sqlx::query("UPDATE audit_runs SET scheduling=? WHERE id=?")
+            .bind(scheduling)
+            .bind(&created.run_id)
+            .execute(&mut *transaction)
+            .await?;
         for (ordinal, commission) in commissions.iter().enumerate() {
             let request = &commission.request;
             let assignment_id = if ordinal == 0 {
@@ -261,7 +291,7 @@ impl AuditStore {
         operation: Option<&str>,
     ) -> Result<AuditRunRecord, AuditStoreError> {
         let row = sqlx::query(
-            "SELECT r.id AS run_id, r.snapshot_id, r.phase, r.control_intent, r.revision, r.outcome,
+            "SELECT r.id AS run_id, r.snapshot_id, r.phase, r.control_intent, r.revision, r.outcome, r.scheduling, r.collection_ready,
                     a.id AS assignment_id, a.state AS assignment_state,
                     a.result_digest, a.result_path, a.provider, a.model, a.reasoning_effort,
                     v.id AS reviewer_id, v.ordinal AS reviewer_ordinal,
@@ -287,6 +317,8 @@ impl AuditStore {
             snapshot_id: row.try_get("snapshot_id")?,
             phase,
             control_intent: row.try_get("control_intent")?,
+            scheduling: row.try_get("scheduling")?,
+            collection_ready: row.try_get("collection_ready")?,
             revision: row.try_get("revision")?,
             reviewer_id: row.try_get("reviewer_id")?,
             reviewer_ordinal: row.try_get("reviewer_ordinal")?,

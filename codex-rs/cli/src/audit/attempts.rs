@@ -7,7 +7,8 @@ use codex_app_server_protocol::{
 pub(super) enum AttemptCommand {
     /// List current and historical attempts in reviewer/attempt order.
     List { run_id: String },
-    /// Read committed activity. Text and JSON fragments remain unvalidated.
+    /// Observe committed activity. Text and JSON fragments remain unvalidated.
+    #[command(visible_alias = "observe")]
     Read {
         run_id: String,
         assignment_id: String,
@@ -16,9 +17,16 @@ pub(super) enum AttemptCommand {
         #[arg(long, default_value_t = 64)]
         limit: u32,
     },
-    /// Freeze the received prefix and release capacity, without waiting for termination.
+    /// Wait for this exact attempt to complete, fail or be excluded; never follows a replacement.
+    Wait {
+        run_id: String,
+        assignment_id: String,
+    },
+    /// Exclude this attempt and freeze its prefix. Retry remains possible only while collection is open.
+    /// Settling the last outstanding contribution immediately closes Retry and finalises collection.
     Cancel(ControlArgs),
-    /// Stop wanting this attempt, preserving its received incomplete output.
+    /// Permanently exclude this reviewer from Retry, preserving received incomplete output.
+    /// Settling the last outstanding contribution immediately finalises collection.
     Ignore(ControlArgs),
     /// Explicitly commission a fresh attempt with the same source and brief.
     Retry {
@@ -52,6 +60,35 @@ pub(super) async fn run(audits: &AuditClient, command: AttemptCommand) -> anyhow
             );
             return Ok(0);
         }
+        AttemptCommand::Wait {
+            run_id,
+            assignment_id,
+        } => loop {
+            let read = audits
+                .read_attempt(AuditAttemptReadParams {
+                    run_id: run_id.clone(),
+                    assignment_id: assignment_id.clone(),
+                    after_sequence: Some(0),
+                    limit: Some(64),
+                })
+                .await?;
+            let attempt = &read.attempt;
+            if attempt.completed
+                || !attempt.current
+                || attempt.disposition != "active"
+                || matches!(attempt.operation_state.as_str(), "failed" | "unknown")
+            {
+                println!("{}", serde_json::to_string_pretty(&read)?);
+                return Ok(if attempt.completed {
+                    0
+                } else if attempt.disposition != "active" || !attempt.current {
+                    3
+                } else {
+                    5
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        },
         AttemptCommand::Read {
             run_id,
             assignment_id,

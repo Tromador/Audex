@@ -119,8 +119,8 @@ async fn confirmation_scenario() -> Result<()> {
     else {
         panic!("expected confirmation")
     };
-    assert_eq!(params.model, "audit-test");
-    assert_eq!(params.provider, "mock_provider");
+    assert_eq!(params.model.as_deref(), Some("audit-test"));
+    assert_eq!(params.provider.as_deref(), Some("mock_provider"));
     assert!(
         audits
             .list(AuditListParams {
@@ -283,7 +283,7 @@ async fn mount_provider(provider: &MockServer, source: std::path::PathBuf) {
             let args = json!({"source":{"type":"file","name":"example.rs","path":source}}).to_string();
             vec![responses::ev_function_call_with_namespace("start-audit", &namespace, &tool, &args), responses::ev_completed("audit-proposal")]
         };
-        ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(responses::sse(events))
+        ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").insert_header("OpenAI-Model",body["model"].as_str().expect("served model")).set_body_string(responses::sse(events))
     }).mount(provider).await;
 }
 
@@ -361,6 +361,8 @@ async fn active_context_scenario() -> Result<()> {
     })
     .await?;
     let view = AuditRunView {
+        collection: Default::default(),
+        reviewers: Vec::new(),
         run_id: "retained-run".into(),
         snapshot_id: "snapshot".into(),
         assignment_id: "assignment".into(),
@@ -479,7 +481,7 @@ async fn conversational_scenario() -> Result<()> {
                 event = events.recv() => match event.unwrap() {
                     AppEvent::AuditConfirm { thread_id, params, decision } => {
                         assert_eq!(thread_id, thread);
-                        assert_eq!(params.provider, "mock_provider");
+                        assert_eq!(params.provider.as_deref(), Some("mock_provider"));
                         decision.send(true).unwrap();
                     }
                     AppEvent::AuditOpened { run: view, .. } => {
@@ -611,11 +613,14 @@ fn pending_observer_recovers_and_delivers_report_once_without_another_inference(
         let audits = AuditClient::new(session.request_handle());
         let mut initial = audits
             .start(AuditStartParams {
+                reviewers: None,
+                scheduling: Default::default(),
+                expected_served_model: None,
                 request_key: "pending-watcher".into(),
                 source: arguments().source,
                 brief: default_brief(),
-                model: "audit-test".into(),
-                provider: "mock_provider".into(),
+                model: Some("audit-test".into()),
+                provider: Some("mock_provider".into()),
                 reasoning_effort: None,
                 audex_guidance: None,
                 agents_evidence: None,

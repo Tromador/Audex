@@ -124,6 +124,8 @@ fn source_and_recovery_forms_parse_without_ambient_options() {
 #[test]
 fn terminal_exit_statuses_do_not_parse_free_text_outcomes() {
     let mut view = AuditRunView {
+        collection: Default::default(),
+        reviewers: Vec::new(),
         run_id: "run".into(),
         snapshot_id: "snapshot".into(),
         assignment_id: "assignment".into(),
@@ -217,6 +219,8 @@ fn audit_protocol_requires_an_explicit_matching_version_even_when_empty() {
 #[test]
 fn published_aggregate_outcomes_override_individual_uncertainty() {
     let mut view = AuditRunView {
+        collection: Default::default(),
+        reviewers: Vec::new(),
         run_id: "run".into(),
         snapshot_id: "snapshot".into(),
         assignment_id: "assignment".into(),
@@ -261,4 +265,57 @@ fn published_aggregate_outcomes_override_individual_uncertainty() {
     for command in [abort, alias] {
         assert!(matches!(command.action,Some(Action::Abort { run_id }) if run_id=="target-run"));
     }
+}
+
+#[test]
+fn ordered_roster_sequential_alias_and_exact_attempt_forms_parse() {
+    let command = AuditCommand::try_parse_from([
+        "audit",
+        "--file",
+        "example.rs",
+        "--reviewer",
+        "local:model-a",
+        "--reviewer",
+        "local:model-a",
+        "--sequential",
+    ])
+    .expect("roster");
+    assert_eq!(command.reviewers, vec!["local:model-a", "local:model-a"]);
+    assert!(command.sequential);
+    assert_eq!(
+        parse_reviewer(&command.reviewers[0])
+            .expect("reviewer")
+            .model,
+        "model-a"
+    );
+    let alias=parse_reviewer(r#"{"provider":"local","model":"alias","expectedServedModel":"model-a","reasoningEffort":"low"}"#).expect("qualified alias");
+    assert_eq!(alias.expected_served_model.as_deref(), Some("model-a"));
+    assert!(
+        parse_reviewer(r#"{"provider":"local","model":"m","executionAdapter":"claude"}"#).is_err()
+    );
+    for value in ["missing-colon", ":model", "provider:"] {
+        assert!(parse_reviewer(value).is_err());
+    }
+    assert!(
+        AuditCommand::try_parse_from(["audit", "--file", "x", "--reviewer", "p:m", "--model", "m"])
+            .is_err()
+    );
+    for action in ["observe", "wait", "cancel", "ignore"] {
+        AuditCommand::try_parse_from(["audit", "attempt", action, "run", "exact-assignment"])
+            .expect("attempt command");
+    }
+    assert!(
+        AuditCommand::try_parse_from(["audit", "attempt", "retry", "run", "exact-assignment"])
+            .is_err()
+    );
+    AuditCommand::try_parse_from([
+        "audit",
+        "attempt",
+        "retry",
+        "run",
+        "exact-assignment",
+        "--authorise-retry",
+        "--acknowledge-possible-overlap",
+    ])
+    .expect("explicit retry");
 }

@@ -2,6 +2,57 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AuditExecutionAdapter": {
+      "description": "Execution mechanism is distinct from the configured provider and authentication route.",
+      "enum": [
+        "native"
+      ],
+      "type": "string"
+    },
+    "AuditReviewerSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "executionAdapter": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuditExecutionAdapter"
+            }
+          ],
+          "default": "native"
+        },
+        "expectedServedModel": {
+          "description": "Expected authoritative identity; omission requires exact resolved-model matching.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "model",
+        "provider"
+      ],
+      "type": "object"
+    },
+    "AuditScheduling": {
+      "enum": [
+        "automatic",
+        "sequential"
+      ],
+      "type": "string"
+    },
     "AuditSource": {
       "oneOf": [
         {
@@ -73,11 +124,24 @@
     "brief": {
       "type": "string"
     },
+    "expectedServedModel": {
+      "description": "Explicitly qualified served-model alias for the singular selection.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "model": {
-      "type": "string"
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "provider": {
-      "type": "string"
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "reasoningEffort": {
       "type": [
@@ -88,14 +152,30 @@
     "requestKey": {
       "type": "string"
     },
+    "reviewers": {
+      "description": "Ordered native roster. Mutually exclusive with the singular selection.",
+      "items": {
+        "$ref": "#/definitions/AuditReviewerSelection"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "scheduling": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/AuditScheduling"
+        }
+      ],
+      "default": "automatic"
+    },
     "source": {
       "$ref": "#/definitions/AuditSource"
     }
   },
   "required": [
     "brief",
-    "model",
-    "provider",
     "requestKey",
     "source"
   ],

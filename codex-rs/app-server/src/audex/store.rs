@@ -200,6 +200,8 @@ pub(crate) struct AuditRunRecord {
     pub snapshot_id: String,
     pub phase: RunPhase,
     pub control_intent: String,
+    pub scheduling: String,
+    pub collection_ready: bool,
     pub revision: i64,
     pub reviewer_id: String,
     pub reviewer_ordinal: i64,
@@ -1532,7 +1534,7 @@ impl AuditStore {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query(
             "SELECT o.state, o.lease_owner, o.lease_expires_at_ms,
-                    r.phase, r.control_intent
+                    r.phase, r.control_intent, r.scheduling, r.id AS run_id
              FROM operations o
              JOIN reviewer_assignments a ON a.id=o.assignment_id
              JOIN audit_runs r ON r.id=a.run_id
@@ -1585,14 +1587,31 @@ impl AuditStore {
              AND (p.lease_owner IS NULL OR p.lease_expires_at_ms<=?)
              AND COALESCE(p.retry_classification,'')<>'observe_only'
              AND NOT EXISTS(SELECT 1 FROM audit_capacity_releases c WHERE c.operation_id=p.id)
+             AND (r.scheduling<>'sequential' OR NOT EXISTS(
+                SELECT 1 FROM operations q JOIN reviewer_assignments b ON b.id=q.assignment_id
+                WHERE b.run_id=r.id AND q.id<>p.id AND NOT EXISTS(SELECT 1 FROM audit_capacity_releases c WHERE c.operation_id=q.id)
+                AND (q.state IN ('dispatching','accepted') OR (q.state='planned' AND q.lease_expires_at_ms>?)
+                    OR (q.state='planned' AND COALESCE(q.retry_classification,'')<>'observe_only' AND b.ordinal<a.ordinal))))
              AND (r.created_at_ms,r.id,a.ordinal)<(
                 SELECT target_run.created_at_ms,target_run.id,target_assignment.ordinal
                 FROM operations target JOIN reviewer_assignments target_assignment ON target_assignment.id=target.assignment_id
                 JOIN audit_runs target_run ON target_run.id=target_assignment.run_id WHERE target.id=?)"
-        ).bind(now_ms).bind(operation_id).fetch_one(&mut *transaction).await?;
+        ).bind(now_ms).bind(now_ms).bind(operation_id).fetch_one(&mut *transaction).await?;
         if active + earlier >= i64::from(worker_limit) {
             transaction.commit().await?;
             return Ok(ClaimOutcome::Busy);
+        }
+        if row.try_get::<String, _>("scheduling")? == "sequential" {
+            let run: String = row.try_get("run_id")?;
+            let prior: i64 = sqlx::query_scalar("SELECT count(*) FROM operations p JOIN reviewer_assignments a ON a.id=p.assignment_id
+                WHERE a.run_id=? AND p.id<>? AND NOT EXISTS(SELECT 1 FROM audit_capacity_releases c WHERE c.operation_id=p.id)
+                AND (p.state IN ('dispatching','accepted') OR (p.state='planned' AND p.lease_expires_at_ms>?)
+                    OR (p.state='planned' AND COALESCE(p.retry_classification,'')<>'observe_only' AND a.ordinal<(SELECT ordinal FROM reviewer_assignments WHERE id=(SELECT assignment_id FROM operations WHERE id=?))))")
+                .bind(run).bind(operation_id).bind(now_ms).bind(operation_id).fetch_one(&mut *transaction).await?;
+            if prior > 0 {
+                transaction.commit().await?;
+                return Ok(ClaimOutcome::Busy);
+            }
         }
         let existing_owner: Option<String> = row.try_get("lease_owner")?;
         let existing_expiry: Option<i64> = row.try_get("lease_expires_at_ms")?;
@@ -1939,6 +1958,13 @@ impl AuditStore {
         require_operation_state(context.operation_state, OperationState::Accepted)?;
         let next_revision = context.attempt_revision + 1;
         let now = now_millis();
+        let attribution_ok:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM audit_attempts t LEFT JOIN audit_attempt_inputs i ON i.assignment_id=t.assignment_id WHERE t.assignment_id=? AND (t.attribution_failure IS NOT NULL OR EXISTS(SELECT 1 FROM audit_request_admissions g WHERE g.assignment_id=t.assignment_id AND g.expected_model IS NOT NULL AND (g.identity_state<>'verified' OR COALESCE(g.model_scope,'')<>'generation')) OR (CASE WHEN json_valid(i.request_json) THEN COALESCE(json_extract(i.request_json,'$.requireServedIdentity'),0) ELSE 0 END=1 AND (NOT EXISTS(SELECT 1 FROM audit_request_admissions g WHERE g.assignment_id=t.assignment_id) OR EXISTS(SELECT 1 FROM audit_request_admissions g WHERE g.assignment_id=t.assignment_id AND g.identity_state<>'verified')))))")
+            .bind(&context.assignment_id).fetch_one(&mut *transaction).await?;
+        if !attribution_ok {
+            return Err(AuditStoreError::InvalidTransition(
+                "completed result has no verified per-generation model attribution".to_owned(),
+            ));
+        }
         sqlx::query("UPDATE operations SET state='observed_terminal', updated_at_ms=? WHERE id=?")
             .bind(now)
             .bind(operation_id)

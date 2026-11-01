@@ -465,55 +465,12 @@ class AuditAttemptReadParams(BaseModel):
     run_id: Annotated[str, Field(alias="runId")]
 
 
-class AuditAttemptView(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    assignment_id: Annotated[str, Field(alias="assignmentId")]
-    assignment_state: Annotated[str, Field(alias="assignmentState")]
-    attempt_ordinal: Annotated[int, Field(alias="attemptOrdinal")]
-    capture_failure: Annotated[str | None, Field(alias="captureFailure")] = None
-    capture_gap: Annotated[str | None, Field(alias="captureGap")] = None
-    capture_truncated: Annotated[bool, Field(alias="captureTruncated")]
-    completed: Annotated[
-        bool,
-        Field(
-            description="True only for a canonical validated result, never inferred from activity."
-        ),
-    ]
-    current: bool
-    disposition: Annotated[
-        str, Field(description="Contribution disposition is independent of execution certainty.")
-    ]
-    model: str
-    operation_id: Annotated[str, Field(alias="operationId")]
-    operation_state: Annotated[str, Field(alias="operationState")]
-    output_cutoff: Annotated[int | None, Field(alias="outputCutoff")] = None
-    output_sequence: Annotated[int, Field(alias="outputSequence")]
-    owner_generation: Annotated[int, Field(alias="ownerGeneration")]
-    possible_overlap: Annotated[bool, Field(alias="possibleOverlap")]
-    provider: str
-    reasoning_effort: Annotated[str | None, Field(alias="reasoningEffort")] = None
-    reviewer_id: Annotated[str, Field(alias="reviewerId")]
-    reviewer_ordinal: Annotated[int, Field(alias="reviewerOrdinal")]
-    revision: int
-    run_id: Annotated[str, Field(alias="runId")]
-    snapshot_id: Annotated[str, Field(alias="snapshotId")]
-
-
 class AuditAttemptsParams(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
         populate_by_name=True,
     )
     run_id: Annotated[str, Field(alias="runId")]
-
-
-class AuditAttemptsResponse(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    attempts: list[AuditAttemptView]
 
 
 class AuditCancelParams(BaseModel):
@@ -536,6 +493,33 @@ class AuditCapabilitiesResponse(BaseModel):
         populate_by_name=True,
     )
     protocol_version: Annotated[int, Field(alias="protocolVersion", ge=0)]
+
+
+class AuditExecutionAdapter(RootModel[Literal["native"]]):
+    root: Annotated[
+        Literal["native"],
+        Field(
+            description="Execution mechanism is distinct from the configured provider and authentication route."
+        ),
+    ]
+
+
+class AuditGenerationIdentity(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    evidence_scope: Annotated[
+        str | None,
+        Field(
+            alias="evidenceScope",
+            description="Connection observations cannot establish per-generation attribution.",
+        ),
+    ] = None
+    expected_model: Annotated[str | None, Field(alias="expectedModel")] = None
+    observed_model: Annotated[str | None, Field(alias="observedModel")] = None
+    request_id: Annotated[str, Field(alias="requestId")]
+    state: str
+    transport: str
 
 
 class AuditListParams(BaseModel):
@@ -578,6 +562,26 @@ class AuditReleaseSlotParams(BaseModel):
     run_id: Annotated[str, Field(alias="runId")]
 
 
+class AuditReviewerSelection(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    execution_adapter: Annotated[
+        AuditExecutionAdapter | None, Field(alias="executionAdapter", validate_default=True)
+    ] = "native"
+    expected_served_model: Annotated[
+        str | None,
+        Field(
+            alias="expectedServedModel",
+            description="Expected authoritative identity; omission requires exact resolved-model matching.",
+        ),
+    ] = None
+    model: str
+    provider: str
+    reasoning_effort: Annotated[str | None, Field(alias="reasoningEffort")] = None
+
+
 class AuditRunPhase(Enum):
     created = "created"
     snapshot_bound = "snapshot_bound"
@@ -590,40 +594,9 @@ class AuditRunPhase(Enum):
     cancelled = "cancelled"
 
 
-class AuditRunView(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    assignment_id: Annotated[str, Field(alias="assignmentId")]
-    cancellation_requested: Annotated[bool, Field(alias="cancellationRequested")]
-    capacity_released: Annotated[
-        bool,
-        Field(
-            alias="capacityReleased",
-            description="The operator explicitly released capacity. This is not terminal evidence.",
-        ),
-    ]
-    observation_pending: Annotated[
-        bool,
-        Field(
-            alias="observationPending",
-            description="A retained observation issue remains unresolved. This is non-terminal: the daemon continues observing the original operation, without resampling.",
-        ),
-    ]
-    operation_state: Annotated[AuditOperationState, Field(alias="operationState")]
-    outcome: str | None = None
-    phase: AuditRunPhase
-    raw_result: Annotated[
-        str | None,
-        Field(
-            alias="rawResult",
-            description="Exact retained response, including invalid JSON, when a bounded result was received.",
-        ),
-    ] = None
-    report: str | None = None
-    revision: int
-    run_id: Annotated[str, Field(alias="runId")]
-    snapshot_id: Annotated[str, Field(alias="snapshotId")]
+class AuditScheduling(Enum):
+    automatic = "automatic"
+    sequential = "sequential"
 
 
 class SnippetAuditSource(BaseModel):
@@ -658,18 +631,23 @@ class AuditStartParams(BaseModel):
     agents_evidence: Annotated[str | None, Field(alias="agentsEvidence")] = None
     audex_guidance: Annotated[str | None, Field(alias="audexGuidance")] = None
     brief: str
-    model: str
-    provider: str
+    expected_served_model: Annotated[
+        str | None,
+        Field(
+            alias="expectedServedModel",
+            description="Explicitly qualified served-model alias for the singular selection.",
+        ),
+    ] = None
+    model: str | None = None
+    provider: str | None = None
     reasoning_effort: Annotated[str | None, Field(alias="reasoningEffort")] = None
     request_key: Annotated[str, Field(alias="requestKey")]
+    reviewers: Annotated[
+        list[AuditReviewerSelection] | None,
+        Field(description="Ordered native roster. Mutually exclusive with the singular selection."),
+    ] = None
+    scheduling: AuditScheduling | None = "automatic"
     source: AuditSource
-
-
-class AuditStartResponse(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    run: AuditRunView
 
 
 class AuthMode(Enum):
@@ -7463,48 +7441,78 @@ class AppsReadResponse(BaseModel):
     missing_app_ids: Annotated[list[str], Field(alias="missingAppIds")]
 
 
-class AuditAttemptReadResponse(BaseModel):
+class AuditAttemptView(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
-    attempt: AuditAttemptView
-    entries: list[AuditActivityEntry]
-    next_sequence: Annotated[int, Field(alias="nextSequence")]
-    raw_result: Annotated[
-        str | None,
+    assignment_id: Annotated[str, Field(alias="assignmentId")]
+    assignment_state: Annotated[str, Field(alias="assignmentState")]
+    attempt_ordinal: Annotated[int, Field(alias="attemptOrdinal")]
+    authentication_route: Annotated[
+        str,
         Field(
-            alias="rawResult",
-            description="The original terminal response, if retained; invalid JSON stays invalid.",
-        ),
-    ] = None
-
-
-class AuditCancelResponse(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    run: AuditRunView
-
-
-class AuditListResponse(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    next_cursor: Annotated[str | None, Field(alias="nextCursor")] = None
-    protocol_version: Annotated[
-        int,
-        Field(
-            alias="protocolVersion",
-            description="Required even for an empty list, so clients can check before submitting work.",
-            ge=0,
+            alias="authenticationRoute",
+            description="Uses the retained native route; this does not claim an API/subscription billing amount.",
         ),
     ]
-    runs: Annotated[
-        list[AuditRunView],
+    capture_failure: Annotated[str | None, Field(alias="captureFailure")] = None
+    capture_gap: Annotated[str | None, Field(alias="captureGap")] = None
+    capture_truncated: Annotated[bool, Field(alias="captureTruncated")]
+    completed: Annotated[
+        bool,
         Field(
-            description="Newest-first metadata summaries. Results and reports are absent; audit/read retrieves those artefacts with strict integrity verification."
+            description="True only for a canonical validated result, never inferred from activity."
         ),
     ]
+    current: bool
+    disposition: Annotated[
+        str, Field(description="Contribution disposition is independent of execution certainty.")
+    ]
+    execution_adapter: Annotated[AuditExecutionAdapter, Field(alias="executionAdapter")]
+    expected_served_model: Annotated[str | None, Field(alias="expectedServedModel")] = None
+    model: Annotated[str, Field(description="Requested selection, retained for compatibility.")]
+    model_evidence: Annotated[
+        list[AuditGenerationIdentity],
+        Field(
+            alias="modelEvidence",
+            description="Retained per-generation evidence, including failures; reads never refresh configuration.",
+        ),
+    ]
+    operation_id: Annotated[str, Field(alias="operationId")]
+    operation_state: Annotated[str, Field(alias="operationState")]
+    output_cutoff: Annotated[int | None, Field(alias="outputCutoff")] = None
+    output_sequence: Annotated[int, Field(alias="outputSequence")]
+    owner_generation: Annotated[int, Field(alias="ownerGeneration")]
+    possible_overlap: Annotated[bool, Field(alias="possibleOverlap")]
+    provider: str
+    reasoning_effort: Annotated[str | None, Field(alias="reasoningEffort")] = None
+    requested_model: Annotated[str, Field(alias="requestedModel")]
+    resolved_model: Annotated[str, Field(alias="resolvedModel")]
+    retry_eligible: Annotated[bool, Field(alias="retryEligible")]
+    reviewer_id: Annotated[str, Field(alias="reviewerId")]
+    reviewer_ordinal: Annotated[int, Field(alias="reviewerOrdinal")]
+    revision: int
+    run_id: Annotated[str, Field(alias="runId")]
+    snapshot_id: Annotated[str, Field(alias="snapshotId")]
+
+
+class AuditAttemptsResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    attempts: list[AuditAttemptView]
+
+
+class AuditCollectionView(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    completed_count: Annotated[int, Field(alias="completedCount", ge=0)]
+    excluded_count: Annotated[int, Field(alias="excludedCount", ge=0)]
+    outstanding_count: Annotated[int, Field(alias="outstandingCount", ge=0)]
+    ready: bool
+    reviewer_count: Annotated[int, Field(alias="reviewerCount", ge=0)]
+    scheduling: AuditScheduling
 
 
 class AuditProgressNotification(BaseModel):
@@ -7517,14 +7525,58 @@ class AuditProgressNotification(BaseModel):
     run_id: Annotated[str, Field(alias="runId")]
 
 
-class AuditReadResponse(BaseModel):
+class AuditRunView(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
-    run: AuditRunView
+    assignment_id: Annotated[str, Field(alias="assignmentId")]
+    cancellation_requested: Annotated[bool, Field(alias="cancellationRequested")]
+    capacity_released: Annotated[
+        bool,
+        Field(
+            alias="capacityReleased",
+            description="The operator explicitly released capacity. This is not terminal evidence.",
+        ),
+    ]
+    collection: Annotated[AuditCollectionView | None, Field(validate_default=True)] = {
+        "completedCount": 0,
+        "excludedCount": 0,
+        "outstandingCount": 0,
+        "ready": False,
+        "reviewerCount": 0,
+        "scheduling": "automatic",
+    }
+    observation_pending: Annotated[
+        bool,
+        Field(
+            alias="observationPending",
+            description="A retained observation issue remains unresolved. This is non-terminal: the daemon continues observing the original operation, without resampling.",
+        ),
+    ]
+    operation_state: Annotated[AuditOperationState, Field(alias="operationState")]
+    outcome: str | None = None
+    phase: AuditRunPhase
+    raw_result: Annotated[
+        str | None,
+        Field(
+            alias="rawResult",
+            description="Exact retained response, including invalid JSON, when a bounded result was received.",
+        ),
+    ] = None
+    report: str | None = None
+    reviewers: Annotated[
+        list[AuditAttemptView] | None,
+        Field(
+            description="Current attempts in logical reviewer order; history uses audit/attempts.",
+            validate_default=True,
+        ),
+    ] = []
+    revision: int
+    run_id: Annotated[str, Field(alias="runId")]
+    snapshot_id: Annotated[str, Field(alias="snapshotId")]
 
 
-class AuditReleaseSlotResponse(BaseModel):
+class AuditStartResponse(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
@@ -11653,6 +11705,64 @@ class AppsListResponse(BaseModel):
             description="Opaque cursor to pass to the next call to continue after the last item. If None, there are no more items to return.",
         ),
     ] = None
+
+
+class AuditAttemptReadResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    attempt: AuditAttemptView
+    entries: list[AuditActivityEntry]
+    next_sequence: Annotated[int, Field(alias="nextSequence")]
+    raw_result: Annotated[
+        str | None,
+        Field(
+            alias="rawResult",
+            description="The original terminal response, if retained; invalid JSON stays invalid.",
+        ),
+    ] = None
+
+
+class AuditCancelResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    run: AuditRunView
+
+
+class AuditListResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    next_cursor: Annotated[str | None, Field(alias="nextCursor")] = None
+    protocol_version: Annotated[
+        int,
+        Field(
+            alias="protocolVersion",
+            description="Required even for an empty list, so clients can check before submitting work.",
+            ge=0,
+        ),
+    ]
+    runs: Annotated[
+        list[AuditRunView],
+        Field(
+            description="Newest-first metadata summaries. Results and reports are absent; audit/read retrieves those artefacts with strict integrity verification."
+        ),
+    ]
+
+
+class AuditReadResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    run: AuditRunView
+
+
+class AuditReleaseSlotResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    run: AuditRunView
 
 
 class ThreadStartRequest(BaseModel):

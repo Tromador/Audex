@@ -199,6 +199,47 @@ impl AuditStore {
                 None
             };
             let model: String = row.try_get("model")?;
+            let evidence=sqlx::query("SELECT expected_model,observed_model,identity_state,model_scope FROM audit_request_admissions WHERE assignment_id=? ORDER BY admitted_at_ms,request_id")
+                .bind(&assignment).fetch_all(&mut *connection).await?;
+            let verified = !evidence.is_empty()
+                && evidence.iter().all(|e| {
+                    e.get::<String, _>("identity_state") == "verified"
+                        && e.get::<Option<String>, _>("model_scope").as_deref()
+                            == Some("generation")
+                });
+            let observed_model = evidence
+                .iter()
+                .rev()
+                .find_map(|e| e.get::<Option<String>, _>("observed_model"));
+            let mut caveats = Vec::new();
+            if evidence
+                .iter()
+                .any(|e| e.get::<Option<String>, _>("model_scope").as_deref() == Some("connection"))
+            {
+                caveats.push("Connection model metadata alone does not establish per-generation served identity.".to_owned());
+            }
+            if !verified {
+                caveats.push(
+                    "Served-model identity was not verified for this contribution.".to_owned(),
+                );
+            }
+            if let Some(expected) = evidence
+                .first()
+                .and_then(|e| e.get::<Option<String>, _>("expected_model"))
+                && expected != model
+            {
+                caveats.push(format!(
+                    "Explicit commissioned served-model alias: {model} -> {expected}"
+                ));
+            }
+            if evidence.iter().any(|e| {
+                matches!(
+                    e.get::<String, _>("identity_state").as_str(),
+                    "missing" | "mismatch"
+                )
+            }) {
+                caveats.push("Attribution failed; received material is unvalidated history, not accepted findings.".to_owned());
+            }
             reviewers.push(ReviewerInput {
                 reviewer_id: row.try_get("reviewer_id")?,
                 reviewer_ordinal: row.try_get("reviewer_ordinal")?,
@@ -209,11 +250,9 @@ impl AuditStore {
                 provider: row.try_get("provider")?,
                 requested_model: model.clone(),
                 resolved_model: model,
-                observed_model: None,
-                observation_verified: false,
-                provider_caveats: vec![
-                    "Served-model identity was not verified for this contribution.".to_owned(),
-                ],
+                observed_model,
+                observation_verified: verified,
+                provider_caveats: caveats,
                 input_digest: row.try_get("input_digest")?,
                 policy_digest: row.try_get("policy_digest")?,
                 disposition: row.try_get("disposition")?,

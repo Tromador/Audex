@@ -35,6 +35,7 @@ async fn complete(
     let current = store
         .attempt_by_assignment(&attempt.run_id, &attempt.assignment_id)
         .await?;
+    attest_fake_completion(store, &current).await?;
     let mut value: Value = serde_json::from_slice(&empty_result(attempt))?;
     if finding {
         value["summary"] = json!("An independently attributed defect.");
@@ -114,7 +115,15 @@ async fn three_reviewers_findings_zero_findings_and_exact_partial_render_in_orde
         assert_eq!(reviewer.reviewer_id, attempts[index].reviewer_id);
         assert_eq!(reviewer.assignment_id, attempts[index].assignment_id);
         assert_eq!(reviewer.reviewer_ordinal, index as i64);
-        assert!(!reviewer.observation_verified && reviewer.observed_model.is_none());
+        assert_eq!(reviewer.observation_verified, index < 2);
+        assert_eq!(
+            reviewer.observed_model.as_deref(),
+            if index < 2 {
+                Some(attempts[index].model.as_str())
+            } else {
+                None
+            }
+        );
     }
     assert_eq!(
         input.reviewers[0]

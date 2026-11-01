@@ -115,6 +115,28 @@ impl Drop for TestDaemon {
             let _ = child.wait();
         }
         let _ = self.lifecycle("stop");
+        if let Some(root) = std::env::var_os("AUDEX_S2_EVIDENCE") {
+            let root = PathBuf::from(root).join(format!(
+                "fixture-{}",
+                self.home
+                    .path()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ));
+            let _ = std::fs::create_dir_all(&root);
+            for name in [
+                "config.toml",
+                "app-server-daemon/app-server.stderr.log",
+                "audex/audit-state.sqlite3",
+                "audex/audit-state.sqlite3-wal",
+            ] {
+                let source = self.home.path().join(name);
+                if source.is_file() {
+                    let _ = std::fs::copy(source, root.join(name.replace('/', "-")));
+                }
+            }
+        }
         if let Ok(pid) = self.pid("app-server-updater.pid") {
             let _ = signal(pid, libc::SIGTERM);
         }

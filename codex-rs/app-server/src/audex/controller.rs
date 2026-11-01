@@ -107,6 +107,8 @@ pub(super) struct ReviewerSelection {
     pub provider: String,
     pub model: String,
     pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_served_model: Option<String>,
 }
 
 type ProgressVersion = (i64, Vec<(String, i64, i64, i64)>);
@@ -335,14 +337,40 @@ impl AuditController {
             }
             .into()),
             ClientRequest::AuditStart { params, .. } => {
-                let selection = ReviewerSelection {
-                    provider: params.provider.clone(),
-                    model: params.model.clone(),
-                    reasoning_effort: params.reasoning_effort.clone(),
+                let selections = if let Some(roster) = &params.reviewers {
+                    anyhow::ensure!(
+                        params.provider.is_none()
+                            && params.model.is_none()
+                            && params.reasoning_effort.is_none()
+                            && params.expected_served_model.is_none(),
+                        "roster and singular reviewer selection are mutually exclusive"
+                    );
+                    roster
+                        .iter()
+                        .map(|r| ReviewerSelection {
+                            provider: r.provider.clone(),
+                            model: r.model.clone(),
+                            reasoning_effort: r.reasoning_effort.clone(),
+                            expected_served_model: r.expected_served_model.clone(),
+                        })
+                        .collect()
+                } else {
+                    vec![ReviewerSelection {
+                        provider: params
+                            .provider
+                            .clone()
+                            .ok_or_else(|| anyhow::anyhow!("reviewer provider is required"))?,
+                        model: params
+                            .model
+                            .clone()
+                            .ok_or_else(|| anyhow::anyhow!("reviewer model is required"))?,
+                        reasoning_effort: params.reasoning_effort.clone(),
+                        expected_served_model: params.expected_served_model.clone(),
+                    }]
                 };
                 Ok(AuditStartResponse {
                     run: self
-                        .commission_roster(params, vec![selection], start_identity)
+                        .commission_roster(params, selections, start_identity)
                         .await?,
                 }
                 .into())
@@ -427,7 +455,7 @@ impl AuditController {
         }
     }
 
-    /// Internal foundation commissioning. Frontends retain their current single-reviewer contract.
+    /// One sealed source and one atomic commissioning decision for the entire roster.
     async fn commission_roster(
         &self,
         params: AuditStartParams,
@@ -438,6 +466,18 @@ impl AuditController {
             !reviewers.is_empty() && reviewers.len() <= 64,
             "reviewer roster must contain 1..64 entries"
         );
+        for selection in &reviewers {
+            anyhow::ensure!(
+                !selection.provider.trim().is_empty() && !selection.model.trim().is_empty(),
+                "reviewer provider and model must be nonempty"
+            );
+            if let Some(alias) = &selection.expected_served_model {
+                anyhow::ensure!(
+                    !alias.trim().is_empty() && alias.len() <= 1024,
+                    "expected served-model identity must be nonempty and bounded"
+                );
+            }
+        }
         let _gate = self.gate.lock().await;
         let capture = CaptureRequest {
             source: match &params.source {
@@ -472,6 +512,13 @@ impl AuditController {
             identity = sha256_hex(&serde_json::to_vec(&serde_json::json!({
                 "snapshotId": snapshot.snapshot_id(), "brief": params.brief, "reviewers": reviewers,
             }))?);
+        }
+        if params.scheduling != AuditScheduling::Automatic
+            || reviewers.iter().any(|r| r.expected_served_model.is_some())
+        {
+            identity = sha256_hex(&serde_json::to_vec(
+                &serde_json::json!({"base":identity,"scheduling":params.scheduling,"reviewers":reviewers}),
+            )?);
         }
         *start_identity = Some(identity.clone());
         if let Some(existing) = self
@@ -514,6 +561,9 @@ impl AuditController {
             let request_json = serde_json::to_string(&serde_json::json!({
                 "version":1, "brief":params.brief, "provider":selection.provider, "model":selection.model,
                 "reasoningEffort":prepared.options.config.model_reasoning_effort,
+                "requireServedIdentity":true,"expectedServedModel":selection.expected_served_model,
+                "resolvedModel":prepared.policy["model_metadata"]["slug"],
+                "executionAdapter":"native","authenticationRoute":"daemon_configured_native",
             }))?;
             let request_digest = sha256_hex(request_json.as_bytes());
             commissions.push(super::store::ReviewerCommission {
@@ -547,7 +597,14 @@ impl AuditController {
         let created = self
             .store()
             .await?
-            .create_roster(&commissions, Some(&identity))
+            .create_roster_with_scheduling(
+                &commissions,
+                Some(&identity),
+                match params.scheduling {
+                    AuditScheduling::Automatic => "automatic",
+                    AuditScheduling::Sequential => "sequential",
+                },
+            )
             .await?;
         self.wake.notify_one();
         #[cfg(test)]
@@ -573,7 +630,33 @@ impl AuditController {
         } else {
             store.load_run_metadata(id).await?
         };
+        let reviewers = self
+            .attempt_views(id)
+            .await?
+            .attempts
+            .into_iter()
+            .filter(|a| a.current)
+            .collect::<Vec<_>>();
+        let completed = reviewers.iter().filter(|a| a.completed).count() as u32;
+        let excluded = reviewers
+            .iter()
+            .filter(|a| !a.completed && a.disposition != "active")
+            .count() as u32;
+        let collection = AuditCollectionView {
+            scheduling: if run.scheduling == "sequential" {
+                AuditScheduling::Sequential
+            } else {
+                AuditScheduling::Automatic
+            },
+            ready: run.collection_ready,
+            reviewer_count: reviewers.len() as u32,
+            completed_count: completed,
+            excluded_count: excluded,
+            outstanding_count: reviewers.len() as u32 - completed - excluded,
+        };
         Ok(AuditRunView {
+            collection,
+            reviewers,
             run_id: run.run_id.clone(),
             snapshot_id: run.snapshot_id.clone(),
             assignment_id: run.assignment_id.clone(),

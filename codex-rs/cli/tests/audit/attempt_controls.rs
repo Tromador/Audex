@@ -3,7 +3,11 @@ use super::*;
 use core_test_support::streaming_sse::{StreamingSseChunk, start_streaming_sse_server};
 use tokio::sync::oneshot;
 
-fn chunk(events: Vec<Value>, gate: Option<oneshot::Receiver<()>>) -> StreamingSseChunk {
+fn chunk(mut events: Vec<Value>, gate: Option<oneshot::Receiver<()>>) -> StreamingSseChunk {
+    events.insert(
+        0,
+        json!({"type":"codex.response.metadata","headers":{"OpenAI-Model":"audit-test"}}),
+    );
     StreamingSseChunk {
         gate,
         body: responses::sse(events),

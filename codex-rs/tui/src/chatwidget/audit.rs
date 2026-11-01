@@ -116,7 +116,7 @@ impl ChatWidget {
         };
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: Some("Submit this isolated audit?".to_owned()),
-            subtitle: Some(format!("Source: {source}\nReviewer: {} / {}\nBrief: {}\nAUDEX guidance: {}; AGENTS evidence: {}\nSelected source and explicit context may be disclosed to this provider. A retained immutable snapshot will be created. Operator tools and history are not inherited.\nRequest key: {}", params.model, params.provider, params.brief,
+            subtitle: Some(format!("Source: {source}\nReviewer: {} / {}\nBrief: {}\nAUDEX guidance: {}; AGENTS evidence: {}\nSelected source and explicit context may be disclosed to this provider. A retained immutable snapshot will be created. Operator tools and history are not inherited.\nRequest key: {}", params.model.as_deref().unwrap_or(""), params.provider.as_deref().unwrap_or(""), params.brief,
                 params.audex_guidance.as_ref().map_or(0, String::len), params.agents_evidence.as_ref().map_or(0, String::len), params.request_key)),
             items: vec![
                 SelectionItem { name: "No, return to the conversation".to_owned(), actions: vec![Box::new(move |_| decide(&decline, false))], dismiss_on_select: true, ..Default::default() },
@@ -146,14 +146,17 @@ mod tests {
 
     fn params() -> AuditStartParams {
         AuditStartParams {
+            reviewers: None,
+            scheduling: Default::default(),
+            expected_served_model: None,
             request_key: "request".into(),
             source: AuditSource::Snippet {
                 name: "x.rs".into(),
                 content: "source".into(),
             },
             brief: "brief".into(),
-            provider: "provider".into(),
-            model: "model".into(),
+            provider: Some("provider".into()),
+            model: Some("model".into()),
             reasoning_effort: None,
             audex_guidance: None,
             agents_evidence: None,

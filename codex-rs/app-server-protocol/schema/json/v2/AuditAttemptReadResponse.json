@@ -51,6 +51,10 @@
           "format": "int64",
           "type": "integer"
         },
+        "authenticationRoute": {
+          "description": "Uses the retained native route; this does not claim an API/subscription billing amount.",
+          "type": "string"
+        },
         "captureFailure": {
           "type": [
             "string",
@@ -77,8 +81,25 @@
           "description": "Contribution disposition is independent of execution certainty.",
           "type": "string"
         },
+        "executionAdapter": {
+          "$ref": "#/definitions/AuditExecutionAdapter"
+        },
+        "expectedServedModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "model": {
+          "description": "Requested selection, retained for compatibility.",
           "type": "string"
+        },
+        "modelEvidence": {
+          "description": "Retained per-generation evidence, including failures; reads never refresh configuration.",
+          "items": {
+            "$ref": "#/definitions/AuditGenerationIdentity"
+          },
+          "type": "array"
         },
         "operationId": {
           "type": "string"
@@ -113,6 +134,15 @@
             "null"
           ]
         },
+        "requestedModel": {
+          "type": "string"
+        },
+        "resolvedModel": {
+          "type": "string"
+        },
+        "retryEligible": {
+          "type": "boolean"
+        },
         "reviewerId": {
           "type": "string"
         },
@@ -135,22 +165,73 @@
         "assignmentId",
         "assignmentState",
         "attemptOrdinal",
+        "authenticationRoute",
         "captureTruncated",
         "completed",
         "current",
         "disposition",
+        "executionAdapter",
         "model",
+        "modelEvidence",
         "operationId",
         "operationState",
         "outputSequence",
         "ownerGeneration",
         "possibleOverlap",
         "provider",
+        "requestedModel",
+        "resolvedModel",
+        "retryEligible",
         "reviewerId",
         "reviewerOrdinal",
         "revision",
         "runId",
         "snapshotId"
+      ],
+      "type": "object"
+    },
+    "AuditExecutionAdapter": {
+      "description": "Execution mechanism is distinct from the configured provider and authentication route.",
+      "enum": [
+        "native"
+      ],
+      "type": "string"
+    },
+    "AuditGenerationIdentity": {
+      "properties": {
+        "evidenceScope": {
+          "description": "Connection observations cannot establish per-generation attribution.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observedModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "transport": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requestId",
+        "state",
+        "transport"
       ],
       "type": "object"
     }

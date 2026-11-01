@@ -1694,6 +1694,10 @@
           "format": "int64",
           "type": "integer"
         },
+        "authenticationRoute": {
+          "description": "Uses the retained native route; this does not claim an API/subscription billing amount.",
+          "type": "string"
+        },
         "captureFailure": {
           "type": [
             "string",
@@ -1720,8 +1724,25 @@
           "description": "Contribution disposition is independent of execution certainty.",
           "type": "string"
         },
+        "executionAdapter": {
+          "$ref": "#/definitions/AuditExecutionAdapter"
+        },
+        "expectedServedModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "model": {
+          "description": "Requested selection, retained for compatibility.",
           "type": "string"
+        },
+        "modelEvidence": {
+          "description": "Retained per-generation evidence, including failures; reads never refresh configuration.",
+          "items": {
+            "$ref": "#/definitions/AuditGenerationIdentity"
+          },
+          "type": "array"
         },
         "operationId": {
           "type": "string"
@@ -1756,6 +1777,15 @@
             "null"
           ]
         },
+        "requestedModel": {
+          "type": "string"
+        },
+        "resolvedModel": {
+          "type": "string"
+        },
+        "retryEligible": {
+          "type": "boolean"
+        },
         "reviewerId": {
           "type": "string"
         },
@@ -1778,17 +1808,23 @@
         "assignmentId",
         "assignmentState",
         "attemptOrdinal",
+        "authenticationRoute",
         "captureTruncated",
         "completed",
         "current",
         "disposition",
+        "executionAdapter",
         "model",
+        "modelEvidence",
         "operationId",
         "operationState",
         "outputSequence",
         "ownerGeneration",
         "possibleOverlap",
         "provider",
+        "requestedModel",
+        "resolvedModel",
+        "retryEligible",
         "reviewerId",
         "reviewerOrdinal",
         "revision",
@@ -1873,6 +1909,90 @@
         "protocolVersion"
       ],
       "title": "AuditCapabilitiesResponse",
+      "type": "object"
+    },
+    "AuditCollectionView": {
+      "properties": {
+        "completedCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "excludedCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "outstandingCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "reviewerCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "scheduling": {
+          "$ref": "#/definitions/AuditScheduling"
+        }
+      },
+      "required": [
+        "completedCount",
+        "excludedCount",
+        "outstandingCount",
+        "ready",
+        "reviewerCount",
+        "scheduling"
+      ],
+      "type": "object"
+    },
+    "AuditExecutionAdapter": {
+      "description": "Execution mechanism is distinct from the configured provider and authentication route.",
+      "enum": [
+        "native"
+      ],
+      "type": "string"
+    },
+    "AuditGenerationIdentity": {
+      "properties": {
+        "evidenceScope": {
+          "description": "Connection observations cannot establish per-generation attribution.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observedModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "transport": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requestId",
+        "state",
+        "transport"
+      ],
       "type": "object"
     },
     "AuditListParams": {
@@ -2036,6 +2156,43 @@
       "title": "AuditReleaseSlotResponse",
       "type": "object"
     },
+    "AuditReviewerSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "executionAdapter": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuditExecutionAdapter"
+            }
+          ],
+          "default": "native"
+        },
+        "expectedServedModel": {
+          "description": "Expected authoritative identity; omission requires exact resolved-model matching.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "model",
+        "provider"
+      ],
+      "type": "object"
+    },
     "AuditRunPhase": {
       "enum": [
         "created",
@@ -2061,6 +2218,21 @@
         "capacityReleased": {
           "description": "The operator explicitly released capacity. This is not terminal evidence.",
           "type": "boolean"
+        },
+        "collection": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuditCollectionView"
+            }
+          ],
+          "default": {
+            "completedCount": 0,
+            "excludedCount": 0,
+            "outstandingCount": 0,
+            "ready": false,
+            "reviewerCount": 0,
+            "scheduling": "automatic"
+          }
         },
         "observationPending": {
           "description": "A retained observation issue remains unresolved. This is non-terminal: the daemon continues observing the original operation, without resampling.",
@@ -2091,6 +2263,14 @@
             "null"
           ]
         },
+        "reviewers": {
+          "default": [],
+          "description": "Current attempts in logical reviewer order; history uses audit/attempts.",
+          "items": {
+            "$ref": "#/definitions/AuditAttemptView"
+          },
+          "type": "array"
+        },
         "revision": {
           "format": "int64",
           "type": "integer"
@@ -2114,6 +2294,13 @@
         "snapshotId"
       ],
       "type": "object"
+    },
+    "AuditScheduling": {
+      "enum": [
+        "automatic",
+        "sequential"
+      ],
+      "type": "string"
     },
     "AuditSource": {
       "oneOf": [
@@ -2188,11 +2375,24 @@
         "brief": {
           "type": "string"
         },
+        "expectedServedModel": {
+          "description": "Explicitly qualified served-model alias for the singular selection.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "model": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "provider": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "reasoningEffort": {
           "type": [
@@ -2203,14 +2403,30 @@
         "requestKey": {
           "type": "string"
         },
+        "reviewers": {
+          "description": "Ordered native roster. Mutually exclusive with the singular selection.",
+          "items": {
+            "$ref": "#/definitions/AuditReviewerSelection"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "scheduling": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuditScheduling"
+            }
+          ],
+          "default": "automatic"
+        },
         "source": {
           "$ref": "#/definitions/AuditSource"
         }
       },
       "required": [
         "brief",
-        "model",
-        "provider",
         "requestKey",
         "source"
       ],

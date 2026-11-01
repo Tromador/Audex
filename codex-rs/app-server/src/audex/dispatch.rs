@@ -154,6 +154,17 @@ struct RetainedInput {
     provider: String,
     model: String,
     reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
+    #[serde(default)]
+    #[serde(rename = "requireServedIdentity")]
+    _require_served_identity: bool,
+    #[serde(rename = "expectedServedModel")]
+    _expected_served_model: Option<String>,
+    #[serde(rename = "resolvedModel")]
+    _resolved_model: Option<String>,
+    #[serde(rename = "executionAdapter")]
+    _execution_adapter: Option<String>,
+    #[serde(rename = "authenticationRoute")]
+    _authentication_route: Option<String>,
 }
 
 impl CodexDispatch {

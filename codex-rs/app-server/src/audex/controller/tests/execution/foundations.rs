@@ -21,11 +21,14 @@ fn native_roster_uses_three_distinct_durable_sessions_without_sibling_input() ->
                 .respond_with(
                     ResponseTemplate::new(200)
                         .insert_header("content-type", "text/event-stream")
-                        .set_body_string(sse(vec![
-                            ev_response_created(&format!("response-{ordinal}")),
-                            ev_assistant_message(&format!("answer-{ordinal}"), &raw),
-                            ev_completed(&format!("response-{ordinal}")),
-                        ])),
+                        .set_body_string(sse_for_model(
+                            &attempt.model,
+                            vec![
+                                ev_response_created(&format!("response-{ordinal}")),
+                                ev_assistant_message(&format!("answer-{ordinal}"), &raw),
+                                ev_completed(&format!("response-{ordinal}")),
+                            ],
+                        )),
                 )
                 .expect(1)
                 .mount(&server)

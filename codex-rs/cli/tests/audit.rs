@@ -10,6 +10,9 @@ mod follow_progress;
 #[path = "audit/attempt_controls.rs"]
 mod attempt_controls;
 
+#[path = "audit/roster.rs"]
+mod roster;
+
 #[cfg(target_os = "linux")]
 #[path = "audit/process_integration.rs"]
 mod process_integration;
@@ -131,7 +134,7 @@ async fn provider(server: &MockServer, mode: &'static str) {
             assert!(!text.contains("fn main()"));
             responses::sse(vec![responses::ev_function_call_with_namespace("read","audex_source","read",r#"{"path":"example.rs","offset":0,"max_bytes":64}"#),responses::ev_completed("read")])
         };
-        let response=ResponseTemplate::new(200).insert_header("content-type","text/event-stream").set_body_string(output);
+        let response=ResponseTemplate::new(200).insert_header("content-type","text/event-stream").insert_header("openai-model","audit-test").set_body_string(output);
         if mode=="blocked" {response.set_delay(Duration::from_secs(60))} else {response}
     }).mount(server).await;
 }

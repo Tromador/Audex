@@ -55,11 +55,21 @@ pub struct AuditAttemptView {
     pub operation_id: String,
     pub snapshot_id: String,
     pub provider: String,
+    /// Requested selection, retained for compatibility.
     pub model: String,
+    pub requested_model: String,
+    pub resolved_model: String,
+    pub expected_served_model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub revision: i64,
     pub owner_generation: i64,
     pub current: bool,
+    pub retry_eligible: bool,
+    pub execution_adapter: super::AuditExecutionAdapter,
+    /// Uses the retained native route; this does not claim an API/subscription billing amount.
+    pub authentication_route: String,
+    /// Retained per-generation evidence, including failures; reads never refresh configuration.
+    pub model_evidence: Vec<AuditGenerationIdentity>,
     /// Contribution disposition is independent of execution certainty.
     pub disposition: String,
     pub assignment_state: String,
@@ -128,4 +138,17 @@ pub struct AuditAttemptProgress {
     pub assignment_id: String,
     pub revision: i64,
     pub output_sequence: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AuditGenerationIdentity {
+    pub request_id: String,
+    pub transport: String,
+    pub expected_model: Option<String>,
+    pub observed_model: Option<String>,
+    /// Connection observations cannot establish per-generation attribution.
+    pub evidence_scope: Option<String>,
+    pub state: String,
 }

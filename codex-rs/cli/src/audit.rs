@@ -40,6 +40,15 @@ pub(crate) struct AuditCommand {
     /// Reviewer model. Uses the daemon's declared value, or requires this flag.
     #[arg(long)]
     model: Option<String>,
+    /// Ordered native selection, repeated for each reviewer. Accepts PROVIDER:MODEL or a JSON AuditReviewerSelection.
+    #[arg(long = "reviewer", conflicts_with_all = ["model", "provider", "expected_served_model"])]
+    reviewers: Vec<String>,
+    /// Run at most one reviewer from this audit at a time.
+    #[arg(long)]
+    sequential: bool,
+    /// Explicitly qualify the served-model alias for the singular reviewer.
+    #[arg(long)]
+    expected_served_model: Option<String>,
     /// Reviewer provider. Uses the daemon's declared value, or requires this flag.
     #[arg(long)]
     provider: Option<String>,
@@ -181,6 +190,28 @@ async fn connect() -> anyhow::Result<RemoteAppServerClient> {
     #[cfg(not(windows))]
     let client = RemoteAppServerClient::connect(args).await;
     client.context(hint)
+}
+
+fn parse_reviewer(
+    value: &str,
+) -> anyhow::Result<codex_app_server_protocol::AuditReviewerSelection> {
+    if value.trim_start().starts_with('{') {
+        return serde_json::from_str(value).context("invalid reviewer JSON");
+    }
+    let (provider, model) = value
+        .split_once(':')
+        .context("--reviewer requires PROVIDER:MODEL or reviewer JSON")?;
+    ensure!(
+        !provider.trim().is_empty() && !model.trim().is_empty(),
+        "reviewer provider and model must be nonempty"
+    );
+    Ok(codex_app_server_protocol::AuditReviewerSelection {
+        provider: provider.to_owned(),
+        model: model.to_owned(),
+        reasoning_effort: None,
+        execution_adapter: Default::default(),
+        expected_served_model: None,
+    })
 }
 
 fn id(name: &str) -> RequestId {
@@ -326,7 +357,14 @@ async fn execute(
             )
         }
         None => {
-            let (model, provider) = if command.model.is_some() && command.provider.is_some() {
+            let reviewers = command
+                .reviewers
+                .iter()
+                .map(|value| parse_reviewer(value))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let (model, provider) = if !reviewers.is_empty()
+                || (command.model.is_some() && command.provider.is_some())
+            {
                 (command.model, command.provider)
             } else {
                 let response: ConfigReadResponse = requests
@@ -353,9 +391,30 @@ async fn execute(
             let params = AuditStartParams {
                 request_key: request_key.clone(),
                 source: source.context("missing audit source")?,
-                model: model.context("select --model or configure a model on the daemon")?,
-                provider: provider
-                    .context("select --provider or configure a provider on the daemon")?,
+                model: if reviewers.is_empty() {
+                    Some(model.context("select --model or configure a model on the daemon")?)
+                } else {
+                    None
+                },
+                provider: if reviewers.is_empty() {
+                    Some(
+                        provider
+                            .context("select --provider or configure a provider on the daemon")?,
+                    )
+                } else {
+                    None
+                },
+                reviewers: if reviewers.is_empty() {
+                    None
+                } else {
+                    Some(reviewers)
+                },
+                scheduling: if command.sequential {
+                    codex_app_server_protocol::AuditScheduling::Sequential
+                } else {
+                    codex_app_server_protocol::AuditScheduling::Automatic
+                },
+                expected_served_model: command.expected_served_model,
                 brief: command.brief,
                 reasoning_effort: None,
                 audex_guidance,
@@ -445,6 +504,15 @@ async fn follow_run(
                     ""
                 }
             );
+            if view.collection.reviewer_count > 1 {
+                eprintln!(
+                    "Collection: {} completed, {} excluded, {} outstanding; ready={}",
+                    view.collection.completed_count,
+                    view.collection.excluded_count,
+                    view.collection.outstanding_count,
+                    view.collection.ready
+                );
+            }
             shown = Some(view.clone());
         }
         if let Some(code) = terminal_code(&view) {

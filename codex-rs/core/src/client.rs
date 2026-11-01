@@ -2787,6 +2787,16 @@ where
                 break;
             };
             if let Some(generation) = &generation {
+                let attribution = match &event {
+                    Ok(ResponseEvent::ServerModel(model)) => generation.observe_model(model).await,
+                    Ok(ResponseEvent::Completed { .. }) | Err(_) => {
+                        generation.finish_generation().await
+                    }
+                    _ => Ok(()),
+                };
+                if let Err(error) = attribution {
+                    event = Err(ApiError::Transport(error));
+                }
                 let receipt = match &event {
                     Ok(ResponseEvent::Created { response_id }) => Some(response_id.as_deref()),
                     Ok(ResponseEvent::Completed { response_id, .. }) => {

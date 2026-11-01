@@ -8,6 +8,7 @@ mod foundations;
 mod remaining;
 mod reporting;
 mod residual;
+mod roster;
 use codex_models_manager::{ModelOrigin, manager::StaticModelsManager};
 use codex_protocol::openai_models::ModelsResponse;
 use serde_json::{Value, json};
@@ -121,6 +122,23 @@ impl Dispatch for Fake {
                 self.inspect_entered.notify_one();
                 self.inspect_release.notified().await;
             }
+            if matches!(
+                &observed,
+                Observation::Accepted {
+                    state: WorkState::Completed(_),
+                    ..
+                }
+            ) {
+                let root = self.root.lock().expect("root").clone().expect("fake root");
+                let store = AuditStore::open(root).await.expect("fake evidence store");
+                let run = store
+                    .run_for_operation(&operation)
+                    .await
+                    .expect("fake attempt");
+                attest_fake_completion(&store, &run)
+                    .await
+                    .expect("fake attribution");
+            }
             observed
         })
     }
@@ -163,6 +181,15 @@ impl Dispatch for Fake {
             observed
         })
     }
+}
+
+async fn attest_fake_completion(store: &AuditStore, run: &AuditRunRecord) -> anyhow::Result<()> {
+    // A controlled fake completion explicitly includes served identity evidence.
+    // Physical transport attribution is covered by the native HTTP/WS fixtures.
+    sqlx::query("INSERT OR IGNORE INTO audit_request_admissions(request_id,assignment_id,operation_id,execution_id,owner,owner_generation,run_stop_generation,transport,admitted_at_ms,send_started_at_ms,expected_model,observed_model,identity_state,model_scope) SELECT ?,?,?, 'controlled-fake','fixture',?,0,'controlled_fake',0,0,?,?,'verified','generation' WHERE EXISTS(SELECT 1 FROM audit_attempts WHERE assignment_id=? AND disposition='active')")
+        .bind(format!("fake-generation:{}",run.operation_id)).bind(&run.assignment_id).bind(&run.operation_id).bind(run.owner_generation).bind(&run.model).bind(&run.model).bind(&run.assignment_id)
+        .execute(&store.pool_for_tests()).await?;
+    Ok(())
 }
 
 async fn fixture(

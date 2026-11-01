@@ -108,6 +108,34 @@ impl GenerationAdmission for NativeAdmission {
                 .map_err(|_| "generation send fence could not be checked".to_owned())
         })
     }
+    fn check_connection_model<'a>(
+        &'a self,
+        request_id: &'a str,
+        model: &'a str,
+    ) -> AdmissionFuture<'a, ()> {
+        Box::pin(async move {
+            self.store
+                .check_connection_model(&self.identity, request_id, model)
+                .await
+                .map_err(|_| "native connection model mismatch; inference refused".to_owned())
+        })
+    }
+    fn observe_model<'a>(&'a self, request_id: &'a str, model: &'a str) -> AdmissionFuture<'a, ()> {
+        Box::pin(async move {
+            self.store
+                .attribute_generation(&self.identity, request_id, Some(model), false)
+                .await
+                .map_err(|_| {
+                    "native served-model attribution failed; further inference refused".to_owned()
+                })
+        })
+    }
+    fn finish_generation<'a>(&'a self, request_id: &'a str) -> AdmissionFuture<'a, ()> {
+        Box::pin(async move {
+            self.store.attribute_generation(&self.identity, request_id, None, true).await
+                .map_err(|_| "native served-model metadata is missing or mismatched; further inference refused".to_owned())
+        })
+    }
     fn confirm<'a>(
         &'a self,
         request_id: &'a str,

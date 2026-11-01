@@ -328,13 +328,17 @@ pub(crate) async fn execute(
                 .to_owned();
             }
             let params = AuditStartParams {
+                reviewers: None,
+                scheduling: Default::default(),
+                expected_served_model: None,
                 request_key: Uuid::new_v4().to_string(),
                 source,
-                model: args
-                    .model
-                    .or(thread.thread.model)
-                    .ok_or("select an audit model")?,
-                provider: args.provider.unwrap_or(thread.thread.model_provider),
+                model: Some(
+                    args.model
+                        .or(thread.thread.model)
+                        .ok_or("select an audit model")?,
+                ),
+                provider: Some(args.provider.unwrap_or(thread.thread.model_provider)),
                 reasoning_effort: thread
                     .thread
                     .reasoning_effort
