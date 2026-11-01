@@ -17,9 +17,9 @@ use wiremock::{
     matchers::{method, path},
 };
 
-type Result<T> = color_eyre::Result<T>;
+pub(super) type Result<T> = color_eyre::Result<T>;
 
-struct Home(tempfile::TempDir);
+pub(super) struct Home(tempfile::TempDir);
 impl Home {
     fn new() -> Result<Self> {
         let parent = std::env::var_os("AUDEX_TEST_TMPDIR")
@@ -84,6 +84,10 @@ fn arguments() -> StartArguments {
         },
         model: None,
         provider: None,
+        reviewers: None,
+        scheduling: Default::default(),
+        expected_served_model: None,
+        request_key: None,
         brief: default_brief(),
         audex_guidance: None,
         agents_evidence: None,
@@ -214,14 +218,19 @@ async fn disconnect_scenario() -> Result<()> {
     observer.abort();
     let _ = observer.await;
     assert!(!audits.read(id.clone()).await?.cancellation_requested);
-    let cancelled = execute(
+    let stop = tokio::spawn(execute(
         session.request_handle(),
         thread,
-        AuditAction::Cancel(id.clone()),
+        AuditAction::Abort(id.clone()),
         events_tx,
-    )
-    .await
-    .map_err(color_eyre::eyre::Report::msg)?;
+    ));
+    loop {
+        if let AppEvent::AuditAbortConfirm { decision, .. } = events.recv().await.unwrap() {
+            decision.send(true).unwrap();
+            break;
+        }
+    }
+    let cancelled = stop.await?.map_err(color_eyre::eyre::Report::msg)?;
     assert_eq!(cancelled["cancellationRequested"], true);
     assert!(
         audits.read(id).await?.cancellation_requested,

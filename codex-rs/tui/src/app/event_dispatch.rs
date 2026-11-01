@@ -172,6 +172,26 @@ impl App {
         match event {
             AppEvent::AuditCommand { thread_id, args } => self.audit_command(app_server, thread_id, args),
             AppEvent::AuditPrompt => self.chat_widget.show_audit_prompt(),
+            AppEvent::AuditAttemptsLoaded {thread_id,run_id,attempts} => {
+                if self.current_displayed_thread_id()==Some(thread_id) {self.chat_widget.show_audit_attempts(run_id,attempts);}
+            }
+            AppEvent::AuditAttemptSelected {thread_id,attempt,watch} => self.audit_attempt_selected(app_server,thread_id,attempt,watch),
+            AppEvent::AuditAttemptObserved {thread_id,attempt,error} => {
+                if self.current_displayed_thread_id()==Some(thread_id) {
+                    self.chat_widget.add_info_message(crate::audit::attempt_summary(&attempt),None);
+                    if let Some(message)=error {self.chat_widget.add_error_message(message);}
+                }
+            }
+            AppEvent::AuditAttemptConfirm {thread_id,confirmation,decision} => {
+                if self.current_displayed_thread_id()==Some(thread_id) && self.audit_available(app_server) {
+                    self.chat_widget.confirm_audit_attempt(confirmation,decision);
+                } else {let _=decision.send(false);}
+            }
+            AppEvent::AuditAbortConfirm {thread_id,run_id,decision} => {
+                if self.current_displayed_thread_id()==Some(thread_id) && self.audit_available(app_server) {
+                    self.chat_widget.confirm_audit_abort(run_id,decision);
+                } else {let _=decision.send(false);}
+            }
             AppEvent::AuditReleaseConfirm { thread_id, run, decision } => {
                 if self.current_displayed_thread_id() == Some(thread_id) && self.audit_available(app_server) {
                     self.chat_widget.confirm_audit_release(run, decision);

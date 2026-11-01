@@ -1,15 +1,22 @@
-//! Audit UI state is observational only. Dropping it never cancels durable work.
+//! Audit observation and operator-authorised controls. Dropping UI state never stops durable work.
 use super::*;
 use codex_app_server_protocol::{AuditProgressNotification, AuditRunView};
 
 #[derive(Default)]
 pub(super) struct AuditUiState {
     watches: HashMap<(ThreadId, String), (JoinHandle<()>, Arc<tokio::sync::Notify>)>,
+    attempt_watches:
+        HashMap<(ThreadId, String, String), (JoinHandle<()>, Arc<tokio::sync::Notify>)>,
     pub(super) reports: crate::audit::ReportContexts,
 }
 
 impl AuditUiState {
     pub(super) fn wake(&self, progress: &AuditProgressNotification) {
+        for ((_, run, _), (_, wake)) in &self.attempt_watches {
+            if run == &progress.run_id {
+                wake.notify_one();
+            }
+        }
         for ((_, id), (_, wake)) in &self.watches {
             if id == &progress.run_id {
                 wake.notify_one();
@@ -21,6 +28,9 @@ impl AuditUiState {
 impl Drop for AuditUiState {
     fn drop(&mut self) {
         // Only local observation is stopped; no audit/cancel is sent.
+        for (task, _) in self.attempt_watches.values() {
+            task.abort();
+        }
         for (task, _) in self.watches.values() {
             task.abort();
         }
@@ -64,6 +74,42 @@ impl App {
         });
     }
 
+    pub(super) fn audit_attempt_selected(
+        &mut self,
+        session: &AppServerSession,
+        thread_id: ThreadId,
+        attempt: codex_app_server_protocol::AuditAttemptView,
+        watch: bool,
+    ) {
+        if self.current_displayed_thread_id() != Some(thread_id) {
+            return;
+        }
+        self.chat_widget.show_audit_attempt(attempt.clone());
+        if !watch {
+            return;
+        }
+        let key = (
+            thread_id,
+            attempt.run_id.clone(),
+            attempt.assignment_id.clone(),
+        );
+        if let Some((task, wake)) = self.audits.attempt_watches.get(&key)
+            && !task.is_finished()
+        {
+            wake.notify_one();
+            return;
+        }
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn(crate::audit::observe_attempt(
+            session.request_handle(),
+            thread_id,
+            attempt,
+            self.app_event_tx.clone(),
+            wake.clone(),
+        ));
+        self.audits.attempt_watches.insert(key, (task, wake));
+    }
+
     pub(super) fn audit_opened(
         &mut self,
         session: &AppServerSession,
@@ -102,8 +148,8 @@ impl App {
             return;
         }
         self.chat_widget
-            .add_info_message(crate::audit::progress(run), run.report.as_ref().map(|_| format!("This report will accompany your next message as untrusted context. After restarting, retrieve it with /audit read {}.", run.run_id)));
-        if let Some(report) = &run.report {
+            .add_info_message(crate::audit::progress(run), run.report.as_ref().filter(|_|crate::audit::terminal(run)).map(|_| format!("This report will accompany your next message as untrusted context. After restarting, retrieve it with /audit read {}.", run.run_id)));
+        if let Some(report) = run.report.as_ref().filter(|_| crate::audit::terminal(run)) {
             // Render in normal scrollback, alongside the existing conversation.
             let mut lines = Vec::new();
             crate::markdown::append_markdown(report, None, None, &mut lines);

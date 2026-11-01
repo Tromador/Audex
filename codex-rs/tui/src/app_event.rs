@@ -302,6 +302,31 @@ pub(crate) enum AppEvent {
         args: String,
     },
     AuditPrompt,
+    AuditAttemptsLoaded {
+        thread_id: ThreadId,
+        run_id: String,
+        attempts: Vec<codex_app_server_protocol::AuditAttemptView>,
+    },
+    AuditAttemptSelected {
+        thread_id: ThreadId,
+        attempt: codex_app_server_protocol::AuditAttemptView,
+        watch: bool,
+    },
+    AuditAttemptObserved {
+        thread_id: ThreadId,
+        attempt: codex_app_server_protocol::AuditAttemptView,
+        error: Option<String>,
+    },
+    AuditAttemptConfirm {
+        thread_id: ThreadId,
+        confirmation: crate::audit::AttemptControlConfirmation,
+        decision: tokio::sync::oneshot::Sender<bool>,
+    },
+    AuditAbortConfirm {
+        thread_id: ThreadId,
+        run_id: String,
+        decision: tokio::sync::oneshot::Sender<bool>,
+    },
     AuditReleaseConfirm {
         thread_id: ThreadId,
         run: codex_app_server_protocol::AuditRunView,
