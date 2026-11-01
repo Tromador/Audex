@@ -8,6 +8,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum TransportError {
+    #[error("generation not authorised: {0}")]
+    GenerationDenied(String),
     #[error(transparent)]
     Policy(#[from] crate::NetworkPolicyDenied),
     #[error("http {status}: {body:?}")]
@@ -37,7 +39,8 @@ impl TransportError {
     pub fn retry_after(&self) -> Option<RetryAfter> {
         match self {
             Self::Http { retry_after, .. } => *retry_after,
-            Self::Policy(_)
+            Self::GenerationDenied(_)
+            | Self::Policy(_)
             | Self::RetryLimit
             | Self::Timeout
             | Self::Connection(_)

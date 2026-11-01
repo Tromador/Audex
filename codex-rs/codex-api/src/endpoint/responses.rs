@@ -26,6 +26,7 @@ use tracing::instrument;
 pub struct ResponsesClient<T: HttpTransport> {
     session: EndpointSession<T>,
     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
+    admission: Option<crate::GenerationRequest>,
 }
 
 #[derive(Default)]
@@ -43,6 +44,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         Self {
             session: EndpointSession::new(transport, provider, auth),
             sse_telemetry: None,
+            admission: None,
         }
     }
 
@@ -54,7 +56,16 @@ impl<T: HttpTransport> ResponsesClient<T> {
         Self {
             session: self.session.with_request_telemetry(request),
             sse_telemetry: sse,
+            admission: self.admission,
         }
+    }
+
+    pub fn with_generation_admission(
+        mut self,
+        admission: Option<crate::GenerationRequest>,
+    ) -> Self {
+        self.admission = admission;
+        self
     }
 
     #[instrument(
@@ -139,6 +150,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
                 "/responses",
                 extra_headers,
                 Some(body),
+                self.admission.as_ref(),
                 |req| {
                     req.headers.insert(
                         http::header::ACCEPT,

@@ -1,3 +1,5 @@
+#[path = "route_aware_admission_tests.rs"]
+mod admission;
 use crate::route_aware_redirect::MAX_REDIRECTS;
 use std::collections::HashMap;
 use std::io;

@@ -190,6 +190,8 @@ audex audit attempt retry RUN ASSIGNMENT --action-key MY_RETRY_KEY --authorise-r
 
 Cancel and Ignore acknowledge a durable decision: the available received prefix is frozen and the attempt's scheduling reservation is released. They return without waiting for the reviewer to terminate. Healthy siblings continue. A completed review that committed first remains completed.
 
+Each native HTTP or WebSocket generation requires durable, one-use admission immediately before submission. Once an attempt's stop decision commits, later admissions for that attempt are refused. The same applies to superseded attempts and whole-audit stop decisions. A request admitted earlier may still be submitted or remain uncertain; a cancellation acknowledgement does not prove that provider-side inference or charging has stopped. Admission records survive restart, and uncertain requests are not automatically replayed.
+
 Retry creates a fresh attempt using the retained source and original brief, with fresh execution history. If the earlier request may still be active, the command warns about overlapping charges and also requires `--acknowledge-possible-overlap`. The superseded attempt's output remains available in history; it is not supplied to the replacement.
 
 Control commands print their action key before sending. If an acknowledgement is lost, repeat the same command with that key and identical arguments. The server returns the original decision without commissioning another attempt. A zero exit status acknowledges the control decision, not a successful review.

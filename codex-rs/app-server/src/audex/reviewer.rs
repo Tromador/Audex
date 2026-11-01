@@ -300,6 +300,9 @@ pub(super) async fn prepare(
     }));
     let registry = Arc::new(registry.build());
     let mut options = StartThreadOptions::new(config);
+    options
+        .thread_extension_init
+        .insert(codex_core::compact::AutoCompactionDisabled);
     options.session_source = Some(SessionSource::Custom("audex".to_string()));
     options.thread_source = Some(ThreadSource::Feature("audex-reviewer".to_string()));
     options

@@ -101,6 +101,7 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
             misalignment,
         }),
         ApiError::Transport(transport) => match transport {
+            TransportError::GenerationDenied(reason) => CodexErr::InvalidRequest(reason),
             TransportError::Http {
                 status,
                 url,

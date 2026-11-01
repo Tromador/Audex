@@ -1,3 +1,7 @@
+mod admission;
+pub use admission::{
+    AdmissionFuture, GenerationAdmission, GenerationAdmissionControl, GenerationRequest,
+};
 use url::Host;
 use url::Url;
 

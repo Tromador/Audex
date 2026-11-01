@@ -6,7 +6,7 @@ use anyhow::Context;
 use codex_protocol::protocol::{AgentMessageContentDeltaEvent, Event, EventMsg};
 use std::time::Duration;
 
-async fn setup() -> anyhow::Result<(
+pub(super) async fn setup() -> anyhow::Result<(
     tempfile::TempDir,
     Arc<AuditController>,
     Arc<Fake>,
@@ -27,7 +27,7 @@ async fn setup() -> anyhow::Result<(
     Ok((temp, controller, fake, id, attempts))
 }
 
-async fn capture(
+pub(super) async fn capture(
     controller: &AuditController,
     fake: &Fake,
     attempt: &AuditRunRecord,

@@ -45,6 +45,9 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
             ApiError::Transport(TransportError::Build(_)) => "request_build_error",
             ApiError::Transport(TransportError::ResponseTooLarge { .. }) => "response_too_large",
             ApiError::Transport(TransportError::Policy(_)) => "network_policy_denied",
+            ApiError::Transport(TransportError::GenerationDenied(_)) => {
+                "generation_admission_denied"
+            }
             ApiError::Stream(_) | ApiError::ContentFilter => "stream_error",
             ApiError::ResponseIncomplete(_) => "incomplete_response",
             ApiError::ContextWindowExceeded => "context_window_exceeded",

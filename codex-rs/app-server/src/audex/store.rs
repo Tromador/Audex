@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 static AUDEX_MIGRATOR: Migrator = sqlx_macros::migrate!("./migrations/audex");
 pub(super) mod activity;
+pub(super) mod admission;
 pub(super) mod attempts;
 #[cfg(test)]
 mod foundation_tests;
@@ -1358,6 +1359,14 @@ impl AuditStore {
             return Ok(state.attempt_revision);
         }
         require_revision(expected_revision, state.attempt_revision)?;
+        // Admission refusal can end native execution before Interrupt is observed.
+        // An already committed run-wide cancellation must retain its disposition.
+        let terminal =
+            if terminal == AssignmentState::Failed && state.control_intent == "cancel_requested" {
+                AssignmentState::Cancelled
+            } else {
+                terminal
+            };
         let (assignment, operation, phase) = match terminal {
             AssignmentState::Cancelled => ("cancelled", "failed", "cancelled"),
             AssignmentState::Unknown => ("unknown", "unknown", "failed"),
@@ -1797,7 +1806,7 @@ impl AuditStore {
         let next_revision = revision + 1;
         sqlx::query(
             "UPDATE audit_runs
-             SET control_intent='cancel_requested', revision=?, updated_at_ms=?
+             SET control_intent='cancel_requested', stop_generation=stop_generation+1, revision=?, updated_at_ms=?
              WHERE id=?",
         )
         .bind(next_revision)

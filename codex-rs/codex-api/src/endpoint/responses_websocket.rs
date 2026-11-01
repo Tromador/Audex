@@ -257,6 +257,17 @@ impl ResponsesWebsocketConnection {
         connection_reused: bool,
         turn_state: Option<Arc<OnceLock<String>>>,
     ) -> Result<ResponseStream, ApiError> {
+        self.stream_request_with_admission(request, connection_reused, turn_state, None)
+            .await
+    }
+
+    pub async fn stream_request_with_admission(
+        &self,
+        request: ResponsesWsRequest<'_>,
+        connection_reused: bool,
+        turn_state: Option<Arc<OnceLock<String>>>,
+        admission: Option<crate::GenerationRequest>,
+    ) -> Result<ResponseStream, ApiError> {
         let (tx_event, rx_event) =
             mpsc::channel::<std::result::Result<ResponseEvent, ApiError>>(1600);
         let (tx_interrupt, rx_interrupt) = oneshot::channel();
@@ -358,6 +369,7 @@ impl ResponsesWebsocketConnection {
                         &timing_log_context,
                         interrupt.clone(),
                         &mut completion,
+                        admission.as_ref(),
                     );
                     tokio::pin!(response);
 
@@ -779,6 +791,7 @@ async fn run_websocket_response_stream(
     timing_log_context: &ResponsesWebsocketTimingLogContext,
     interrupt: impl Future<Output = ResponseInterrupt> + Clone + Unpin,
     completion: &mut Option<ResponseEvent>,
+    admission: Option<&crate::GenerationRequest>,
 ) -> Result<(), ApiError> {
     let mut last_server_model: Option<String> = None;
     let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
@@ -787,6 +800,15 @@ async fn run_websocket_response_stream(
         Some(ResponseInterrupt::Cancel { .. })
     ) {
         // No request reached the backend, so this socket is still reusable.
+        return Ok(());
+    }
+    if let Some(admission) = admission {
+        admission.admit("native_websocket").await?;
+    }
+    if matches!(
+        interrupt.clone().now_or_never(),
+        Some(ResponseInterrupt::Cancel { .. })
+    ) {
         return Ok(());
     }
     send_websocket_request(
@@ -1454,3 +1476,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "responses_websocket/admission_tests.rs"]
+mod admission_tests;

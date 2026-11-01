@@ -37,7 +37,7 @@ async fn terminal_legacy_report_bytes_and_identity_survive_upgrade() -> anyhow::
     let store = AuditStore::open(root.clone()).await?;
     assert_eq!(
         store.applied_migrations().await?,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     );
     let record = store.load_run("legacy").await?;
     assert_eq!(record.run_id, "legacy");
@@ -165,6 +165,47 @@ async fn slice_one_upgrade_preserves_live_attempt_identity_and_marks_uncaptured_
     assert_eq!(
         reopened.capture_state(&attempt.assignment_id).await?,
         capture
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn slice_two_upgrade_preserves_live_identity_without_inventing_request_admissions()
+-> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = AbsolutePathBuf::from_absolute_path(temp.path())?;
+    let pool = legacy(&root, "completed").await?;
+    Migrator::with_migrations(
+        AUDEX_MIGRATOR
+            .iter()
+            .filter(|migration| migration.version <= 9)
+            .cloned()
+            .collect(),
+    )
+    .run(&pool)
+    .await?;
+    sqlx::query("UPDATE audit_runs SET phase='reviewing',revision=17 WHERE id='legacy'")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE operations SET state='accepted',submission_boundary='accepted' WHERE id='legacy-operation'").execute(&pool).await?;
+    sqlx::query("UPDATE reviewer_assignments SET state='running' WHERE id='legacy-assignment'")
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    let store = AuditStore::open(root).await?;
+    let current = store.load_run_metadata("legacy").await?;
+    assert_eq!(current.assignment_id, "legacy-assignment");
+    assert_eq!(current.operation_id, "legacy-operation");
+    assert_eq!(current.snapshot_id, "snapshot");
+    assert_eq!(current.revision, 17);
+    assert_eq!(current.assignment_state, AssignmentState::Running);
+    assert_eq!(current.operation_state, OperationState::Accepted);
+    assert_eq!(store.run_stop_generation("legacy").await?, 0);
+    assert!(
+        store
+            .generation_records("legacy-assignment")
+            .await?
+            .is_empty()
     );
     Ok(())
 }

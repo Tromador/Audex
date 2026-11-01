@@ -1759,6 +1759,9 @@ impl Session {
                 crate::state::ExecutedToolCalls::new(&config.features, &initial_history);
             let codex_responses_headers =
                 thread_extension_data.get::<crate::CodexResponsesHeaders>();
+            let generation_admission = thread_extension_data
+                .get::<codex_api::GenerationAdmissionControl>()
+                .map(|authority| (*authority).clone());
             // Ephemeral title requests use request-level effort even when managed settings
             // enable overrides. The client-supplied tag selects cache behavior, not permissions.
             let title_request = config.ephemeral
@@ -1867,6 +1870,7 @@ impl Session {
                     workspace_routing.as_ref().clone(),
                     extensions.model_request_contributors().to_vec(),
                 )
+                .with_generation_admission(generation_admission)
                 .with_executed_tool_calls(executed_tool_calls.clone())
                 .with_restored_history(matches!(
                     &initial_history,

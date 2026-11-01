@@ -35,6 +35,7 @@ type HistoryHook = Arc<
 #[cfg(test)]
 #[derive(Default)]
 pub(super) struct DispatchTestHooks {
+    pub config: Option<Arc<dyn Fn(&mut Config) + Send + Sync>>,
     pub checkpoint: Option<Arc<dyn Fn(&'static str) -> BoxFuture<'static, ()> + Send + Sync>>,
     pub history: Option<HistoryHook>,
     pub cleanup: Option<Listen>,
@@ -392,6 +393,25 @@ impl CodexDispatch {
             .options
             .thread_extension_init
             .insert(capture.clone());
+        let admission = super::admission::NativeAdmission::new(
+            store.clone(),
+            super::store::admission::AdmissionIdentity {
+                run_id: request.run_id.clone(),
+                assignment_id: request.assignment_id.clone(),
+                operation_id: request.operation_id.clone(),
+                execution_id: thread_id.to_string(),
+                owner: request.lease_owner.clone(),
+                owner_generation: run.owner_generation,
+                run_stop_generation: store
+                    .run_stop_generation(&request.run_id)
+                    .await
+                    .map_err(|error| DispatchFailure::new("read_stop_generation", error, true))?,
+            },
+            capture.clone(),
+            #[cfg(test)]
+            self.hooks.checkpoint.clone(),
+        );
+        prepared.options.thread_extension_init.insert(admission);
         prepared.options.reserved_thread_id = Some(thread_id);
         let thread = self
             .threads
@@ -762,6 +782,10 @@ impl Dispatch for CodexDispatch {
     }
     fn request_interrupt(&self, operation: String) -> BoxFuture<'_, ()> {
         Box::pin(async move {
+            if let Some(capture) = self.captures.get(&operation) {
+                capture.request_interrupt();
+                return;
+            }
             // No history read or join precedes this best-effort interrupt.
             let Ok(store) = self.store().await else {
                 return;

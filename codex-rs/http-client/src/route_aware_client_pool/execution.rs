@@ -122,6 +122,11 @@ impl RouteAwareClientPool {
                 let version = request.version();
                 let timeout = request.timeout().copied();
                 let replay = request.try_clone();
+                if let Some(admission) = &self.client_builder.generation_admission {
+                    admission.admit("native_http").await.map_err(|error| {
+                        RouteAwareRequestError::GenerationDenied(error.to_string())
+                    })?;
+                }
                 let result = if follows_redirects_manually {
                     client.execute_without_request_logging(request).await
                 } else {
@@ -129,6 +134,7 @@ impl RouteAwareClientPool {
                 }
                 .map_err(RouteAwareRequestError::from);
                 let result = match result {
+                    result if self.client_builder.generation_admission.is_some() => result,
                     // A failed CONNECT identifies a proxy challenge. An origin 407 is a response.
                     #[cfg(windows)]
                     Err(error)

@@ -55,6 +55,7 @@ impl ExecServerError {
                 RouteAwareRequestError::Request(_)
                 | RouteAwareRequestError::Route(_)
                 | RouteAwareRequestError::Build(_)
+                | RouteAwareRequestError::GenerationDenied(_)
                 | RouteAwareRequestError::UnsupportedRedirectScheme(_)
                 | RouteAwareRequestError::TooManyRedirects
                 | RouteAwareRequestError::Timeout,

@@ -16,6 +16,7 @@ use wiremock::{
     matchers::{method, path},
 };
 
+mod admission;
 mod corrections;
 mod foundations;
 mod preparation;
@@ -70,6 +71,18 @@ async fn fixture_with_hooks(
     listen: crate::audex::dispatch::Listen,
     hooks: crate::audex::dispatch::DispatchTestHooks,
 ) -> (Arc<AuditController>, Arc<ThreadManager>) {
+    fixture_with_transport(temp, url, auth, custom, listen, hooks, false).await
+}
+
+async fn fixture_with_transport(
+    temp: &tempfile::TempDir,
+    url: &str,
+    auth: CodexAuth,
+    custom: bool,
+    listen: crate::audex::dispatch::Listen,
+    hooks: crate::audex::dispatch::DispatchTestHooks,
+    websockets: bool,
+) -> (Arc<AuditController>, Arc<ThreadManager>) {
     let mut config = Config::load_default_with_cli_overrides_for_codex_home(
         temp.path().to_path_buf(),
         Vec::new(),
@@ -77,7 +90,10 @@ async fn fixture_with_hooks(
     .await
     .expect("config");
     config.model_provider.base_url = Some(format!("{url}/v1"));
-    config.model_provider.supports_websockets = false;
+    config.model_provider.supports_websockets = websockets;
+    if let Some(configure) = &hooks.config {
+        configure(&mut config);
+    }
     if custom {
         config.model_provider_id = "local-custom".to_string();
         config.model_provider.name = "Local custom provider".to_string();

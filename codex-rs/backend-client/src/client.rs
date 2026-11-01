@@ -122,6 +122,7 @@ impl From<codex_http_client::HttpError> for RequestError {
             | codex_http_client::HttpError::Build(_)
             | codex_http_client::HttpError::UnsupportedRedirectScheme(_)
             | codex_http_client::HttpError::TooManyRedirects
+            | codex_http_client::HttpError::GenerationDenied(_)
             | codex_http_client::HttpError::Timeout) => Self::Other(error.into()),
         }
     }

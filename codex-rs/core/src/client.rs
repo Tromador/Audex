@@ -251,6 +251,14 @@ struct CurrentClientSetup {
 
 impl CurrentClientSetup {
     fn build_api_transport(&self, endpoint: &str) -> Result<ReqwestTransport> {
+        self.build_generation_transport(endpoint, None)
+    }
+
+    fn build_generation_transport(
+        &self,
+        endpoint: &str,
+        generation: Option<codex_api::GenerationRequest>,
+    ) -> Result<ReqwestTransport> {
         let api_provider = &self.api_provider;
         let redirect_policy = if api_provider
             .headers
@@ -260,12 +268,21 @@ impl CurrentClientSetup {
         } else {
             self.redirect_policy
         };
-        let client = create_client_for_route(
-            &self.http_client_factory,
-            &api_provider.url_for_path(endpoint),
-            ClientRouteClass::Api,
-            redirect_policy,
-        )
+        let client = if let Some(generation) = generation {
+            codex_login::default_client::create_client_for_generation(
+                &self.http_client_factory,
+                &api_provider.url_for_path(endpoint),
+                ClientRouteClass::Api,
+                generation,
+            )
+        } else {
+            create_client_for_route(
+                &self.http_client_factory,
+                &api_provider.url_for_path(endpoint),
+                ClientRouteClass::Api,
+                redirect_policy,
+            )
+        }
         .map_err(std::io::Error::from)?;
         Ok(ReqwestTransport::from_http_client(client))
     }
@@ -305,6 +322,7 @@ pub struct ModelClient {
     restored_history: bool,
     request_contributors: Vec<Arc<dyn codex_extension_api::ModelRequestContributor>>,
     executed_tool_calls: Option<ExecutedToolCalls>,
+    generation_admission: Option<codex_api::GenerationAdmissionControl>,
     // Resolved once when the session is created, like other session feature flags.
     api_key_cyber_access_programs: cyber_access_program::ApiKeyCyberAccessPrograms,
     runtime_auth: Option<(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
@@ -645,9 +663,18 @@ impl ModelClient {
             restored_history: false,
             request_contributors,
             executed_tool_calls: None,
+            generation_admission: None,
             api_key_cyber_access_programs:
                 cyber_access_program::ApiKeyCyberAccessPrograms::UnsupportedProvider,
         }
+    }
+
+    pub(crate) fn with_generation_admission(
+        mut self,
+        admission: Option<codex_api::GenerationAdmissionControl>,
+    ) -> Self {
+        self.generation_admission = admission;
+        self
     }
 
     pub(crate) fn with_executed_tool_calls(mut self, recorder: ExecutedToolCalls) -> Self {
@@ -1913,7 +1940,13 @@ impl ResponsesHttpExecutor<'_> {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
+        generation: Option<codex_api::GenerationRequest>,
     ) -> Result<ResponseStream> {
+        if generation.is_none() && self.client.generation_admission.is_some() {
+            return Err(CodexErr::InvalidRequest(
+                "background generation is disabled for this isolated execution".to_owned(),
+            ));
+        }
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
             .as_ref()
@@ -1940,7 +1973,8 @@ impl ResponsesHttpExecutor<'_> {
                 .client
                 .responses_headers(client_setup.auth.as_ref(), &model_info.slug);
             tracing::Span::current().record("api.path", "/responses");
-            let transport = client_setup.build_api_transport("/responses")?;
+            let transport =
+                client_setup.build_generation_transport("/responses", generation.clone())?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -2023,9 +2057,22 @@ impl ResponsesHttpExecutor<'_> {
                 client_setup.api_provider,
                 client_setup.api_auth,
             )
-            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            .with_telemetry(Some(request_telemetry), Some(sse_telemetry))
+            .with_generation_admission(generation.clone());
             let stream_result = client.stream_request(request, options).await;
 
+            let stream_result = stream_result.map_err(|error| {
+                if generation
+                    .as_ref()
+                    .is_some_and(|request| request.attempted())
+                {
+                    ApiError::InvalidRequest {
+                        message: format!("generation ended without a reusable permit: {error}"),
+                    }
+                } else {
+                    error
+                }
+            });
             match stream_result {
                 Ok(stream) => {
                     return Ok(map_response_stream(
@@ -2035,6 +2082,7 @@ impl ResponsesHttpExecutor<'_> {
                         Arc::clone(&self.client.state.provider),
                         interceptors,
                         /*last_response_tx*/ None,
+                        generation.clone(),
                     ));
                 }
                 Err(ApiError::Transport(unauthorized_transport))
@@ -2109,6 +2157,7 @@ impl ModelClientSession {
         warmup: bool,
         request_trace: Option<W3cTraceContext>,
         inference_trace: &InferenceTraceContext,
+        generation: Option<codex_api::GenerationRequest>,
     ) -> Result<WebsocketStreamOutcome> {
         let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
         let provider = Arc::clone(&self.client.state.provider);
@@ -2348,10 +2397,11 @@ impl ModelClientSession {
                 ],
             );
             let stream_result = websocket_connection
-                .stream_request(
+                .stream_request_with_admission(
                     ws_request,
                     self.websocket_session.connection_reused(),
                     Some(Arc::clone(&self.turn_state)),
+                    generation.clone(),
                 )
                 .await;
             if let Some(original_item_ids) = original_item_ids {
@@ -2379,6 +2429,7 @@ impl ModelClientSession {
                 Arc::clone(&self.client.state.provider),
                 interceptors,
                 Some(last_response_tx),
+                generation.clone(),
             );
             self.websocket_session.last_response_rx = Some(last_response_rx);
             return Ok(WebsocketStreamOutcome::Stream(stream));
@@ -2443,7 +2494,8 @@ impl ModelClientSession {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<()> {
-        if !self.client.responses_websocket_enabled() {
+        if self.client.generation_admission.is_some() || !self.client.responses_websocket_enabled()
+        {
             return Ok(());
         }
         if self.is_websocket_prewarmed().await {
@@ -2463,6 +2515,7 @@ impl ModelClientSession {
                 /*warmup*/ true,
                 current_span_w3c_trace_context(),
                 &disabled_trace,
+                None,
             )
             .await
         {
@@ -2505,6 +2558,19 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
+        let generation = self
+            .client
+            .generation_admission
+            .as_ref()
+            .map(|authority| {
+                logical_generation_id(
+                    &self.client.state.thread_id,
+                    responses_metadata.turn_id.as_deref(),
+                    &prompt.input,
+                )
+                .map(|id| authority.request(id))
+            })
+            .transpose()?;
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {
@@ -2522,6 +2588,7 @@ impl ModelClientSession {
                             /*warmup*/ false,
                             request_trace,
                             inference_trace,
+                            generation.clone(),
                         )
                         .await?
                     {
@@ -2545,6 +2612,7 @@ impl ModelClientSession {
                         service_tier,
                         responses_metadata,
                         inference_trace,
+                        generation,
                     )
                     .await
             }
@@ -2568,6 +2636,19 @@ impl ModelClientSession {
         self.websocket_session = WebsocketSession::default();
         activated
     }
+}
+
+// Keep the logical identity across outer auth/transport recovery as well as
+// internal retries. A real tool result changes input; a resend cannot rename it.
+fn logical_generation_id(
+    thread: &ThreadId,
+    turn: Option<&str>,
+    input: &[ResponseItem],
+) -> Result<String> {
+    let identity = serde_json::to_vec(&(thread, turn, input)).map_err(|_| {
+        CodexErr::InvalidRequest("generation identity could not be encoded".to_owned())
+    })?;
+    Ok(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &identity).to_string())
 }
 
 /// Stamp a ResponsesWsRequest with the current time.
@@ -2636,6 +2717,7 @@ fn map_response_stream(
     provider: SharedModelProvider,
     interceptors: Vec<Box<dyn codex_extension_api::ModelResponseInterceptor>>,
     last_response_tx: Option<oneshot::Sender<LastResponse>>,
+    generation: Option<codex_api::GenerationRequest>,
 ) -> ResponseStream {
     let routing_affinity = api_stream.routing_affinity.take();
     let upstream_request_id = api_stream.upstream_request_id.take();
@@ -2647,6 +2729,7 @@ fn map_response_stream(
         inference_trace_attempt,
         provider,
         last_response_tx,
+        generation,
     );
     stream.interrupt = interrupt;
     stream.routing_affinity = routing_affinity;
@@ -2660,6 +2743,7 @@ fn map_response_events<S>(
     inference_trace_attempt: InferenceTraceAttempt,
     provider: SharedModelProvider,
     mut last_response_tx: Option<oneshot::Sender<LastResponse>>,
+    generation: Option<codex_api::GenerationRequest>,
 ) -> ResponseStream
 where
     S: futures::Stream<Item = std::result::Result<ResponseEvent, ApiError>>
@@ -2674,6 +2758,7 @@ where
 
     tokio::spawn(async move {
         let mut logged_error = false;
+        let mut completed = false;
         let collect_output_items =
             last_response_tx.is_some() || inference_trace_attempt.needs_output_items();
         let mut items_added: Vec<ResponseItem> = Vec::new();
@@ -2696,9 +2781,23 @@ where
                 }
                 event = api_stream.next() => event,
             };
-            let Some(event) = event else {
+            let Some(mut event) = event else {
                 break;
             };
+            if let Some(generation) = &generation {
+                let receipt = match &event {
+                    Ok(ResponseEvent::Created { response_id }) => Some(response_id.as_deref()),
+                    Ok(ResponseEvent::Completed { response_id, .. }) => {
+                        Some(Some(response_id.as_str()))
+                    }
+                    _ => None,
+                };
+                if let Some(response_id) = receipt
+                    && let Err(error) = generation.confirm(response_id).await
+                {
+                    event = Err(ApiError::Transport(error));
+                }
+            }
             match event {
                 Ok(ResponseEvent::OutputItemDone(mut item)) => {
                     // Assign IDs after interceptors, which may replace provider items.
@@ -2733,6 +2832,7 @@ where
                     usage_metadata,
                     end_turn,
                 }) => {
+                    completed = true;
                     feedback_tags!(last_model_response_id = &response_id);
                     if let Some(usage) = &token_usage {
                         session_telemetry.sse_event_completed(usage, ttft_ms);
@@ -2792,7 +2892,13 @@ where
                     if let Some(upstream_request_id) = upstream_request_id {
                         feedback_tags!(last_model_request_id = upstream_request_id);
                     }
-                    let mapped = provider.map_api_error(err);
+                    let mapped = if generation.is_some() {
+                        CodexErr::InvalidRequest(format!(
+                            "generation failed; automatic resubmission refused: {err}"
+                        ))
+                    } else {
+                        provider.map_api_error(err)
+                    };
                     inference_trace_attempt.record_failed(
                         &mapped,
                         upstream_request_id,
@@ -2813,6 +2919,14 @@ where
             upstream_request_id,
             &items_added,
         );
+        if generation.is_some() && !completed {
+            let _ = tx_event
+                .send(Err(CodexErr::InvalidRequest(
+                    "generation ended without completion; automatic resubmission refused"
+                        .to_owned(),
+                )))
+                .await;
+        }
     });
 
     ResponseStream {

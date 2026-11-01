@@ -473,7 +473,7 @@ fn spawn_successful_tls_fallback_server() -> io::Result<SuccessfulTlsFallbackSer
     ))
 }
 
-fn spawn_protocol_version_rejection_server(
+pub(super) fn spawn_protocol_version_rejection_server(
     maximum_attempts: usize,
 ) -> io::Result<(String, mpsc::Receiver<io::Result<usize>>, mpsc::Sender<()>)> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;

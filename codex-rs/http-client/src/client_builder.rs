@@ -35,6 +35,7 @@ use crate::with_chatgpt_cloudflare_cookie_store;
 #[derive(Clone)]
 pub struct HttpClientBuilder {
     http2_prior_knowledge: bool,
+    pub(crate) generation_admission: Option<crate::GenerationRequest>,
     pub(crate) default_headers: Option<HeaderMap>,
     follow_redirects: bool,
     pub(crate) redirect_observed: Option<Arc<AtomicBool>>,
@@ -116,6 +117,17 @@ impl HttpClientBuilder {
     pub fn default_headers(mut self, headers: HeaderMap) -> Self {
         self.default_headers = Some(headers);
         self
+    }
+
+    /// One generation, with admission after routing and no automatic resend.
+    pub fn with_generation_admission(mut self, request: crate::GenerationRequest) -> Self {
+        self.generation_admission = Some(request);
+        self.follow_redirects = false;
+        self
+    }
+
+    pub fn has_generation_admission(&self) -> bool {
+        self.generation_admission.is_some()
     }
 
     pub fn without_redirects(mut self) -> Self {
@@ -382,6 +394,9 @@ impl HttpClientBuilder {
 
     fn base_reqwest_builder(self) -> reqwest::ClientBuilder {
         let mut builder = reqwest::Client::builder();
+        if self.generation_admission.is_some() {
+            builder = builder.retry(reqwest::retry::never());
+        }
         #[cfg(windows)]
         if let Some(path) = self.windows_proxy_pipe_path {
             builder = builder.windows_named_pipe(path);
@@ -426,6 +441,7 @@ impl Default for HttpClientBuilder {
     fn default() -> Self {
         Self {
             http2_prior_knowledge: false,
+            generation_admission: None,
             default_headers: None,
             follow_redirects: true,
             redirect_observed: None,

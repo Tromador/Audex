@@ -1677,6 +1677,7 @@ async fn untraced_http_stream_releases_completed_output_before_response_ends() {
         InferenceTraceAttempt::disabled(),
         test_model_provider(),
         /*last_response_tx*/ None,
+        None,
     );
 
     assert!(matches!(
@@ -1705,6 +1706,7 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         attempt,
         test_model_provider(),
         /*last_response_tx*/ None,
+        None,
     );
 
     let observed = stream
@@ -1762,6 +1764,7 @@ async fn response_stream_records_last_model_feedback_ids() {
         InferenceTraceAttempt::disabled(),
         test_model_provider(),
         /*last_response_tx*/ None,
+        None,
     );
 
     while stream.next().await.is_some() {}
@@ -1986,6 +1989,7 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         attempt,
         test_model_provider(),
         /*last_response_tx*/ None,
+        None,
     );
 
     // Fill the mapper channel with non-terminal events, then yield one output
@@ -2289,6 +2293,7 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
         test_model_provider(),
         vec![Box::new(ReplaceOutput)],
         Some(last_response_tx),
+        None,
     );
     let mut delivered = Vec::new();
     while let Some(event) = stream.next().await {
@@ -2360,4 +2365,30 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
             "step {index}"
         );
     }
+}
+
+#[test]
+fn generation_identity_survives_transport_recovery_and_changes_for_real_continuations() {
+    let thread = ThreadId::new();
+    let original = super::logical_generation_id(&thread, Some("turn"), &[]).expect("identity");
+    assert_eq!(
+        super::logical_generation_id(&thread, Some("turn"), &[]).expect("recovery"),
+        original
+    );
+    let tool: ResponseItem = serde_json::from_value(
+        serde_json::json!({"type":"function_call_output","call_id":"read","output":"source bytes"}),
+    )
+    .expect("tool result");
+    assert_ne!(
+        super::logical_generation_id(&thread, Some("turn"), &[tool]).expect("continuation"),
+        original
+    );
+    assert_ne!(
+        super::logical_generation_id(&thread, Some("next-turn"), &[]).expect("next turn"),
+        original
+    );
+    assert_ne!(
+        super::logical_generation_id(&ThreadId::new(), Some("turn"), &[]).expect("fresh execution"),
+        original
+    );
 }

@@ -26,6 +26,8 @@ struct CaptureInner {
     flushing: AsyncMutex<()>,
     runtime: Mutex<Weak<CodexThread>>,
     wake: Option<Arc<Notify>>,
+    #[cfg(test)]
+    interrupt_barrier: Mutex<Option<(Arc<Notify>, Arc<tokio::sync::Semaphore>)>>,
 }
 
 #[derive(Default)]
@@ -76,6 +78,8 @@ impl CaptureHandle {
             flushing: AsyncMutex::new(()),
             runtime: Mutex::new(Weak::new()),
             wake,
+            #[cfg(test)]
+            interrupt_barrier: Mutex::new(None),
         }));
         let weak = Arc::downgrade(&capture.0);
         tokio::spawn(async move {
@@ -147,11 +151,34 @@ impl CaptureHandle {
         self.0.pending.lock().expect("capture buffer").failure
     }
 
+    #[cfg(test)]
+    pub(super) fn block_interrupt(
+        &self,
+        entered: Arc<Notify>,
+        release: Arc<tokio::sync::Semaphore>,
+    ) {
+        *self.0.interrupt_barrier.lock().expect("interrupt barrier") = Some((entered, release));
+    }
+
     pub(crate) fn request_interrupt(&self) {
         let Some(runtime) = self.0.runtime.lock().expect("capture runtime").upgrade() else {
             return;
         };
+        #[cfg(test)]
+        let barrier = self
+            .0
+            .interrupt_barrier
+            .lock()
+            .expect("interrupt barrier")
+            .clone();
         tokio::spawn(async move {
+            #[cfg(test)]
+            if let Some((entered, release)) = barrier {
+                entered.notify_one();
+                if let Ok(permit) = release.acquire().await {
+                    permit.forget();
+                }
+            }
             let _ =
                 tokio::time::timeout(Duration::from_secs(5), runtime.submit(Op::Interrupt)).await;
         });
