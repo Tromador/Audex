@@ -83,6 +83,13 @@ impl AuditStore {
         validate_nonempty("control reason", &request.reason, MAX_ERROR_BYTES)?;
         let digest = sha256_hex(&serde_json::to_vec(request)?);
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        #[cfg(test)]
+        self.wait_transition_for_test(match request.action {
+            AttemptAction::Retry => "retry",
+            AttemptAction::Cancel => "cancel",
+            AttemptAction::Ignore => "ignore",
+        })
+        .await;
         if let Some((stored, response)) = sqlx::query_as::<_, (String, String)>(
             "SELECT request_digest,response_json FROM audit_attempt_actions WHERE action_key=?",
         )
@@ -100,7 +107,7 @@ impl AuditStore {
             return Ok(response);
         }
         let row = sqlx::query("SELECT t.reviewer_id,t.ordinal,t.revision,t.owner_generation,t.disposition,t.output_cutoff,t.capture_started,t.capture_finished,
-            v.current_assignment_id,a.state,r.phase,r.control_intent,r.current_report_id,o.id AS operation_id,o.submission_boundary,o.state AS operation_state
+            v.current_assignment_id,a.state,r.phase,r.control_intent,r.current_report_id,r.collection_ready,o.id AS operation_id,o.submission_boundary,o.state AS operation_state
             FROM audit_attempts t JOIN audit_reviewers v ON v.id=t.reviewer_id JOIN reviewer_assignments a ON a.id=t.assignment_id
             JOIN audit_runs r ON r.id=t.run_id JOIN operations o ON o.assignment_id=a.id WHERE t.run_id=? AND t.assignment_id=?")
             .bind(&request.run_id).bind(&request.assignment_id).fetch_one(&mut *tx).await?;
@@ -133,6 +140,11 @@ impl AuditStore {
         {
             response.completed_won = true;
         } else {
+            if RunPhase::parse(row.try_get("phase")?)?.is_terminal() {
+                return Err(AuditStoreError::InvalidTransition(
+                    "the audit has already finished".to_owned(),
+                ));
+            }
             if row.try_get::<String, _>("control_intent")? != "active" {
                 return Err(AuditStoreError::InvalidTransition(
                     "the audit has a run-wide stop decision".to_owned(),
@@ -147,13 +159,20 @@ impl AuditStore {
                 if possible_overlap && !request.acknowledge_possible_overlap {
                     return Err(AuditStoreError::InvalidInput("the prior request may remain active and incur overlapping charges; explicit acknowledgement required".to_owned()));
                 }
-                if row
-                    .try_get::<Option<String>, _>("current_report_id")?
-                    .is_some()
+                if disposition == "ignored" || assignment_state == AssignmentState::Succeeded {
+                    return Err(AuditStoreError::InvalidTransition(
+                        "Ignored reviewers and completed contributions cannot be retried"
+                            .to_owned(),
+                    ));
+                }
+                if row.try_get::<bool, _>("collection_ready")?
+                    || row
+                        .try_get::<Option<String>, _>("current_report_id")?
+                        .is_some()
                     || row.try_get::<String, _>("phase")? == "reporting"
                 {
                     return Err(AuditStoreError::InvalidTransition(
-                        "a frozen report contribution cannot be replaced".to_owned(),
+                        "collection is ready; Retry is closed".to_owned(),
                     ));
                 }
             } else if disposition != "active" {
@@ -187,45 +206,7 @@ impl AuditStore {
             }
             let revision: i64 = row.try_get("revision")?;
             if response.cutoff.is_none() {
-                let mut local_prefix = false;
-                if let Some((identity, entries)) = prefix {
-                    if identity.assignment_id != request.assignment_id {
-                        return Err(AuditStoreError::InvalidInput(
-                            "control prefix belongs to another attempt".to_owned(),
-                        ));
-                    }
-                    sqlx::query("SAVEPOINT audex_control_prefix")
-                        .execute(&mut *tx)
-                        .await?;
-                    match append_batch(&mut tx, identity, entries).await {
-                        Ok(appended) => {
-                            local_prefix = !appended.fenced;
-                            sqlx::query("RELEASE audex_control_prefix")
-                                .execute(&mut *tx)
-                                .await?;
-                        }
-                        Err(AuditStoreError::Database(error)) => return Err(error.into()),
-                        Err(_) => {
-                            sqlx::query("ROLLBACK TO audex_control_prefix")
-                                .execute(&mut *tx)
-                                .await?;
-                            sqlx::query("RELEASE audex_control_prefix")
-                                .execute(&mut *tx)
-                                .await?;
-                            sqlx::query("UPDATE audit_attempts SET capture_gap=COALESCE(capture_gap,'local capture prefix could not be retained at control') WHERE assignment_id=?")
-                                .bind(&request.assignment_id).execute(&mut *tx).await?;
-                        }
-                    }
-                }
-                if !local_prefix
-                    && row.try_get::<bool, _>("capture_started")?
-                    && !row.try_get::<bool, _>("capture_finished")?
-                {
-                    sqlx::query("UPDATE audit_attempts SET capture_gap=COALESCE(capture_gap,'collector unavailable at control; uncommitted activity may be missing') WHERE assignment_id=?")
-                        .bind(&request.assignment_id).execute(&mut *tx).await?;
-                }
-                sqlx::query("UPDATE audit_attempts SET output_cutoff=output_sequence,capture_finished=1 WHERE assignment_id=?")
-                    .bind(&request.assignment_id).execute(&mut *tx).await?;
+                retain_control_prefix(&mut tx, &request.assignment_id, prefix).await?;
             }
             let next_disposition = match request.action {
                 AttemptAction::Cancel => "cancelled",
@@ -271,16 +252,11 @@ impl AuditStore {
                 }
                 sqlx::query("UPDATE audit_reviewers SET current_assignment_id=? WHERE id=? AND current_assignment_id=?")
                     .bind(&assignment).bind(&reviewer).bind(&request.assignment_id).execute(&mut *tx).await?;
-                // Reopening a terminal single-review audit is genuinely run-wide.
-                sqlx::query("UPDATE audit_runs SET phase='reviewing',outcome=NULL,revision=revision+1,updated_at_ms=? WHERE id=? AND phase IN ('failed','cancelled','completed_with_failures')")
-                    .bind(now).bind(&request.run_id).execute(&mut *tx).await?;
                 response.replacement_assignment_id = Some(assignment);
                 response.replacement_operation_id = Some(replacement);
-            } else if single_reviewer(&mut tx, &request.run_id).await? {
-                sqlx::query("UPDATE audit_runs SET phase='cancelled',outcome='no_completed_review',revision=revision+1,updated_at_ms=? WHERE id=? AND phase NOT IN ('completed','cancelled')")
-                    .bind(now_millis()).bind(&request.run_id).execute(&mut *tx).await?;
             }
         }
+        super::reporting::settle_collection(&mut tx, &request.run_id).await?;
         let versions: (i64,i64,i64,String) = sqlx::query_as("SELECT t.revision,t.output_sequence,r.revision,r.phase FROM audit_attempts t JOIN audit_runs r ON r.id=t.run_id WHERE t.assignment_id=?")
             .bind(&request.assignment_id).fetch_one(&mut *tx).await?;
         response.attempt_revision = versions.0;
@@ -292,4 +268,58 @@ impl AuditStore {
         tx.commit().await?;
         Ok(response)
     }
+}
+
+/// Same cutoff/gap policy for one attempt control and an atomic whole-audit stop.
+pub(super) async fn retain_control_prefix(
+    connection: &mut sqlx::SqliteConnection,
+    assignment: &str,
+    prefix: Option<(&CaptureIdentity, &[ActivityInput])>,
+) -> Result<(), AuditStoreError> {
+    let row = sqlx::query(
+        "SELECT capture_started,capture_finished FROM audit_attempts WHERE assignment_id=?",
+    )
+    .bind(assignment)
+    .fetch_one(&mut *connection)
+    .await?;
+    let mut local_prefix = false;
+    if let Some((identity, entries)) = prefix {
+        if identity.assignment_id != assignment {
+            return Err(AuditStoreError::InvalidInput(
+                "control prefix belongs to another attempt".to_owned(),
+            ));
+        }
+        sqlx::query("SAVEPOINT audex_control_prefix")
+            .execute(&mut *connection)
+            .await?;
+        match append_batch(&mut *connection, identity, entries).await {
+            Ok(appended) => {
+                local_prefix = !appended.fenced;
+                sqlx::query("RELEASE audex_control_prefix")
+                    .execute(&mut *connection)
+                    .await?;
+            }
+            Err(AuditStoreError::Database(error)) => return Err(error.into()),
+            Err(_) => {
+                sqlx::query("ROLLBACK TO audex_control_prefix")
+                    .execute(&mut *connection)
+                    .await?;
+                sqlx::query("RELEASE audex_control_prefix")
+                    .execute(&mut *connection)
+                    .await?;
+                sqlx::query("UPDATE audit_attempts SET capture_gap=COALESCE(capture_gap,'local capture prefix could not be retained at control') WHERE assignment_id=?")
+                                .bind(assignment).execute(&mut *connection).await?;
+            }
+        }
+    }
+    if !local_prefix
+        && row.try_get::<bool, _>("capture_started")?
+        && !row.try_get::<bool, _>("capture_finished")?
+    {
+        sqlx::query("UPDATE audit_attempts SET capture_gap=COALESCE(capture_gap,'collector unavailable at control; uncommitted activity may be missing') WHERE assignment_id=?")
+                        .bind(assignment).execute(&mut *connection).await?;
+    }
+    sqlx::query("UPDATE audit_attempts SET output_cutoff=output_sequence,capture_finished=1 WHERE assignment_id=?")
+                    .bind(assignment).execute(&mut *connection).await?;
+    Ok(())
 }

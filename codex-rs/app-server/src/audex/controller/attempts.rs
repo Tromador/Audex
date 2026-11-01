@@ -2,6 +2,42 @@ use super::*;
 use crate::audex::store::attempts::{AttemptAction, ControlRequest};
 
 impl AuditController {
+    pub(super) async fn abort_audit(&self, run: &str) -> anyhow::Result<()> {
+        let store = self.store().await?;
+        // No attempt gate: a stalled observation or termination cannot delay stop.
+        let records = store.attempts(run).await?;
+        let captures = records
+            .iter()
+            .filter_map(|record| self.dispatch.capture(&record.operation_id))
+            .collect::<Vec<_>>();
+        let prefixes = captures
+            .iter()
+            .map(|capture| (capture.identity().clone(), capture.control_prefix()))
+            .collect::<Vec<_>>();
+        let result = store.abort_run(run, &prefixes).await;
+        for capture in &captures {
+            capture.completion_finished(result.is_ok());
+        }
+        result?;
+        // Retry may have committed between prefix sampling and Abort. Interrupt
+        // the store's current stopped attempts, including any such replacement.
+        let stopped = store.load_run_metadata(run).await?.control_intent == "cancel_requested";
+        for record in store.attempts(run).await?.into_iter().filter(|record| {
+            stopped && record.current && record.assignment_state != AssignmentState::Succeeded
+        }) {
+            let dispatch = self.dispatch.clone();
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    dispatch.request_interrupt(record.operation_id),
+                )
+                .await;
+            });
+        }
+        self.wake.notify_one();
+        self.progress(run).await
+    }
+
     async fn attempt_view(&self, record: &AuditRunRecord) -> anyhow::Result<AuditAttemptView> {
         let store = self.store().await?;
         let capture = store.capture_state(&record.assignment_id).await?;

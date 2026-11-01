@@ -158,7 +158,7 @@ async fn migrations_pragmas_reopen_and_recovery_are_durable() {
     );
     assert_eq!(
         store.applied_migrations().await.expect("read migrations"),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     );
     let created = store
         .create_run(&create_request(&snapshot, "reopen"))
@@ -356,7 +356,7 @@ async fn cancellation_prevents_claim_and_dispatch_even_with_an_existing_lease() 
         .await
         .expect("load cancelled run");
     assert_eq!(recovered.control_intent, "cancel_requested");
-    assert_eq!(recovered.phase, RunPhase::SnapshotBound);
+    assert_eq!(recovered.phase, RunPhase::Reporting);
     assert_eq!(recovered.operation_state, OperationState::Planned);
 }
 
@@ -501,7 +501,7 @@ async fn seeded_findings_persist_and_report_is_reproducible_after_reopen() {
 }
 
 #[tokio::test]
-async fn empty_findings_succeed_and_invalid_seeded_results_fail_terminally() {
+async fn empty_findings_succeed_and_invalid_seeded_results_remain_wanted() {
     let temp = tempfile::tempdir().expect("create temp directory");
     let snapshot = capture_snapshot(&temp).await;
     let store = AuditStore::open(absolute(&temp.path().join("audex")))
@@ -544,7 +544,7 @@ async fn empty_findings_succeed_and_invalid_seeded_results_fail_terminally() {
         .load_run(&invalid.run_id)
         .await
         .expect("load failed run");
-    assert_eq!(loaded.phase, RunPhase::CompletedWithFailures);
+    assert_eq!(loaded.phase, RunPhase::Reviewing);
     assert_eq!(loaded.assignment_state, AssignmentState::Failed);
     assert_eq!(loaded.operation_state, OperationState::Failed);
     assert!(loaded.findings.is_empty());

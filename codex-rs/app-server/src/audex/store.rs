@@ -30,10 +30,11 @@ pub(super) mod attempts;
 #[cfg(test)]
 mod foundation_tests;
 mod foundations;
+mod reporting;
 #[cfg(test)]
 mod submission_tests;
+use foundations::update_attempt_revision;
 pub(super) use foundations::{DEFAULT_WORKERS, ReviewerCommission};
-use foundations::{single_reviewer, update_attempt_revision};
 const DATABASE_FILENAME: &str = "audit-state.sqlite3";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_IDENTIFIER_BYTES: usize = 512;
@@ -44,6 +45,8 @@ pub(crate) struct AuditStore {
     root: AbsolutePathBuf,
     database_path: PathBuf,
     pool: SqlitePool,
+    #[cfg(test)]
+    transition_barrier: std::sync::Arc<std::sync::Mutex<Option<reporting::TransitionBarrier>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -643,7 +646,7 @@ async fn insert_findings(
 }
 
 async fn read_findings(
-    pool: &SqlitePool,
+    connection: &mut sqlx::SqliteConnection,
     assignment_id: &str,
 ) -> Result<Vec<FindingRecord>, AuditStoreError> {
     let rows = sqlx::query(
@@ -652,7 +655,7 @@ async fn read_findings(
          FROM findings WHERE assignment_id=? ORDER BY ordinal",
     )
     .bind(assignment_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     let mut findings = Vec::with_capacity(rows.len());
     for row in rows {
@@ -663,7 +666,7 @@ async fn read_findings(
              FROM evidence WHERE finding_id=? ORDER BY ordinal",
         )
         .bind(&finding_id)
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?
         .into_iter()
         .map(|row| {
@@ -807,7 +810,7 @@ fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, AuditStoreError> {
     Ok(root.join(relative))
 }
 
-fn publish_immutable(
+pub(super) fn publish_immutable(
     root: &Path,
     relative: &str,
     bytes: &[u8],
@@ -1367,7 +1370,7 @@ impl AuditStore {
             } else {
                 terminal
             };
-        let (assignment, operation, phase) = match terminal {
+        let (assignment, operation, _phase) = match terminal {
             AssignmentState::Cancelled => ("cancelled", "failed", "cancelled"),
             AssignmentState::Unknown => ("unknown", "unknown", "failed"),
             _ => ("failed", "failed", "failed"),
@@ -1403,9 +1406,9 @@ impl AuditStore {
             now,
         )
         .await?;
-        if single_reviewer(&mut tx, &state.run_id).await? {
-            sqlx::query("UPDATE audit_runs SET phase=?, outcome=?, revision=revision+1, updated_at_ms=? WHERE id=?")
-                .bind(phase).bind(reason).bind(now).bind(&state.run_id).execute(&mut *tx).await?;
+        if reason == "snapshot_integrity_failure" && state.control_intent == "active" {
+            sqlx::query("UPDATE audit_runs SET phase='failed',outcome=?,revision=revision+1,updated_at_ms=? WHERE id=? AND collection_ready=0 AND (SELECT count(*) FROM audit_reviewers WHERE run_id=audit_runs.id)=1")
+                .bind(reason).bind(now).bind(&state.run_id).execute(&mut *tx).await?;
         }
         tx.commit().await?;
         Ok(state.attempt_revision + 1)
@@ -1431,6 +1434,8 @@ impl AuditStore {
             root,
             database_path,
             pool,
+            #[cfg(test)]
+            transition_barrier: Default::default(),
         })
     }
 
@@ -1779,43 +1784,14 @@ impl AuditStore {
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn request_cancel(
         &self,
         run_id: &str,
         expected_revision: i64,
     ) -> Result<i64, AuditStoreError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let row = sqlx::query("SELECT phase, control_intent, revision FROM audit_runs WHERE id=?")
-            .bind(run_id)
-            .fetch_one(&mut *transaction)
-            .await?;
-        let phase = RunPhase::parse(row.try_get("phase")?)?;
-        let control_intent: String = row.try_get("control_intent")?;
-        let revision: i64 = row.try_get("revision")?;
-        if phase.is_terminal() {
-            return Err(AuditStoreError::InvalidTransition(format!(
-                "cannot cancel a run in phase {}",
-                phase.as_str()
-            )));
-        }
-        if control_intent == "cancel_requested" {
-            transaction.commit().await?;
-            return Ok(revision);
-        }
-        require_revision(expected_revision, revision)?;
-        let next_revision = revision + 1;
-        sqlx::query(
-            "UPDATE audit_runs
-             SET control_intent='cancel_requested', stop_generation=stop_generation+1, revision=?, updated_at_ms=?
-             WHERE id=?",
-        )
-        .bind(next_revision)
-        .bind(now_millis())
-        .bind(run_id)
-        .execute(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        Ok(next_revision)
+        let _ = expected_revision;
+        self.abort_run(run_id, &[]).await
     }
 
     pub(crate) async fn commit_seeded_result(
@@ -1907,6 +1883,8 @@ impl AuditStore {
         };
 
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        #[cfg(test)]
+        self.wait_transition_for_test("result").await;
         let context = read_operation_context(&mut *transaction, operation_id).await?;
         if matches!(
             context.assignment_state,
@@ -1994,16 +1972,7 @@ impl AuditStore {
         .await?;
         update_attempt_revision(&mut transaction, &context.assignment_id, next_revision, now)
             .await?;
-        if single_reviewer(&mut transaction, &context.run_id).await? {
-            update_run_phase(
-                &mut transaction,
-                &context.run_id,
-                RunPhase::Reporting,
-                context.run_revision + 1,
-                now,
-            )
-            .await?;
-        }
+        reporting::settle_collection(&mut transaction, &context.run_id).await?;
         transaction.commit().await?;
         Ok(ResultCommitOutcome::Committed {
             revision: next_revision,
@@ -2082,10 +2051,6 @@ impl AuditStore {
         .await?;
         update_attempt_revision(&mut transaction, &context.assignment_id, next_revision, now)
             .await?;
-        if single_reviewer(&mut transaction, &context.run_id).await? {
-            sqlx::query("UPDATE audit_runs SET phase='completed_with_failures', outcome='invalid_result', revision=revision+1, updated_at_ms=? WHERE id=?")
-                .bind(now).bind(&context.run_id).execute(&mut *transaction).await?;
-        }
         transaction.commit().await?;
         Ok(next_revision)
     }
@@ -2095,74 +2060,8 @@ impl AuditStore {
         run_id: &str,
         expected_revision: i64,
     ) -> Result<ReportPublishOutcome, AuditStoreError> {
-        if let Some((revision, report)) = self.read_current_report(run_id).await? {
-            self.read_report(&report)?;
-            return Ok(ReportPublishOutcome::AlreadyPublished { revision, report });
-        }
-        let input = self.report_input(run_id).await?;
-        let rendered = report::render(&input)?;
-        let relative_path = format!("reports/{}/{}.md", run_id, rendered.input_digest);
-        publish_immutable(
-            self.root.as_path(),
-            &relative_path,
-            &rendered.bytes,
-            &rendered.content_digest,
-        )?;
-        let record = ReportRecord {
-            id: rendered.id,
-            input_digest: rendered.input_digest,
-            relative_path,
-            content_digest: rendered.content_digest,
-        };
-
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let (phase, revision) = read_run_state(&mut *transaction, run_id).await?;
-        if phase == RunPhase::Completed {
-            transaction.commit().await?;
-            if let Some((revision, report)) = self.read_current_report(run_id).await? {
-                self.read_report(&report)?;
-                return Ok(ReportPublishOutcome::AlreadyPublished { revision, report });
-            }
-            return Err(AuditStoreError::InvalidPersistedState(
-                "completed run has no current report".to_string(),
-            ));
-        }
-        require_revision(expected_revision, revision)?;
-        require_phase(phase, RunPhase::Reporting)?;
-        let next_revision = revision + 1;
-        let now = now_millis();
-        sqlx::query(
-            "INSERT INTO reports (
-                id, run_id, format_version, input_digest, relative_path,
-                content_digest, created_at_ms
-             ) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&record.id)
-        .bind(run_id)
-        .bind(i64::from(report::REPORT_FORMAT_VERSION))
-        .bind(&record.input_digest)
-        .bind(&record.relative_path)
-        .bind(&record.content_digest)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query(
-            "UPDATE audit_runs
-             SET phase='completed', outcome='success', current_report_id=?,
-                 revision=?, updated_at_ms=?
-             WHERE id=?",
-        )
-        .bind(&record.id)
-        .bind(next_revision)
-        .bind(now)
-        .bind(run_id)
-        .execute(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        Ok(ReportPublishOutcome::Published {
-            revision: next_revision,
-            report: record,
-        })
+        let _ = expected_revision; // Selection authority, rather than render timing, fences publication.
+        self.publish_selection(run_id).await
     }
 
     pub(crate) async fn load_run(&self, run_id: &str) -> Result<AuditRunRecord, AuditStoreError> {
@@ -2174,7 +2073,8 @@ impl AuditStore {
         &self,
         mut record: AuditRunRecord,
     ) -> Result<AuditRunRecord, AuditStoreError> {
-        record.findings = read_findings(&self.pool, &record.assignment_id).await?;
+        record.findings =
+            read_findings(&mut *self.pool.acquire().await?, &record.assignment_id).await?;
         match (&record.result_digest, &record.result_path) {
             (Some(digest), Some(path)) => {
                 verify_immutable(self.root.as_path(), path, digest)?;
@@ -2192,6 +2092,8 @@ impl AuditStore {
             _ => {}
         }
         if let Some(report) = &record.report {
+            self.verify_published_selection(&record.run_id, report)
+                .await?;
             self.read_report(report)?;
         } else if record.phase == RunPhase::Completed {
             return Err(AuditStoreError::InvalidPersistedState(
@@ -2235,7 +2137,7 @@ impl AuditStore {
             "SELECT r.revision, p.id, p.input_digest, p.relative_path, p.content_digest
              FROM audit_runs r
              JOIN reports p ON p.id=r.current_report_id
-             WHERE r.id=? AND r.phase='completed'",
+             WHERE r.id=?",
         )
         .bind(run_id)
         .fetch_optional(&self.pool)
@@ -2272,59 +2174,6 @@ impl AuditStore {
             relative_path: row.get("relative_path"),
             content_digest: row.get("content_digest"),
         }))
-    }
-
-    async fn report_input(&self, run_id: &str) -> Result<report::ReportInput, AuditStoreError> {
-        let row = sqlx::query(
-            "SELECT r.snapshot_id, r.phase, a.id AS assignment_id, a.state, a.summary
-             FROM audit_runs r
-             JOIN audit_reviewers v ON v.run_id=r.id
-             JOIN reviewer_assignments a ON a.id=v.current_assignment_id
-             WHERE r.id=? AND v.ordinal=0",
-        )
-        .bind(run_id)
-        .fetch_one(&self.pool)
-        .await?;
-        let phase = RunPhase::parse(row.try_get("phase")?)?;
-        require_phase(phase, RunPhase::Reporting)?;
-        let state = AssignmentState::parse(row.try_get("state")?)?;
-        require_assignment_state(state, AssignmentState::Succeeded)?;
-        let assignment_id: String = row.try_get("assignment_id")?;
-        let findings = read_findings(&self.pool, &assignment_id).await?;
-        Ok(report::ReportInput {
-            run_id: run_id.to_string(),
-            snapshot_id: row.try_get("snapshot_id")?,
-            assignment_id,
-            summary: row.try_get("summary")?,
-            findings: findings
-                .into_iter()
-                .map(|finding| report::ReportFinding {
-                    id: finding.id,
-                    ordinal: finding.ordinal,
-                    severity: finding.severity,
-                    confidence: finding.confidence,
-                    title: finding.title,
-                    mechanism: finding.mechanism,
-                    impact: finding.impact,
-                    remediation: finding.remediation,
-                    verification_state: finding.verification_state,
-                    evidence: finding
-                        .evidence
-                        .into_iter()
-                        .map(|evidence| report::ReportEvidence {
-                            lines_verified: evidence.lines_verified,
-                            ordinal: evidence.ordinal,
-                            description: evidence.description,
-                            manifest_path: evidence.manifest_path,
-                            start_byte: evidence.start_byte,
-                            end_byte: evidence.end_byte,
-                            start_line: evidence.start_line,
-                            end_line: evidence.end_line,
-                        })
-                        .collect(),
-                })
-                .collect(),
-        })
     }
 
     #[cfg(test)]

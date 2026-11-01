@@ -52,11 +52,17 @@ async fn positive_contradictions_finish_unknown_without_replaying_or_blocking_ne
                 .reconcile_observation(&run, Some(&snapshot), None, observation)
                 .await?;
             let unknown = store.load_run(&id).await?;
-            assert_eq!(unknown.operation_state, OperationState::Unknown);
-            assert_eq!(unknown.assignment_state, AssignmentState::Unknown);
-            assert!(!unknown.observation_pending && !unknown.capacity_released);
-            assert!(unknown.outcome.is_some());
-            assert_eq!(read(&controller, &id).await["operationState"], "unknown");
+            if cancel {
+                assert_eq!(unknown.phase, RunPhase::Reporting);
+                assert!(unknown.capacity_released);
+            } else {
+                assert_eq!(unknown.operation_state, OperationState::Unknown);
+                assert_eq!(unknown.assignment_state, AssignmentState::Unknown);
+                assert!(!unknown.observation_pending && !unknown.capacity_released);
+                assert_eq!(unknown.phase, RunPhase::Reviewing);
+                assert!(unknown.outcome.is_none(), "wanted uncertainty is pending");
+                assert_eq!(read(&controller, &id).await["operationState"], "unknown");
+            }
             controller.drive(&id).await?;
             let next = start(&controller, &format!("next-{mode}")).await;
             controller.drive(&next).await?;
@@ -105,7 +111,7 @@ async fn missing_receipt_and_ambiguous_outcome_remain_observable_until_valid_com
             .expect("intent");
         fake.replace(&run.operation_id, WorkState::Completed(empty_result(&run)));
         controller.drive(&id).await?;
-        // A stale contradictory observation cannot overwrite an already committed result.
+        // A stale contradictory observation cannot overwrite the durable Abort.
         controller
             .reconcile_observation(
                 &pending,
@@ -116,7 +122,8 @@ async fn missing_receipt_and_ambiguous_outcome_remain_observable_until_valid_com
             .await?;
         controller.drive(&id).await?;
         let completed = store.load_run(&id).await?;
-        assert_eq!(completed.phase, RunPhase::Completed);
+        assert_eq!(completed.phase, RunPhase::Cancelled);
+        assert_eq!(completed.outcome.as_deref(), Some("aborted_by_operator"));
         assert!(!completed.observation_pending);
         assert_eq!(fake.starts.load(Ordering::SeqCst), 1);
     }

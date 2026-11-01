@@ -29,7 +29,7 @@ const PENDING: i32 = 5;
 #[command(
     subcommand_negates_reqs = true,
     args_conflicts_with_subcommands = true,
-    after_help = "Requires an already-running local app-server daemon. Reports go to stdout; progress goes to stderr.\nRuntime exit codes: 0 completed (or acknowledged --detach), 1 request/local error, 2 failed audit, 3 cancelled, 4 terminal unknown, 5 pending, 130 Ctrl-C.\nCtrl-C disconnects without cancelling. Use `audit cancel RUN` to request cancellation."
+    after_help = "Requires an already-running local app-server daemon. Reports go to stdout; progress goes to stderr.\nRuntime exit codes: 0 completed (or acknowledged --detach), 1 request/local error, 2 failed audit, 3 cancelled, 4 terminal unknown, 5 pending, 6 aborted by operator, 130 Ctrl-C.\nCtrl-C disconnects without cancelling. Use `audit abort RUN` to stop the whole audit."
 )]
 pub(crate) struct AuditCommand {
     #[command(flatten)]
@@ -98,8 +98,9 @@ enum Action {
         #[arg(long)]
         after: Option<String>,
     },
-    /// Commit cancellation intent, then follow the original operation to its outcome.
-    Cancel { run_id: String },
+    /// Abort the whole audit, preserve accepted reviews and eligible partials, then follow publication.
+    #[command(visible_alias = "cancel")]
+    Abort { run_id: String },
     /// Release an observation-pending run after cancellation; inference may still run or incur charges.
     ReleaseSlot {
         run_id: String,
@@ -295,7 +296,7 @@ async fn execute(
             *retained_run = Some(run_id.clone());
             (audits.read(run_id).await?, follow)
         }
-        Some(Action::Cancel { run_id }) => {
+        Some(Action::Abort { run_id }) => {
             *retained_run = Some(run_id.clone());
             // The server commits intent before returning; this client never sends
             // a thread interrupt or claims cancellation from an attempted request.
@@ -387,13 +388,24 @@ async fn execute(
 }
 
 fn terminal_code(view: &AuditRunView) -> Option<i32> {
-    if view.operation_state == AuditOperationState::Unknown {
-        return Some(4);
+    // Published aggregate outcomes take priority over individual execution certainty.
+    if view.report.is_some() {
+        match view.outcome.as_deref() {
+            Some("aborted_by_operator") => return Some(6),
+            Some("no_completed_review") => return Some(3),
+            _ => {}
+        }
     }
     match view.phase {
         AuditRunPhase::Completed => Some(0),
-        AuditRunPhase::Failed | AuditRunPhase::CompletedWithFailures => Some(2),
         AuditRunPhase::Cancelled => Some(3),
+        AuditRunPhase::Failed | AuditRunPhase::CompletedWithFailures => {
+            Some(if view.operation_state == AuditOperationState::Unknown {
+                4
+            } else {
+                2
+            })
+        }
         _ => None,
     }
 }

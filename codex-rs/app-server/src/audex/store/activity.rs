@@ -277,60 +277,14 @@ impl AuditStore {
                 "activity cursor is beyond the durable prefix".to_owned(),
             ));
         }
-        let rows = sqlx::query("SELECT sequence,producer_key,session_id,turn_id,item_id,kind,payload,payload_digest,source_digest,text_offset,record_digest FROM audit_activity WHERE assignment_id=? AND sequence>? AND sequence<=? ORDER BY sequence LIMIT ?")
-            .bind(assignment).bind(after).bind(bound).bind(i64::from(limit)).fetch_all(&self.pool).await?;
-        if rows.len() as i64 != (bound - after).min(i64::from(limit)) {
-            return Err(AuditStoreError::InvalidPersistedState(
-                "activity prefix has a missing entry".to_owned(),
-            ));
-        }
-        rows.into_iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let sequence: i64 = row.try_get("sequence")?;
-                if sequence != after + index as i64 + 1 {
-                    return Err(AuditStoreError::InvalidPersistedState(
-                        "activity sequence is not contiguous".to_owned(),
-                    ));
-                }
-                let actual = serde_json::json!([
-                    assignment,
-                    sequence,
-                    row.try_get::<String, _>("producer_key")?,
-                    row.try_get::<String, _>("session_id")?,
-                    row.try_get::<String, _>("turn_id")?,
-                    row.try_get::<String, _>("item_id")?,
-                    row.try_get::<String, _>("kind")?,
-                    row.try_get::<String, _>("payload")?,
-                    row.try_get::<String, _>("payload_digest")?,
-                    row.try_get::<String, _>("source_digest")?,
-                    row.try_get::<Option<i64>, _>("text_offset")?
-                ]);
-                if sha256_hex(&serde_json::to_vec(&actual)?)
-                    != row.try_get::<String, _>("record_digest")?
-                {
-                    return Err(AuditStoreError::InvalidPersistedState(
-                        "activity record digest mismatch".to_owned(),
-                    ));
-                }
-                let payload: String = row.try_get("payload")?;
-                let digest: String = row.try_get("payload_digest")?;
-                if sha256_hex(payload.as_bytes()) != digest {
-                    return Err(AuditStoreError::InvalidPersistedState(
-                        "activity payload digest mismatch".to_owned(),
-                    ));
-                }
-                Ok(ActivityRecord {
-                    sequence: row.try_get("sequence")?,
-                    session_id: row.try_get("session_id")?,
-                    turn_id: row.try_get("turn_id")?,
-                    item_id: row.try_get("item_id")?,
-                    kind: row.try_get("kind")?,
-                    payload,
-                    payload_digest: digest,
-                })
-            })
-            .collect()
+        verified_activity(
+            &mut *self.pool.acquire().await?,
+            assignment,
+            after,
+            limit,
+            bound,
+        )
+        .await
     }
 
     pub(in crate::audex) async fn finish_capture(
@@ -368,4 +322,80 @@ impl AuditStore {
             .bind(reason).bind(reason).bind(reason.contains("truncat")).bind(assignment).execute(&self.pool).await?;
         Ok(())
     }
+}
+
+/// Verify precisely the selected prefix, independent of later operational metadata.
+pub(super) async fn read_selected_activity(
+    connection: &mut sqlx::SqliteConnection,
+    assignment: &str,
+    after: i64,
+    limit: u32,
+    bound: i64,
+    verify: bool,
+) -> Result<Vec<ActivityRecord>, AuditStoreError> {
+    let rows = sqlx::query("SELECT sequence,producer_key,session_id,turn_id,item_id,kind,payload,payload_digest,source_digest,text_offset,record_digest FROM audit_activity WHERE assignment_id=? AND sequence>? AND sequence<=? ORDER BY sequence LIMIT ?")
+            .bind(assignment).bind(after).bind(bound).bind(i64::from(limit)).fetch_all(&mut *connection).await?;
+    if verify && rows.len() as i64 != (bound - after).min(i64::from(limit)) {
+        return Err(AuditStoreError::InvalidPersistedState(
+            "activity prefix has a missing entry".to_owned(),
+        ));
+    }
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let sequence: i64 = row.try_get("sequence")?;
+            if verify && sequence != after + index as i64 + 1 {
+                return Err(AuditStoreError::InvalidPersistedState(
+                    "activity sequence is not contiguous".to_owned(),
+                ));
+            }
+            let actual = serde_json::json!([
+                assignment,
+                sequence,
+                row.try_get::<String, _>("producer_key")?,
+                row.try_get::<String, _>("session_id")?,
+                row.try_get::<String, _>("turn_id")?,
+                row.try_get::<String, _>("item_id")?,
+                row.try_get::<String, _>("kind")?,
+                row.try_get::<String, _>("payload")?,
+                row.try_get::<String, _>("payload_digest")?,
+                row.try_get::<String, _>("source_digest")?,
+                row.try_get::<Option<i64>, _>("text_offset")?
+            ]);
+            if verify
+                && sha256_hex(&serde_json::to_vec(&actual)?)
+                    != row.try_get::<String, _>("record_digest")?
+            {
+                return Err(AuditStoreError::InvalidPersistedState(
+                    "activity record digest mismatch".to_owned(),
+                ));
+            }
+            let payload: String = row.try_get("payload")?;
+            let digest: String = row.try_get("payload_digest")?;
+            if verify && sha256_hex(payload.as_bytes()) != digest {
+                return Err(AuditStoreError::InvalidPersistedState(
+                    "activity payload digest mismatch".to_owned(),
+                ));
+            }
+            Ok(ActivityRecord {
+                sequence: row.try_get("sequence")?,
+                session_id: row.try_get("session_id")?,
+                turn_id: row.try_get("turn_id")?,
+                item_id: row.try_get("item_id")?,
+                kind: row.try_get("kind")?,
+                payload,
+                payload_digest: digest,
+            })
+        })
+        .collect()
+}
+
+pub(super) async fn verified_activity(
+    connection: &mut sqlx::SqliteConnection,
+    assignment: &str,
+    after: i64,
+    limit: u32,
+    bound: i64,
+) -> Result<Vec<ActivityRecord>, AuditStoreError> {
+    read_selected_activity(connection, assignment, after, limit, bound, true).await
 }

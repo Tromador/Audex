@@ -81,6 +81,26 @@ fn native_roster_uses_three_distinct_durable_sessions_without_sibling_input() ->
                 store.execution(&attempt.operation_id).await?
             );
         }
+        // Publication consumes the same retained native contributions without
+        // issuing another provider request or mixing reviewer attribution.
+        controller.tick().await?;
+        let published = read(&controller, &id).await;
+        assert_eq!(published["phase"], "completed");
+        let report = published["report"]
+            .as_str()
+            .expect("published native report");
+        assert!(report.contains("Report format: `3`"));
+        let mut previous = 0;
+        for (ordinal, attempt) in complete.iter().enumerate() {
+            let position = report
+                .find(&format!("PRIVATE_REVIEW_{ordinal}"))
+                .expect("own summary");
+            assert!(position > previous);
+            previous = position;
+            assert!(report.contains(&attempt.assignment_id));
+            assert!(report.contains(attempt.result_digest.as_ref().expect("canonical digest")));
+        }
+        assert_eq!(server.received_requests().await.expect("requests").len(), 3);
         for thread in sessions {
             threads
                 .get_thread(ThreadId::from_string(&thread)?)

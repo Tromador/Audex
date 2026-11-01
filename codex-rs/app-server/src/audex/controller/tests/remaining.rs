@@ -278,8 +278,12 @@ async fn recovery_backoff_and_progress_deduplication_do_not_delay_explicit_cance
         .await
         .expect("durable cancel");
     scheduled_tick(&controller).await?;
-    assert_eq!(fake.observations.load(Ordering::SeqCst), count + 1);
+    assert_eq!(fake.observations.load(Ordering::SeqCst), count);
     assert_eq!(fake.starts.load(Ordering::SeqCst), 1);
-    assert!(store.load_run(&id).await?.observation_pending);
+    assert!(!store.load_run(&id).await?.observation_pending);
+    assert_eq!(
+        store.load_run(&id).await?.outcome.as_deref(),
+        Some("aborted_by_operator")
+    );
     Ok(())
 }

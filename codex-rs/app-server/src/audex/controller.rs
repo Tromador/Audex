@@ -397,18 +397,22 @@ impl AuditController {
                 .into())
             }
             ClientRequest::AuditCancel { params, .. } => {
-                let _gate = self.gate.lock().await;
-                let store = self.store().await?;
-                let run = store.load_run(&params.run_id).await?;
-                if !terminal(run.phase) && run.phase != RunPhase::Reporting {
-                    store.request_cancel(&run.run_id, run.revision).await?;
-                    // Only the worker interrupts, after durable intent has committed.
-                    self.wake.notify_one();
-                }
-                Ok(AuditCancelResponse {
-                    run: self.view(&params.run_id).await?,
-                }
-                .into())
+                self.abort_audit(&params.run_id).await?;
+                // A pending stop acknowledgement must not depend on opening
+                // result/report artefacts. Read/follow verifies publication later.
+                let summary = self.summary(&params.run_id).await?;
+                let run = if matches!(
+                    summary.phase,
+                    AuditRunPhase::Completed
+                        | AuditRunPhase::CompletedWithFailures
+                        | AuditRunPhase::Failed
+                        | AuditRunPhase::Cancelled
+                ) {
+                    self.view(&params.run_id).await?
+                } else {
+                    summary
+                };
+                Ok(AuditCancelResponse { run }.into())
             }
             ClientRequest::AuditAttempts { params, .. } => {
                 Ok(self.attempt_views(&params.run_id).await?.into())
@@ -738,6 +742,10 @@ impl AuditController {
         if terminal(run.phase) {
             return Ok(());
         }
+        if run.phase == RunPhase::Reporting {
+            store.publish_report(id, run.revision).await?;
+            return self.progress(id).await;
+        }
         let capture_state = store.capture_state(&run.assignment_id).await?;
         if capture_state.disposition != "active" {
             return Ok(());
@@ -760,10 +768,6 @@ impl AuditController {
                     .await?;
                 return self.progress(id).await;
             }
-        }
-        if run.phase == RunPhase::Reporting {
-            store.publish_report(id, run.revision).await?;
-            return self.progress(id).await;
         }
         if run.operation_state == OperationState::Planned
             && run.control_intent == "cancel_requested"

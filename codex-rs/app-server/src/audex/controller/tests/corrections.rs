@@ -11,8 +11,8 @@ async fn release(
 }
 
 #[tokio::test]
-async fn unresolved_execution_requires_explicit_release_and_retains_late_completion()
--> anyhow::Result<()> {
+async fn audit_abort_releases_uncertain_capacity_and_excludes_late_completion() -> anyhow::Result<()>
+{
     let temp = tempfile::tempdir()?;
     let (controller, fake, _) = fixture(&temp).await;
     let first = start(&controller, "lost-runtime").await;
@@ -32,8 +32,8 @@ async fn unresolved_execution_requires_explicit_release_and_retains_late_complet
     controller.drive(&first).await?;
     let unresolved = store.load_run(&first).await?;
     assert_eq!(unresolved.operation_state, OperationState::Accepted);
-    assert!(unresolved.observation_pending);
-    assert!(!unresolved.capacity_released);
+    assert!(!unresolved.observation_pending);
+    assert!(unresolved.capacity_released);
     let second = start(&controller, "new-independent-run").await;
     sqlx::query("UPDATE operations SET lease_expires_at_ms=0 WHERE id=?")
         .bind(&original.operation_id)
@@ -42,8 +42,8 @@ async fn unresolved_execution_requires_explicit_release_and_retains_late_complet
     controller.drive(&second).await?;
     assert_eq!(
         fake.starts.load(Ordering::SeqCst),
-        1,
-        "cancellation and missing runtime retain capacity"
+        2,
+        "Abort releases reviewer scheduling capacity without remote-stop proof"
     );
     assert!(
         release(&controller, &first, unresolved.revision, false)
@@ -57,13 +57,13 @@ async fn unresolved_execution_requires_explicit_release_and_retains_late_complet
     );
     assert_eq!(a.expect("release"), b.expect("idempotent release"));
     let released = store.load_run(&first).await?;
-    assert_eq!(released.revision, unresolved.revision + 1);
+    assert_eq!(released.revision, unresolved.revision);
     assert_eq!(released.operation_state, unresolved.operation_state);
     assert_eq!(released.assignment_state, unresolved.assignment_state);
-    assert!(released.capacity_released && released.observation_pending);
+    assert!(released.capacity_released && !released.observation_pending);
     controller.drive(&second).await?;
     assert_eq!(fake.starts.load(Ordering::SeqCst), 2);
-    // A successful observation clears health only, never the permanent capacity fence.
+    // A late observation cannot undo Abort finality or the permanent capacity fence.
     let snapshot = controller
         .snapshots()
         .open(&SnapshotId::parse(released.snapshot_id.clone())?)
@@ -89,7 +89,7 @@ async fn unresolved_execution_requires_explicit_release_and_retains_late_complet
             )
             .await?
     );
-    // The original result is collected even with a newer reviewer already running.
+    // Post-Abort completion remains operational history and cannot contribute.
     fake.work
         .lock()
         .expect("work")
@@ -100,7 +100,7 @@ async fn unresolved_execution_requires_explicit_release_and_retains_late_complet
     );
     controller.drive(&first).await?;
     controller.drive(&first).await?;
-    assert_eq!(store.load_run(&first).await?.phase, RunPhase::Completed);
+    assert_eq!(store.load_run(&first).await?.phase, RunPhase::Cancelled);
     assert!(store.load_run(&first).await?.capacity_released);
     assert_eq!(
         store.load_run(&second).await?.operation_state,
@@ -237,6 +237,8 @@ async fn completion_before_release_preserves_terminal_outcome_without_releasing_
             .await
             .is_err()
     );
+    fake.replace(&run.operation_id, WorkState::Completed(empty_result(&run)));
+    controller.drive(&id).await?; // Completed acceptance precedes Abort.
     api(&controller, "audit/cancel", json!({"runId":id}))
         .await
         .expect("cancel intent");
@@ -244,7 +246,8 @@ async fn completion_before_release_preserves_terminal_outcome_without_releasing_
     fake.replace(&run.operation_id, WorkState::Completed(empty_result(&run)));
     controller.drive(&id).await?;
     let completed = store.load_run(&id).await?;
-    assert_eq!(completed.phase, RunPhase::Reporting);
+    assert_eq!(completed.phase, RunPhase::Cancelled);
+    assert_eq!(completed.assignment_state, AssignmentState::Succeeded);
     release(&controller, &id, consent.revision, true)
         .await
         .expect("completion supersedes release");
@@ -253,13 +256,13 @@ async fn completion_before_release_preserves_terminal_outcome_without_releasing_
     assert!(!after.capacity_released);
     assert!(!after.observation_pending);
     controller.drive(&id).await?;
-    assert_eq!(store.load_run(&id).await?.phase, RunPhase::Completed);
+    assert_eq!(store.load_run(&id).await?.phase, RunPhase::Cancelled);
     assert_eq!(fake.starts.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
 #[tokio::test]
-async fn release_while_completion_observation_is_suspended_retains_both_audits()
+async fn abort_while_interruption_is_suspended_releases_capacity_and_retains_both_audits()
 -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let (controller, fake, _) = fixture(&temp).await;
@@ -270,12 +273,12 @@ async fn release_while_completion_observation_is_suspended_retains_both_audits()
     store
         .record_observation_issue(&run.operation_id, run.attempt_revision, "lost observation")
         .await?;
+    fake.pause_interrupt.store(true, Ordering::SeqCst);
     api(&controller, "audit/cancel", json!({"runId":id}))
         .await
         .expect("cancel");
     let waiting = store.load_run(&id).await?;
     fake.replace(&run.operation_id, WorkState::Completed(empty_result(&run)));
-    fake.pause_interrupt.store(true, Ordering::SeqCst);
     let (driver, run_id) = (controller.clone(), id.clone());
     let task = tokio::spawn(async move { driver.drive(&run_id).await });
     fake.interrupt_entered.notified().await;
@@ -287,14 +290,14 @@ async fn release_while_completion_observation_is_suspended_retains_both_audits()
     fake.interrupt_release.notify_one();
     task.await??;
     controller.drive(&id).await?;
-    assert_eq!(store.load_run(&id).await?.phase, RunPhase::Completed);
+    assert_eq!(store.load_run(&id).await?.phase, RunPhase::Cancelled);
     assert!(store.load_run(&id).await?.capacity_released);
     assert_eq!(
         store.load_run(&next).await?.operation_state,
         OperationState::Accepted
     );
     assert_eq!(fake.starts.load(Ordering::SeqCst), 2);
-    // Completion first is also safe: release becomes a no-op, never a new state.
+    // A legacy release after publication remains an idempotent no-op.
     let completed = store.load_run(&id).await?;
     release(&controller, &id, waiting.revision, true)
         .await
@@ -314,6 +317,7 @@ async fn stalled_released_observation_cannot_permanently_block_worker_dispatch()
     let run = store.load_run(&id).await?;
     fake.work.lock().expect("work").remove(&run.operation_id);
     controller.drive(&id).await?;
+    fake.pause_interrupt.store(true, Ordering::SeqCst);
     api(&controller, "audit/cancel", json!({"runId":id}))
         .await
         .expect("cancel");
@@ -322,7 +326,6 @@ async fn stalled_released_observation_cannot_permanently_block_worker_dispatch()
         .await
         .expect("release");
     let next = start(&controller, "after-stalled-observer").await;
-    fake.pause_interrupt.store(true, Ordering::SeqCst);
     let driver = controller.clone();
     let task = tokio::spawn(async move { driver.tick().await });
     fake.interrupt_entered.notified().await;
@@ -353,7 +356,7 @@ async fn stalled_released_observation_cannot_permanently_block_worker_dispatch()
     );
     let original = store.load_run(&id).await?;
     assert_eq!(original.operation_state, OperationState::Accepted);
-    assert!(original.capacity_released && original.observation_pending);
+    assert!(original.capacity_released && !original.observation_pending);
     assert_eq!(fake.starts.load(Ordering::SeqCst), 2);
     Ok(())
 }
@@ -394,7 +397,7 @@ async fn integrity_failure_does_not_terminate_live_execution_and_cancel_remains_
     assert_eq!(
         store.load_run(&id).await?.phase,
         RunPhase::Cancelled,
-        "only positive interruption ends execution"
+        "Abort publication does not wait for execution termination"
     );
     assert_eq!(fake.starts.load(Ordering::SeqCst), 1);
     Ok(())

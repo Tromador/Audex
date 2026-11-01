@@ -74,6 +74,7 @@ fn source_and_recovery_forms_parse_without_ambient_options() {
         vec!["audit", "read", "run-1", "--follow"],
         vec!["audit", "list", "--limit", "10", "--after", "run-1"],
         vec!["audit", "cancel", "run-1"],
+        vec!["audit", "abort", "run-1"],
         vec![
             "audit",
             "release-slot",
@@ -203,6 +204,7 @@ fn audit_protocol_requires_an_explicit_matching_version_even_when_empty() {
     assert!(require_protocol_version(AUDIT_PROTOCOL_VERSION).is_ok());
     assert!(require_protocol_version(0).is_err());
     assert!(require_protocol_version(AUDIT_PROTOCOL_VERSION + 1).is_err());
+    assert!(require_protocol_version(AUDIT_PROTOCOL_VERSION - 1).is_err());
     assert!(
         serde_json::from_value::<AuditListResponse>(serde_json::json!({
             "runs":[], "nextCursor":null,
@@ -210,4 +212,53 @@ fn audit_protocol_requires_an_explicit_matching_version_even_when_empty() {
         .is_err(),
         "an empty legacy list must not bypass compatibility preflight"
     );
+}
+
+#[test]
+fn published_aggregate_outcomes_override_individual_uncertainty() {
+    let mut view = AuditRunView {
+        run_id: "run".into(),
+        snapshot_id: "snapshot".into(),
+        assignment_id: "assignment".into(),
+        phase: AuditRunPhase::Reporting,
+        operation_state: AuditOperationState::Unknown,
+        observation_pending: true,
+        capacity_released: true,
+        revision: 9,
+        cancellation_requested: true,
+        outcome: None,
+        raw_result: None,
+        report: None,
+    };
+    assert_eq!(
+        terminal_code(&view),
+        None,
+        "Abort acknowledgement still awaits publication"
+    );
+    view.phase = AuditRunPhase::Cancelled;
+    view.report = Some("# Aborted report".into());
+    view.outcome = Some("aborted_by_operator".into());
+    assert_eq!(terminal_code(&view), Some(6));
+    view.outcome = Some("no_completed_review".into());
+    assert_eq!(terminal_code(&view), Some(3));
+    view.phase = AuditRunPhase::Completed;
+    view.outcome = Some("success".into());
+    assert_eq!(terminal_code(&view), Some(0));
+    for state in [
+        AuditOperationState::Unknown,
+        AuditOperationState::Failed,
+        AuditOperationState::Planned,
+    ] {
+        view.phase = AuditRunPhase::Reviewing;
+        view.operation_state = state;
+        view.report = None;
+        view.outcome = None;
+        assert_eq!(terminal_code(&view), None, "wanted work is pending");
+    }
+    let abort = AuditCommand::try_parse_from(["audit", "abort", "target-run"]).expect("Abort");
+    let alias = AuditCommand::try_parse_from(["audit", "cancel", "target-run"])
+        .expect("compatibility alias");
+    for command in [abort, alias] {
+        assert!(matches!(command.action,Some(Action::Abort { run_id }) if run_id=="target-run"));
+    }
 }

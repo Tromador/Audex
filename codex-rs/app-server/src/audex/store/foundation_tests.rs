@@ -37,7 +37,7 @@ async fn terminal_legacy_report_bytes_and_identity_survive_upgrade() -> anyhow::
     let store = AuditStore::open(root.clone()).await?;
     assert_eq!(
         store.applied_migrations().await?,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     );
     let record = store.load_run("legacy").await?;
     assert_eq!(record.run_id, "legacy");
@@ -207,5 +207,88 @@ async fn slice_two_upgrade_preserves_live_identity_without_inventing_request_adm
             .await?
             .is_empty()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_legacy_audit_cancel_recovers_abort_without_reopening_terminal_history()
+-> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = AbsolutePathBuf::from_absolute_path(temp.path())?;
+    let pool = legacy(&root, "completed").await?;
+    Migrator::with_migrations(
+        AUDEX_MIGRATOR
+            .iter()
+            .filter(|m| m.version <= 10)
+            .cloned()
+            .collect(),
+    )
+    .run(&pool)
+    .await?;
+    sqlx::query("UPDATE audit_runs SET phase='reviewing',control_intent='cancel_requested',stop_generation=1 WHERE id='legacy'").execute(&pool).await?;
+    sqlx::query("UPDATE reviewer_assignments SET state='running' WHERE id='legacy-assignment'")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE operations SET state='accepted',submission_boundary='accepted' WHERE id='legacy-operation'").execute(&pool).await?;
+    sqlx::query("UPDATE audit_attempts SET capture_started=1,capture_finished=0,capture_gap=NULL WHERE assignment_id='legacy-assignment'").execute(&pool).await?;
+    pool.close().await;
+    let store = AuditStore::open(root).await?;
+    let run = store.load_run_metadata("legacy").await?;
+    assert_eq!(run.phase, RunPhase::Reporting);
+    assert!(run.capacity_released);
+    let state = store.capture_state("legacy-assignment").await?;
+    assert_eq!(state.disposition, "cancelled");
+    assert_eq!(state.cutoff, Some(0));
+    assert!(
+        state
+            .gap
+            .as_deref()
+            .is_some_and(|s| s.contains("collector unavailable"))
+    );
+    let input = store.freeze_report("legacy").await?;
+    assert_eq!(input.outcome, "aborted_by_operator");
+    store.publish_report("legacy", run.revision).await?;
+    assert_eq!(store.load_run("legacy").await?.phase, RunPhase::Cancelled);
+    Ok(())
+}
+
+#[tokio::test]
+async fn historical_terminal_unknown_is_not_reopened_by_controls_or_abort() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = AbsolutePathBuf::from_absolute_path(temp.path())?;
+    let pool = legacy(&root, "failed").await?;
+    sqlx::query("UPDATE reviewer_assignments SET state='unknown' WHERE id='legacy-assignment'")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE operations SET state='unknown' WHERE id='legacy-operation'")
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    let store = AuditStore::open(root).await?;
+    let before = store.load_run_metadata("legacy").await?;
+    for (key, action) in [
+        ("retry", attempts::AttemptAction::Retry),
+        ("cancel", attempts::AttemptAction::Cancel),
+        ("ignore", attempts::AttemptAction::Ignore),
+    ] {
+        let request = attempts::ControlRequest {
+            run_id: "legacy".to_owned(),
+            assignment_id: "legacy-assignment".to_owned(),
+            action_key: key.to_owned(),
+            action,
+            reason: "fixture decision".to_owned(),
+            authorise_retry: true,
+            acknowledge_possible_overlap: true,
+        };
+        assert!(store.control_attempt(&request, None).await.is_err());
+    }
+    store.abort_run("legacy", &[]).await?;
+    assert!(
+        store
+            .publish_report("legacy", before.revision)
+            .await
+            .is_err()
+    );
+    assert_eq!(store.load_run_metadata("legacy").await?, before);
     Ok(())
 }

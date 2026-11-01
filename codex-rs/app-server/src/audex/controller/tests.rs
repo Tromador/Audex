@@ -6,6 +6,7 @@ mod corrections;
 mod execution;
 mod foundations;
 mod remaining;
+mod reporting;
 mod residual;
 use codex_models_manager::{ModelOrigin, manager::StaticModelsManager};
 use codex_protocol::openai_models::ModelsResponse;
@@ -292,7 +293,7 @@ async fn typed_api_capture_disconnect_notifications_and_reporting() {
 }
 
 #[tokio::test]
-async fn cancellation_is_durable_and_completion_wins() {
+async fn audit_abort_is_durable_and_excludes_unaccepted_completion() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (controller, fake, _) = fixture(&temp).await;
     let id = start(&controller, "cancel-running").await;
@@ -317,7 +318,10 @@ async fn cancellation_is_durable_and_completion_wins() {
         .expect("cancel racing completion");
     controller.tick().await.expect("completion preserved");
     controller.tick().await.expect("report");
-    assert_eq!(read(&controller, &id).await["phase"], "completed");
+    assert_eq!(
+        read(&controller, &id).await["outcome"],
+        "aborted_by_operator"
+    );
 }
 
 #[tokio::test]
@@ -448,7 +452,7 @@ async fn crash_windows_use_evidence_without_replaying_dispatch() {
                 assert_eq!(view["phase"], "reviewing", "{mode}")
             }
             "terminal" => assert_eq!(view["phase"], "reporting"),
-            _ => assert_eq!(view["phase"], "failed", "{mode}"),
+            _ => assert_eq!(view["phase"], "reviewing", "{mode}"),
         }
         let recovered_run = recovered
             .store()
@@ -511,10 +515,7 @@ async fn malformed_results_no_redispatch_and_quiesce_blocks_new_work() {
     );
     controller.tick().await.expect("reject");
     controller.tick().await.expect("no retry");
-    assert_eq!(
-        read(&controller, &id).await["phase"],
-        "completed_with_failures"
-    );
+    assert_eq!(read(&controller, &id).await["phase"], "reviewing");
     assert_eq!(fake.starts.load(Ordering::SeqCst), 1);
     let invalid_id = start(&controller, "invalid-identities").await;
     controller.tick().await.expect("dispatch semantic case");
@@ -532,10 +533,7 @@ async fn malformed_results_no_redispatch_and_quiesce_blocks_new_work() {
     .expect("result");
     fake.replace(&invalid_run.operation_id, WorkState::Completed(raw));
     controller.tick().await.expect("semantic rejection");
-    assert_eq!(
-        read(&controller, &invalid_id).await["phase"],
-        "completed_with_failures"
-    );
+    assert_eq!(read(&controller, &invalid_id).await["phase"], "reviewing");
     assert_eq!(fake.starts.load(Ordering::SeqCst), 2);
     controller.quiesce().await;
     assert!(
@@ -746,11 +744,7 @@ async fn cancellation_commits_while_inspection_is_suspended() {
                 .drive(&id)
                 .await
                 .expect("reconcile current intent or report");
-            let expected = if outcome == "completed" {
-                "completed"
-            } else {
-                "cancelled"
-            };
+            let expected = "cancelled";
             assert_eq!(read(&controller, &id).await["phase"], expected);
         }
         assert_eq!(fake.starts.load(Ordering::SeqCst), 1, "{outcome}");
@@ -770,10 +764,10 @@ async fn suspended_interruption_does_not_block_cancel_or_regress_completed_work(
         .load_run(&id)
         .await
         .expect("run");
+    fake.pause_interrupt.store(true, Ordering::SeqCst);
     api(&controller, "audit/cancel", json!({"runId":id}))
         .await
         .expect("durable cancellation");
-    fake.pause_interrupt.store(true, Ordering::SeqCst);
     let worker = controller.clone();
     let interrupting_id = id.clone();
     let task = tokio::spawn(async move { worker.drive(&interrupting_id).await });
@@ -795,7 +789,7 @@ async fn suspended_interruption_does_not_block_cancel_or_regress_completed_work(
     controller.drive(&id).await.expect("concurrent completion");
     controller.drive(&id).await.expect("report");
     let completed = read(&controller, &id).await;
-    assert_eq!(completed["phase"], "completed");
+    assert_eq!(completed["outcome"], "aborted_by_operator");
     fake.interrupt_release.notify_one();
     task.await
         .expect("interrupter joined")

@@ -18,7 +18,7 @@ async fn read_attempt(daemon: &TestDaemon, run: &str, assignment: &str) -> Resul
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
-fn assistant_text(read: &Value) -> String {
+pub(super) fn assistant_text(read: &Value) -> String {
     read["entries"]
         .as_array()
         .expect("entries")
@@ -28,7 +28,7 @@ fn assistant_text(read: &Value) -> String {
         .collect()
 }
 
-async fn wait_text(
+pub(super) async fn wait_text(
     daemon: &TestDaemon,
     run: &str,
     assignment: &str,

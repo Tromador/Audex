@@ -10,6 +10,10 @@ mod follow_progress;
 #[path = "audit/attempt_controls.rs"]
 mod attempt_controls;
 
+#[cfg(target_os = "linux")]
+#[path = "audit/process_integration.rs"]
+mod process_integration;
+
 use anyhow::{Context, Result, ensure};
 use core_test_support::responses;
 use futures::{SinkExt, StreamExt};

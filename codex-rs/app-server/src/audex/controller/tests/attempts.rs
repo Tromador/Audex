@@ -57,7 +57,7 @@ pub(super) async fn capture(
     Ok(capture)
 }
 
-async fn delta(capture: &CaptureHandle, text: &str) {
+pub(super) async fn delta(capture: &CaptureHandle, text: &str) {
     capture
         .observe(&Event {
             id: "turn".to_owned(),
@@ -164,7 +164,10 @@ async fn cancel_and_ignore_preserve_buffered_prefix_without_waiting_for_stop_and
                 .attempt_by_assignment(&id, &peer.assignment_id)
                 .await?;
             assert_eq!(current.assignment_state, AssignmentState::Succeeded);
-            assert_eq!(current.revision, attempts[0].revision);
+            assert_eq!(
+                current.revision,
+                attempts[0].revision + i64::from(peer.reviewer_ordinal == 2)
+            );
         }
         let read = controller
             .read_attempt(AuditAttemptReadParams {

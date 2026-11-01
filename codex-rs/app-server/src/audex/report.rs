@@ -1,9 +1,11 @@
 use super::snapshot::manifest::sha256_hex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+pub(super) mod collection;
 
 pub(super) const REPORT_FORMAT_VERSION: u32 = 2;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub(super) struct ReportInput {
     pub run_id: String,
     pub snapshot_id: String,
@@ -12,7 +14,7 @@ pub(super) struct ReportInput {
     pub findings: Vec<ReportFinding>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub(super) struct ReportFinding {
     pub id: String,
     pub ordinal: i64,
@@ -26,7 +28,7 @@ pub(super) struct ReportFinding {
     pub evidence: Vec<ReportEvidence>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub(super) struct ReportEvidence {
     pub lines_verified: bool,
     pub ordinal: i64,

@@ -51,19 +51,6 @@ pub(super) async fn update_attempt_revision(
     Ok(())
 }
 
-pub(super) async fn single_reviewer(
-    connection: &mut sqlx::SqliteConnection,
-    run: &str,
-) -> Result<bool, AuditStoreError> {
-    Ok(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM audit_reviewers WHERE run_id=?")
-            .bind(run)
-            .fetch_one(connection)
-            .await?
-            == 1,
-    )
-}
-
 impl AuditStore {
     /// Commission the complete ordered roster atomically. This is a foundation
     /// boundary; public roster selection/report presentation is a later slice.

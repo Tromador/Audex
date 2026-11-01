@@ -45,6 +45,7 @@ async fn migration_keeps_legacy_submission_uncertainty_and_positive_evidence() -
         database_path: root.join(DATABASE_FILENAME).into_path_buf(),
         root,
         pool,
+        transition_barrier: Default::default(),
     };
     assert_eq!(
         store.submission_boundary("planned").await?,
