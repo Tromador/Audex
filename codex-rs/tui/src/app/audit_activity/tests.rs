@@ -410,3 +410,7 @@ async fn reconnect_discards_old_reader_pages_and_progress_wakes_without_revision
 
 #[path = "correction_tests.rs"]
 mod corrections;
+
+#[cfg(unix)]
+#[path = "qualification.rs"]
+mod qualification;
