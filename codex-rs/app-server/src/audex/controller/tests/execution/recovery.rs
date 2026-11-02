@@ -32,7 +32,7 @@ pub(super) async fn expire(controller: &AuditController, operation: &str) -> any
     Ok(())
 }
 
-async fn issue(
+pub(super) async fn issue(
     controller: &AuditController,
     operation: &str,
 ) -> anyhow::Result<(Option<String>, Option<String>)> {
@@ -143,12 +143,12 @@ fn startup_crash_windows_preserve_the_submission_boundary_without_resampling() -
             if boundary == SubmissionBoundary::Unsubmitted {
                 let retained = recovered.store().await?.load_run(&id).await?;
                 assert_eq!(retained.assignment_state, AssignmentState::Failed);
-                assert!(
-                    retained
-                        .outcome
-                        .expect("known local failure")
-                        .contains("interrupted_before_submission")
-                );
+                let (error, retry) = issue(&recovered, &run.operation_id).await?;
+                let diagnostic: Value =
+                    serde_json::from_str(error.as_deref().expect("known local failure"))?;
+                assert_eq!(diagnostic["stage"], "startup_recovery");
+                assert_eq!(diagnostic["cause"], "interrupted_before_submission");
+                assert_eq!(retry.as_deref(), Some("never_automatically_retry"));
             } else if submitted {
                 assert_eq!(finished(&recovered, &id).await["phase"], "completed");
             } else {
@@ -211,12 +211,12 @@ fn expired_startup_owner_cannot_cross_the_submission_marker() -> anyhow::Result<
         task.await??;
         let retained = controller.store().await?.load_run(&id).await?;
         assert_eq!(retained.assignment_state, AssignmentState::Failed);
-        assert!(
-            retained
-                .outcome
-                .expect("admission diagnosis")
-                .contains("submission_admission")
-        );
+        let (error, retry) = issue(&controller, &run.operation_id).await?;
+        let diagnostic: Value =
+            serde_json::from_str(error.as_deref().expect("admission diagnosis"))?;
+        assert_eq!(diagnostic["stage"], "submission_admission");
+        assert_eq!(diagnostic["cause"], "cancelled_expired_or_superseded");
+        assert_eq!(retry.as_deref(), Some("never_automatically_retry"));
         assert_eq!(
             controller
                 .store()
@@ -447,11 +447,7 @@ fn observation_errors_preserve_diagnostics_cancellation_and_the_original_sample(
                 }
             })
             .await?;
-            if cancel {
-                api(&controller, "audit/cancel", json!({"runId":id}))
-                    .await
-                    .expect("durable cancellation");
-            } else {
+            if !cancel {
                 wait_completed(&threads, execution_thread(&controller, &id).await).await?;
             }
             controller.drive(&id).await?;
@@ -464,20 +460,31 @@ fn observation_errors_preserve_diagnostics_cancellation_and_the_original_sample(
             assert!(!text.contains("sk-secret"));
             assert_eq!(retry.as_deref(), Some("observe_only"));
             assert_eq!(retained.phase, RunPhase::Reviewing);
-            assert_eq!(
-                retained.control_intent,
-                if cancel { "cancel_requested" } else { "active" }
-            );
+            assert_eq!(retained.control_intent, "active");
+            assert!(retained.observation_pending);
             controller.drive(&id).await?;
-            assert_eq!(
-                controller.store().await?.load_run(&id).await?.revision,
-                retained.revision
-            );
-            fail.store(false, Ordering::SeqCst);
-            assert_eq!(
-                finished(&controller, &id).await["phase"],
-                if cancel { "cancelled" } else { "completed" }
-            );
+            let repeated = controller.store().await?.load_run(&id).await?;
+            assert_eq!(repeated.revision, retained.revision);
+            assert_eq!(repeated.attempt_revision, retained.attempt_revision);
+            if cancel {
+                api(&controller, "audit/cancel", json!({"runId":id}))
+                    .await
+                    .expect("durable cancellation");
+                // Abort publishes locally even while history reads still fail.
+                assert!(fail.load(Ordering::SeqCst));
+                assert_eq!(finished(&controller, &id).await["phase"], "cancelled");
+                let aborted = controller.store().await?.load_run(&id).await?;
+                assert_eq!(aborted.control_intent, "cancel_requested");
+                assert_eq!(aborted.outcome.as_deref(), Some("aborted_by_operator"));
+                assert!(aborted.capacity_released);
+                assert_eq!(
+                    issue(&controller, &run.operation_id).await?,
+                    (Some(text), retry)
+                );
+            } else {
+                fail.store(false, Ordering::SeqCst);
+                assert_eq!(finished(&controller, &id).await["phase"], "completed");
+            }
             for _ in 0..3 {
                 controller.tick().await?;
             }

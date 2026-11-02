@@ -101,7 +101,27 @@ async fn competing_store_admission_and_stop_have_one_durable_order_without_sibli
                 .attempt_by_assignment(&id, &peer.assignment_id)
                 .await?;
             assert_eq!(current.assignment_state, AssignmentState::Succeeded);
-            assert_eq!(current.revision, peer.revision);
+            assert_eq!(current.attempt_revision, peer.attempt_revision + 1);
+            let collection_ready = peer.reviewer_ordinal == 2;
+            assert_eq!(
+                current.revision,
+                peer.revision + i64::from(collection_ready)
+            );
+            assert_eq!(current.collection_ready, collection_ready);
+            assert_eq!(
+                current.phase,
+                if collection_ready {
+                    RunPhase::Reporting
+                } else {
+                    RunPhase::Reviewing
+                }
+            );
+            if !collection_ready {
+                let sibling = store
+                    .attempt_by_assignment(&id, &attempts[2].assignment_id)
+                    .await?;
+                assert_eq!(sibling.attempt_revision, attempts[2].attempt_revision);
+            }
         }
     }
     Ok(())
@@ -348,10 +368,27 @@ async fn committed_run_stop_is_not_relabelled_failed_by_late_admission_refusal()
     let (_temp, controller, _fake, id, attempts) = super::attempts::setup().await?;
     let store = controller.store().await?;
     store.request_cancel(&id, attempts[0].revision).await?;
+    assert!(matches!(
+        store
+            .finish_operation(
+                &attempts[0].operation_id,
+                attempts[0].attempt_revision,
+                AssignmentState::Failed,
+                "generation admission refused",
+            )
+            .await,
+        Err(crate::audex::store::AuditStoreError::RevisionConflict { .. })
+    ));
+    let stopped = store
+        .attempt_by_assignment(&id, &attempts[0].assignment_id)
+        .await?;
+    assert_eq!(stopped.attempt_revision, attempts[0].attempt_revision + 1);
+    assert_eq!(stopped.control_intent, "cancel_requested");
+    assert_eq!(stopped.phase, RunPhase::Reporting);
     store
         .finish_operation(
-            &attempts[0].operation_id,
-            attempts[0].attempt_revision,
+            &stopped.operation_id,
+            stopped.attempt_revision,
             AssignmentState::Failed,
             "generation admission refused",
         )

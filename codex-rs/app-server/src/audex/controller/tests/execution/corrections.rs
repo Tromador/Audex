@@ -195,12 +195,12 @@ fn missing_session_metadata_is_pending_but_foreign_metadata_is_terminal_unknown(
             if foreign {
                 assert_eq!(observed.operation_state, OperationState::Unknown);
                 assert!(!observed.observation_pending);
-                assert!(
-                    observed
-                        .outcome
-                        .expect("diagnostic")
-                        .contains("foreign_persisted_thread")
-                );
+                let (error, retry) = super::recovery::issue(&controller, &run.operation_id).await?;
+                let diagnostic: Value =
+                    serde_json::from_str(error.as_deref().expect("diagnostic"))?;
+                assert_eq!(diagnostic["stage"], "history_identity");
+                assert_eq!(diagnostic["cause"], "foreign_persisted_thread");
+                assert_eq!(retry.as_deref(), Some("never_automatically_retry"));
             } else {
                 assert_eq!(observed.operation_state, OperationState::Accepted);
                 assert!(observed.observation_pending);

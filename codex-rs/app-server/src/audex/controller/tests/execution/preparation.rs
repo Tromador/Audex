@@ -279,6 +279,8 @@ fn preparation_renews_only_its_unexpired_lease_and_cancellation_fences_it() -> a
         gate.notify_one();
         task.await??;
         assert!(threads.list_thread_ids().await.is_empty());
+        assert_eq!(store.load_run(&id).await?.phase, RunPhase::Reporting);
+        assert_eq!(finished(&controller, &id).await["phase"], "cancelled");
         assert_eq!(store.load_run(&id).await?.phase, RunPhase::Cancelled);
         assert!(
             server

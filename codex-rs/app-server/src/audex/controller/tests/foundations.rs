@@ -133,6 +133,7 @@ async fn three_attempts_progress_without_sibling_revision_invalidation_and_recon
         receipt: "second".to_owned(),
         state: WorkState::Failed("fake failure".to_owned()),
     };
+    attest_fake_completion(&store, &running[0]).await?;
     let (a, b, c) = tokio::join!(
         controller.reconcile_observation(&running[0], Some(&snapshot), None, first),
         controller.reconcile_observation(&running[1], Some(&snapshot), None, second),

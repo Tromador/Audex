@@ -415,13 +415,31 @@ fn invalid_results_and_provider_failure_do_not_redispatch() -> anyhow::Result<()
                     .await,
                 )
             };
+            let failed = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    controller.drive(&id).await?;
+                    let current = controller.store().await?.load_run(&id).await?;
+                    if current.assignment_state == AssignmentState::Failed {
+                        return anyhow::Ok(current);
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("failed attempt")?;
+            assert_eq!(failed.operation_state, OperationState::Failed, "{case}");
+            assert_eq!(failed.phase, RunPhase::Reviewing, "{case}");
+            assert!(!failed.collection_ready && failed.report.is_none());
+            assert!(failed.outcome.is_none() && failed.findings.is_empty());
+            let (error, retry) = recovery::issue(&controller, &run.operation_id).await?;
+            assert!(!error.expect("failure diagnostic").is_empty());
             assert_eq!(
-                finished(&controller, &id).await["phase"],
-                if case == "provider_failure" {
-                    "failed"
+                retry.as_deref(),
+                Some(if case == "provider_failure" {
+                    "never_automatically_retry"
                 } else {
-                    "completed_with_failures"
-                },
+                    "non_retryable_invalid_result"
+                }),
                 "{case}"
             );
             for _ in 0..3 {
@@ -763,10 +781,20 @@ fn cancellation_or_terminal_classification_during_real_startup_prevents_sampling
             }
             release.notify_one();
             task.await??;
-            assert_eq!(
-                finished(&controller, &id).await["phase"],
-                if cancellation { "cancelled" } else { "failed" }
-            );
+            if cancellation {
+                assert_eq!(finished(&controller, &id).await["phase"], "cancelled");
+            } else {
+                controller.drive(&id).await?;
+                let unknown = controller.store().await?.load_run(&id).await?;
+                assert_eq!(unknown.assignment_state, AssignmentState::Unknown);
+                assert_eq!(unknown.operation_state, OperationState::Unknown);
+                assert_eq!(unknown.phase, RunPhase::Reviewing);
+                assert!(!unknown.observation_pending && !unknown.collection_ready);
+                assert!(unknown.outcome.is_none() && unknown.report.is_none());
+                let (error, retry) = recovery::issue(&controller, &unknown.operation_id).await?;
+                assert_eq!(error.as_deref(), Some("acceptance_or_outcome_unknown"));
+                assert_eq!(retry.as_deref(), Some("never_automatically_retry"));
+            }
             assert!(
                 server
                     .received_requests()
