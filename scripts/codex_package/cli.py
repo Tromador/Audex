@@ -193,6 +193,10 @@ def assemble_package(args: argparse.Namespace) -> Path:
     """Build the directory before optional downstream additions and archiving."""
     spec = TARGET_SPECS[getattr(args, "target", None) or default_target()]
     variant = PACKAGE_VARIANTS[args.variant]
+    if variant.name == "audex" and args.rg_bin is None:
+        raise RuntimeError(
+            "Audex packaging requires an explicit local --rg-bin; automatic downloads are disabled."
+        )
     package_dir_arg = getattr(args, "package_dir", None)
     package_dir = (
         package_dir_arg.resolve()

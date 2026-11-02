@@ -28,6 +28,7 @@ def resolve_codex_v8_cargo_env(
     *,
     environ: Mapping[str, str] | None = None,
     cache_root: Path | None = None,
+    offline: bool = False,
 ) -> dict[str, str]:
     environ = os.environ if environ is None else environ
     if environ.get("V8_FROM_SOURCE") in {"true", "1", "yes"}:
@@ -42,7 +43,7 @@ def resolve_codex_v8_cargo_env(
             "Cargo package builds need RUSTY_V8_ARCHIVE and RUSTY_V8_SRC_BINDING_PATH set together."
         )
 
-    artifacts = fetch_codex_v8_artifacts(spec, cache_root=cache_root)
+    artifacts = fetch_codex_v8_artifacts(spec, cache_root=cache_root, offline=offline)
     return {
         "RUSTY_V8_ARCHIVE": str(artifacts.archive),
         "RUSTY_V8_SRC_BINDING_PATH": str(artifacts.binding),
@@ -54,6 +55,7 @@ def fetch_codex_v8_artifacts(
     *,
     version: str | None = None,
     cache_root: Path | None = None,
+    offline: bool = False,
 ) -> RustyV8ArtifactPair:
     version = version or resolved_v8_crate_version()
     release_url = (
@@ -85,10 +87,16 @@ def fetch_codex_v8_artifacts(
     except (OSError, RuntimeError, ValueError):
         pass
     if not cached_manifest_valid:
+        if offline:
+            raise RuntimeError(
+                "Audex offline package build requires cached, verified V8 inputs or explicit local V8 overrides."
+            )
         download_file(f"{release_url}/{checksums.name}", checksums)
         verify_release_checksum_manifest(checksums, version=version)
     expected_checksums = load_checksums(checksums, {archive.name, binding.name})
     for artifact in [archive, binding]:
+        if offline and not has_checksum(artifact, expected_checksums[artifact.name]):
+            raise RuntimeError(f"Missing or invalid offline V8 input: {artifact}")
         ensure_valid_artifact(
             artifact,
             expected_checksums[artifact.name],

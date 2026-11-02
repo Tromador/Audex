@@ -16,6 +16,9 @@ use tokio::sync::{Semaphore, mpsc};
 #[path = "../../../../cli/tests/app_server_daemon/support.rs"]
 mod support;
 
+#[path = "qualification_diagnostics.rs"]
+mod diagnostics;
+
 const SOURCE: &str = "fn example() { /* sealed source */ }\n";
 const BRIEF: &str = "S5_SHARED_BRIEF";
 const CONTEXT: &str = "S5_EXPLICIT_CONTEXT";
@@ -31,7 +34,7 @@ fn evidence(name: &str, value: &Value) {
     .unwrap();
 }
 fn cli(daemon: &support::TestDaemon, args: &[&str], code: i32) -> Output {
-    let output = daemon.command().arg("audit").args(args).output().unwrap();
+    let output = diagnostics::cli(daemon, args, code);
     assert_eq!(
         output.status.code(),
         Some(code),
@@ -401,6 +404,9 @@ async fn candidate(home: &Path, run: &str) -> Result<(Value, Vec<u8>)> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn whole_cycle_cli_tui_contextual_controls_and_reporting_recover_without_replay() -> Result<()>
 {
+    // Construct heavyweight UI futures outside this long test body's poll frame.
+    use crate::boxed_future;
+
     let provider = Provider::start().await?;
     let parent = PathBuf::from(std::env::var_os("AUDEX_TEST_TMPDIR").unwrap());
     let daemon =
@@ -436,7 +442,7 @@ stream_max_retries=0
     daemon
         .lifecycle("start")
         .map_err(|e| color_eyre::eyre::eyre!("{e:#}"))?;
-    let mut ui = Ui::connect(home).await?;
+    let mut ui = boxed_future!(Ui::connect(home)).await?;
     let source = home.join("example.rs");
     let context = home.join("guidance.md");
     let start_args = [
@@ -469,21 +475,16 @@ stream_max_retries=0
     }
     assert_eq!(provider.count(), 6);
     std::fs::write(&source, "ALTERED_AFTER_SNAPSHOT")?;
-    ui.command(format!("reviewers {run}")).await?;
-    let listed = ui
-        .event(|e| matches!(e, AppEvent::AuditAttemptsLoaded { .. }))
-        .await?;
+    boxed_future!(ui.command(format!("reviewers {run}"))).await?;
+    let listed =
+        boxed_future!(ui.event(|e| matches!(e, AppEvent::AuditAttemptsLoaded { .. }))).await?;
     assert!(matches!(&listed,AppEvent::AuditAttemptsLoaded{attempts,..} if attempts.len()==3));
-    ui.dispatch(listed).await?;
-    let cancel = ui
-        .main_control(&run, &targets[1].assignment_id, "cancel")
-        .await?;
+    boxed_future!(ui.dispatch(listed)).await?;
+    let cancel = boxed_future!(ui.main_control(&run, &targets[1].assignment_id, "cancel")).await?;
     assert_eq!(cancel.target.assignment_id, targets[1].assignment_id);
-    ui.yes().await?;
-    let opened = ui
-        .event(|e| matches!(e, AppEvent::AuditOpened { .. }))
-        .await?;
-    ui.dispatch(opened).await?;
+    boxed_future!(ui.yes()).await?;
+    let opened = boxed_future!(ui.event(|e| matches!(e, AppEvent::AuditOpened { .. }))).await?;
+    boxed_future!(ui.dispatch(opened)).await?;
     let cancelled = ui
         .audits()
         .read_attempt(AuditAttemptReadParams {
@@ -494,10 +495,10 @@ stream_max_retries=0
         })
         .await?;
     assert!(cancelled.attempt.retry_eligible);
-    ui.viewer(cancelled.attempt.clone()).await?;
-    let retry = ui.contextual('R').await?;
+    boxed_future!(ui.viewer(cancelled.attempt.clone())).await?;
+    let retry = boxed_future!(ui.contextual('R')).await?;
     assert!(retry.disclosure().contains("additional charges"));
-    ui.yes().await?;
+    boxed_future!(ui.yes()).await?;
     let after_retry = wait_attempts(&ui.audits(), &run, |items| {
         items.len() == 4
             && items.iter().any(|a| {
@@ -535,17 +536,17 @@ stream_max_retries=0
     assert!(String::from_utf8_lossy(&replay.stdout).contains(&replacement.assignment_id));
     assert_eq!(ui.audits().attempts(run.clone()).await?.attempts.len(), 4);
     assert_eq!(provider.count(), 8);
-    ui.finished(true).await?;
-    ui.close_viewer().await?;
-    ui.viewer(targets[2].clone()).await?;
+    boxed_future!(ui.finished(true)).await?;
+    boxed_future!(ui.close_viewer()).await?;
+    boxed_future!(ui.viewer(targets[2].clone())).await?;
     let actions_before = sql(
         home,
         "SELECT count(*) AS n FROM audit_attempt_actions",
         json!([]),
     );
-    ui.contextual('C').await?;
-    ui.key(KeyCode::Enter).await?;
-    ui.finished(false).await?;
+    boxed_future!(ui.contextual('C')).await?;
+    boxed_future!(ui.key(KeyCode::Enter)).await?;
+    boxed_future!(ui.finished(false)).await?;
     assert_eq!(
         sql(
             home,
@@ -554,9 +555,9 @@ stream_max_retries=0
         ),
         actions_before
     );
-    ui.contextual('C').await?;
-    ui.yes().await?;
-    ui.finished(true).await?;
+    boxed_future!(ui.contextual('C')).await?;
+    boxed_future!(ui.yes()).await?;
+    boxed_future!(ui.finished(true)).await?;
     let stopped = ui
         .audits()
         .read_attempt(AuditAttemptReadParams {
@@ -567,27 +568,25 @@ stream_max_retries=0
         })
         .await?;
     assert!(stopped.attempt.retry_eligible);
-    ui.close_viewer().await?;
-    ui.viewer(stopped.attempt.clone()).await?;
-    let stale = ui.contextual('R').await?;
+    boxed_future!(ui.close_viewer()).await?;
+    boxed_future!(ui.viewer(stopped.attempt.clone())).await?;
+    let stale = boxed_future!(ui.contextual('R')).await?;
     assert_eq!(stale.target.assignment_id, targets[2].assignment_id);
     provider.release(&replacement.assignment_id);
     let complete = published(&ui.audits(), &run).await?;
     let before_stale = report_state(home, &run);
     let report = complete.report.clone().unwrap();
-    ui.yes().await?;
-    ui.finished(false).await?;
+    boxed_future!(ui.yes()).await?;
+    boxed_future!(ui.finished(false)).await?;
     assert_eq!(report_state(home, &run), before_stale);
     assert_eq!(provider.count(), 8);
-    ui.close_viewer().await?;
-    ui.command(format!("read {run}")).await?;
-    let opened = ui
-        .event(|e| matches!(e, AppEvent::AuditOpened { .. }))
-        .await?;
-    ui.dispatch(opened).await?;
+    boxed_future!(ui.close_viewer()).await?;
+    boxed_future!(ui.command(format!("read {run}"))).await?;
+    let opened = boxed_future!(ui.event(|e| matches!(e, AppEvent::AuditOpened { .. }))).await?;
+    boxed_future!(ui.dispatch(opened)).await?;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            ui.pump().await?;
+            boxed_future!(ui.pump()).await?;
             if ui.app.audits.reports.for_turn(ui.thread).is_some() {
                 return Ok::<_, color_eyre::Report>(());
             }
@@ -703,9 +702,13 @@ stream_max_retries=0
         context.display()
     );
     let count = provider.count();
-    assert!(ui.start_tui(args.clone(), false).await?.is_none());
+    assert!(
+        boxed_future!(ui.start_tui(args.clone(), false))
+            .await?
+            .is_none()
+    );
     assert_eq!(provider.count(), count);
-    let second = ui.start_tui(args, true).await?.unwrap();
+    let second = boxed_future!(ui.start_tui(args, true)).await?.unwrap();
     let other = wait_attempts(&ui.audits(), &second.run_id, |items| {
         items.len() == 3 && items.iter().all(|a| a.output_sequence > 1)
     })
@@ -713,11 +716,11 @@ stream_max_retries=0
     for target in &other {
         captured(&ui.audits(), &second.run_id, &target.assignment_id).await?;
     }
-    ui.viewer(other[0].clone()).await?;
-    let ignored = ui.contextual('I').await?;
+    boxed_future!(ui.viewer(other[0].clone())).await?;
+    let ignored = boxed_future!(ui.contextual('I')).await?;
     assert!(ignored.disclosure().contains("permanently"));
-    ui.yes().await?;
-    ui.finished(true).await?;
+    boxed_future!(ui.yes()).await?;
+    boxed_future!(ui.finished(true)).await?;
     let ignored = ui
         .audits()
         .read_attempt(AuditAttemptReadParams {
@@ -728,8 +731,8 @@ stream_max_retries=0
         })
         .await?;
     assert!(!ignored.attempt.retry_eligible);
-    ui.close_viewer().await?;
-    ui.viewer(ignored.attempt.clone()).await?;
+    boxed_future!(ui.close_viewer()).await?;
+    boxed_future!(ui.viewer(ignored.attempt.clone())).await?;
     if let Some(Overlay::AuditActivity(view)) = &ui.app.overlay {
         assert!(
             view.action_for_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE))
@@ -750,17 +753,13 @@ stream_max_retries=0
         ],
         1,
     );
-    ui.close_viewer().await?;
-    ui.main_control(&second.run_id, &other[1].assignment_id, "cancel")
-        .await?;
-    ui.yes().await?;
-    let opened = ui
-        .event(|e| matches!(e, AppEvent::AuditOpened { .. }))
-        .await?;
-    ui.dispatch(opened).await?;
-    let stale_main = ui
-        .main_control(&second.run_id, &other[1].assignment_id, "retry")
-        .await?;
+    boxed_future!(ui.close_viewer()).await?;
+    boxed_future!(ui.main_control(&second.run_id, &other[1].assignment_id, "cancel")).await?;
+    boxed_future!(ui.yes()).await?;
+    let opened = boxed_future!(ui.event(|e| matches!(e, AppEvent::AuditOpened { .. }))).await?;
+    boxed_future!(ui.dispatch(opened)).await?;
+    let stale_main =
+        boxed_future!(ui.main_control(&second.run_id, &other[1].assignment_id, "retry")).await?;
     sql(
         home,
         "CREATE TRIGGER s5_hold_publication BEFORE INSERT ON reports BEGIN SELECT RAISE(ABORT,'S5 publication gate'); END",
@@ -775,28 +774,23 @@ stream_max_retries=0
     let ready = report_state(home, &second.run_id);
     assert_eq!(ready["collection_ready"], 1);
     assert_eq!(ready["phase"], "reporting");
-    ui.yes().await?;
-    let rejected = ui
-        .event(|e| matches!(e, AppEvent::AuditError { .. }))
-        .await?;
-    ui.dispatch(rejected).await?;
+    boxed_future!(ui.yes()).await?;
+    let rejected = boxed_future!(ui.event(|e| matches!(e, AppEvent::AuditError { .. }))).await?;
+    boxed_future!(ui.dispatch(rejected)).await?;
     assert_eq!(stale_main.target.assignment_id, other[1].assignment_id);
     assert_eq!(report_state(home, &second.run_id), ready);
     let count = provider.count();
     cli(&daemon, &["read", &second.run_id], 5);
-    ui.command(format!("abort {}", second.run_id)).await?;
-    let abort = ui
-        .event(|e| matches!(e, AppEvent::AuditAbortConfirm { .. }))
-        .await?;
-    ui.dispatch(abort).await?;
+    boxed_future!(ui.command(format!("abort {}", second.run_id))).await?;
+    let abort =
+        boxed_future!(ui.event(|e| matches!(e, AppEvent::AuditAbortConfirm { .. }))).await?;
+    boxed_future!(ui.dispatch(abort)).await?;
     let began = std::time::Instant::now();
-    ui.yes().await?;
-    let opened = ui
-        .event(|e| matches!(e, AppEvent::AuditOpened { .. }))
-        .await?;
+    boxed_future!(ui.yes()).await?;
+    let opened = boxed_future!(ui.event(|e| matches!(e, AppEvent::AuditOpened { .. }))).await?;
     let abort_ack_ms = began.elapsed().as_millis();
     assert!(abort_ack_ms < 3000);
-    ui.dispatch(opened).await?;
+    boxed_future!(ui.dispatch(opened)).await?;
     let (aborted, aborted_bytes) = candidate(home, &second.run_id).await?;
     assert_ne!(normal["id"], aborted["id"]);
     assert_ne!(normal_bytes, aborted_bytes);
@@ -828,7 +822,7 @@ stream_max_retries=0
     assert_eq!(recovered.1, aborted_bytes);
     assert_eq!(provider.count(), count);
     cli(&daemon, &["read", &second.run_id], 5);
-    let mut ui = Ui::connect(home).await?;
+    let mut ui = boxed_future!(Ui::connect(home)).await?;
     let replayed = ui.audits().cancel(second.run_id.clone()).await?;
     assert_eq!(
         replayed.phase,
@@ -857,21 +851,24 @@ stream_max_retries=0
     let alias = cli(&daemon, &["cancel", &second.run_id], 6);
     assert_eq!(alias.stdout, final_read.stdout);
     assert_eq!(report_state(home, &second.run_id), final_state);
-    ui.command(format!("read {}", second.run_id)).await?;
-    let opened = ui
-        .event(|e| matches!(e, AppEvent::AuditOpened { .. }))
-        .await?;
-    ui.dispatch(opened).await?;
-    ui.pump().await?;
+    boxed_future!(ui.command(format!("read {}", second.run_id))).await?;
+    let opened = boxed_future!(ui.event(|e| matches!(e, AppEvent::AuditOpened { .. }))).await?;
+    boxed_future!(ui.dispatch(opened)).await?;
+    boxed_future!(ui.pump()).await?;
     let completed_after_restart = cli(&daemon, &["read", &run], 0);
     assert_eq!(completed_after_restart.stdout, read.stdout);
     for signal in provider.gates.lock().unwrap().values() {
         signal.add_permits(1);
     }
     assert_eq!(provider.count(), count);
+    let after_release = cli(&daemon, &["read", &second.run_id], 6);
     assert_eq!(
-        cli(&daemon, &["read", &second.run_id], 6).stdout,
-        final_read.stdout
+        after_release.stdout,
+        final_read.stdout,
+        "final read: status={}, stdout={}, stderr={}",
+        after_release.status,
+        String::from_utf8_lossy(&after_release.stdout),
+        String::from_utf8_lossy(&after_release.stderr)
     );
     evidence(
         "abort-recovery",

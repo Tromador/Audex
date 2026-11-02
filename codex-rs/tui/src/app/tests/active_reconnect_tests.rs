@@ -192,7 +192,6 @@ async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Re
                 app.dynamic_tool_status_updates.clone(),
                 /*managed_requirement*/ None,
                 crate::dynamic_tools_mcp::ToolServices {
-                    task_tools: true,
                     audits: false,
                     worktrees: None,
                 },

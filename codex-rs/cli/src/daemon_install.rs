@@ -29,6 +29,10 @@ fn describe_install(request: &InstallRequest) -> String {
         request.source.display(),
         request.destination.display()
     );
+    if crate::application::IS_AUDEX {
+        message = message.replace("Run `codex app-server daemon update` to return to production updates.",
+            "Update Audex by rebuilding its complete local package and selecting it with `audex app-server daemon update --from-cli`.");
+    }
     if request.restart_required {
         message.push_str(
             "\nThe running daemon will restart; active or queued work may be interrupted.",

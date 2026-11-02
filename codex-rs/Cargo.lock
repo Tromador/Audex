@@ -2070,6 +2070,7 @@ dependencies = [
  "codex-app-server-protocol",
  "codex-app-server-transport",
  "codex-arg0",
+ "codex-attachment-store",
  "codex-aws-auth",
  "codex-backend-client",
  "codex-chatgpt",

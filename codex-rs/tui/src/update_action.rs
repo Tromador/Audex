@@ -81,6 +81,9 @@ impl UpdateAction {
 
 #[cfg(not(debug_assertions))]
 pub fn get_update_action() -> Option<UpdateAction> {
+    if codex_install_context::is_audex_product() {
+        return None;
+    }
     UpdateAction::from_install_context(InstallContext::current())
 }
 

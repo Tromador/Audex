@@ -81,7 +81,7 @@ fn bootstrap_updater_is_ready_in_deep_codex_home() -> Result<()> {
     let mut daemon = TestDaemon::new()?;
     let deep_home = tempfile::Builder::new()
         .prefix(&"deep-codex-home-".repeat(8))
-        .tempdir_in("/tmp")?;
+        .tempdir_in(daemon.home.path().parent().context("test root")?)?;
     for name in ["packages", "app-server-daemon"] {
         std::fs::rename(daemon.home.path().join(name), deep_home.path().join(name))?;
     }

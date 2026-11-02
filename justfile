@@ -12,6 +12,14 @@ python := if os_family() == "windows" { "python" } else { "python3" }
 help:
     just -l
 
+# Audex entrypoint, using the same CLI implementation as the compatibility binary.
+audex *args:
+    cargo run --bin audex -- {args}
+
+[no-cd]
+assemble-audex-package *args:
+    {{ python }} {{ justfile_directory() }}/scripts/build_codex_package.py --variant audex {args}
+
 # `codex`
 alias c := codex
 codex *args:

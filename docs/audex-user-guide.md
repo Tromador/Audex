@@ -7,31 +7,20 @@ Audex currently provides two operator interfaces:
 - **Interactive TUI:** start and monitor audits within a normal Codex conversation, then discuss the report with the operator model.
 - **CLI:** submit audits from the shell, retrieve Markdown reports, and integrate results into scripts.
 
-Both interfaces use the **same local managed app-server and audit store**. The executable in the present source build is still named `codex`. The shell helper named `audex` below gives it a distinct command without replacing an existing Codex installation.
+Both interfaces use the **same local managed app-server and audit store**. The application builds as a genuine `audex` executable; the compatibility `codex` target remains available. See [Build, install and update Audex](audex-build-install.md) for complete-package installation and local updates.
 
 ## 1. Quick start
 
 ### 1.1 Set up a shell command
 
-These examples assume a Linux or WSL installation with the packaged Audex executable at `~/.chatgpt/Audex/package/bin/codex` and a dedicated runtime directory at `~/.chatgpt/Audex/home`.
-
-In Bash:
+Install the complete local package and add its `bin` directory to your normal PATH using the [installation procedure](audex-build-install.md). Verify command resolution before starting:
 
 ```bash
-export AUDEX_HOME="$HOME/.chatgpt/Audex"
-
-audex() {
-    CODEX_HOME="$AUDEX_HOME/home" "$AUDEX_HOME/package/bin/codex" "$@"
-}
+type -a audex
+audex --version
 ```
 
-Add the function to your preferred shell startup configuration if you want it available in future terminals. It sets `CODEX_HOME` for each Audex invocation only: ordinary `codex` sessions continue to use their own installation and state.
-
-Create the runtime directory if necessary:
-
-```bash
-mkdir -p "$AUDEX_HOME/home"
-```
+The Audex build defaults to `~/.chatgpt/Audex/codex-home`. An explicit `CODEX_HOME` overrides this default. Use the same home for the CLI, TUI and managed daemon. Existing audit data stays in that runtime home.
 
 ### 1.2 Start and inspect the managed daemon
 

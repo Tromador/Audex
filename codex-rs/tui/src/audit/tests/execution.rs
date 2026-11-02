@@ -463,7 +463,6 @@ async fn conversational_scenario() -> Result<()> {
         tokio::sync::broadcast::channel(16).0,
         None,
         ToolServices {
-            task_tools: true,
             audits: true,
             worktrees: None,
         },

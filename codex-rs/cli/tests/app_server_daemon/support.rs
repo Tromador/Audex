@@ -26,7 +26,11 @@ impl TestDaemon {
         reason = "shared fixture constructor used by other integration test crates"
     )]
     pub(super) fn new() -> Result<Self> {
-        Self::new_in(std::path::Path::new("/tmp"))
+        let root = std::env::var_os("AUDEX_TEST_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&root)?;
+        Self::new_in(&root)
     }
 
     pub(super) fn new_in(parent: &std::path::Path) -> Result<Self> {

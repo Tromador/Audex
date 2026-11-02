@@ -12,6 +12,11 @@ fn package_update_runs_outside_the_project() -> anyhow::Result<()> {
         return run_update_action(UpdateAction::PnpmGlobalLatest, /*cli_executable*/ None);
     }
 
+    if application::IS_AUDEX {
+        let error = run_update_action(UpdateAction::PnpmGlobalLatest, None).unwrap_err();
+        assert!(error.to_string().contains("local source packages"));
+        return Ok(());
+    }
     let project = tempfile::tempdir()?;
     let bin = tempfile::tempdir()?;
     codex_utils_cargo_bin::write_executable(
@@ -55,6 +60,13 @@ fn daemon_handoff_uses_selected_executable_and_propagates_failure() -> anyhow::R
             "app-server\ndaemon\nupdate\n--from-cli\n--yes\n",
         ),
     ] {
+        if application::IS_AUDEX && matches!(source, DaemonUpdateSource::PublicStable) {
+            let error =
+                run_update_action(UpdateAction::Daemon(source), Some(&executable)).unwrap_err();
+            assert!(error.to_string().contains("local source packages"));
+            assert!(!receipt.exists());
+            continue;
+        }
         run_update_action(UpdateAction::Daemon(source), Some(&executable))?;
         assert_eq!(std::fs::read_to_string(&receipt)?, expected);
     }

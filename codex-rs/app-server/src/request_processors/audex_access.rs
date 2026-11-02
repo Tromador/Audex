@@ -78,6 +78,12 @@ impl ThreadRequestProcessor {
                     })
                     .await
                 {
+                    Ok(stored) if stored.thread_id != id => {
+                        return Err(internal_error(format!(
+                            "failed to verify thread ownership: store returned thread {}, expected {id}",
+                            stored.thread_id
+                        )));
+                    }
                     Ok(stored)
                         if crate::audex::controller::is_reviewer_source(
                             stored.thread_source.as_ref(),
@@ -85,15 +91,35 @@ impl ThreadRequestProcessor {
                     {
                         return Err(reject());
                     }
-                    Ok(_) | Err(codex_thread_store::ThreadStoreError::ThreadNotFound { .. }) => {}
-                    Err(error) => {
-                        return Err(internal_error(format!(
-                            "failed to verify thread ownership: {error}"
-                        )));
-                    }
+                    Ok(_) => {}
+                    Err(error) => ownership_lookup_error(id, error)?,
                 }
             }
         }
         Ok(())
     }
 }
+
+// Only proven absence may reach the ordinary handler, which owns each method's
+// missing-thread response (including the empty attachment capability probe).
+fn ownership_lookup_error(
+    thread_id: ThreadId,
+    error: ThreadStoreError,
+) -> Result<(), JSONRPCErrorError> {
+    match error {
+        ThreadStoreError::ThreadNotFound {
+            thread_id: missing_id,
+        } if missing_id == thread_id => Ok(()),
+        ThreadStoreError::InvalidRequest { ref message }
+            if message == &format!("no rollout found for thread id {thread_id}") =>
+        {
+            Ok(())
+        }
+        // Keep the established stale-session read contract while refusing access.
+        error => Err(thread_store_resume_read_error(error)),
+    }
+}
+
+#[cfg(test)]
+#[path = "audex_access_tests.rs"]
+mod tests;

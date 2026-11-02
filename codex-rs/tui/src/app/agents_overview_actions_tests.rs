@@ -31,10 +31,10 @@ async fn pin_action_updates_shared_section_state() -> Result<()> {
         .await?;
         assert!(app.agents_overview.pending_pin_change.is_some());
         let completed = rx.recv().await.expect("pin request completes");
-        assert!(matches!(
-            &completed,
-            AppEvent::AgentsOverviewPinToggled { .. }
-        ));
+        assert!(
+            matches!(&completed, AppEvent::AgentsOverviewPinToggled { .. }),
+            "expected pin completion for {thread_id} (pinned={pinned}); received {completed:?}"
+        );
         app.agents_overview
             .refresh_notifications
             .insert(thread_id, Vec::new());

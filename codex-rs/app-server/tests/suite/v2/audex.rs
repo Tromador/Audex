@@ -53,7 +53,7 @@ stream_max_retries = 0
             assert!(!text.contains("fn main()"));
             responses::sse(vec![responses::ev_function_call_with_namespace("read", "audex_source", "read", r#"{"path":"example.rs","offset":0,"max_bytes":64}"#),responses::ev_completed("read")])
         };
-        ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(output)
+        ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").insert_header("OpenAI-Model", "audit-test").set_body_string(output)
     }).expect(2).mount(&server).await;
     let mut client = TestAppServer::builder()
         .with_codex_home(home.path())
@@ -221,3 +221,6 @@ stream_max_retries = 0
     );
     Ok(())
 }
+
+#[path = "audex_access.rs"]
+mod access_tests;

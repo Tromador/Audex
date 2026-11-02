@@ -53,6 +53,7 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
+mod application;
 mod audit;
 mod config_override_args;
 mod daemon_install;
@@ -116,14 +117,16 @@ use codex_terminal_detection::TerminalName;
 #[derive(Debug, Parser)]
 #[clap(
     author,
+    name = application::DISPLAY_NAME,
     version,
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true,
     // The executable is sometimes invoked via a platform‑specific name like
     // `codex-x86_64-unknown-linux-musl`, but the help output should always use
     // the generic `codex` command name that users run.
-    bin_name = "codex",
-    override_usage = "codex [OPTIONS] [PROMPT]\n       codex [OPTIONS] <COMMAND> [ARGS]"
+    bin_name = application::COMMAND,
+    override_usage = application::USAGE,
+    mut_subcommand("exec", |command| command.override_usage(application::EXEC_USAGE))
 )]
 struct MultitoolCli {
     #[clap(flatten)]
@@ -144,6 +147,9 @@ struct MultitoolCli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Subcommand {
+    /// Internal: serve the attempt-bound sealed-source MCP transport.
+    #[clap(hide = true)]
+    AuditSourceMcp(codex_app_server::AudexSourceMcpArgs),
     /// Audit an immutable source snapshot through the running local daemon.
     Audit(audit::AuditCommand),
     /// Open the agent command center to browse and switch sessions.
@@ -185,6 +191,7 @@ enum Subcommand {
     Completion(CompletionCommand),
 
     /// Update Codex to the latest version.
+    #[clap(about = application::UPDATE_ABOUT)]
     Update,
 
     /// Diagnose local Codex installation, config, auth, and runtime health.
@@ -798,6 +805,14 @@ fn run_update_action(
     action: UpdateAction,
     cli_executable: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
+    if application::IS_AUDEX
+        && !matches!(
+            action,
+            UpdateAction::Daemon(codex_tui::DaemonUpdateSource::ThisCli)
+        )
+    {
+        anyhow::bail!(application::UPDATE_GUIDANCE);
+    }
     if let UpdateAction::Daemon(source) = action {
         let executable = cli_executable
             .ok_or_else(|| anyhow::anyhow!("Cannot locate the launching Codex CLI"))?;
@@ -881,6 +896,9 @@ fn resolve_windows_update_command_from_path(
 }
 
 fn run_update_command() -> anyhow::Result<()> {
+    if application::IS_AUDEX {
+        anyhow::bail!(application::UPDATE_GUIDANCE);
+    }
     #[cfg(debug_assertions)]
     {
         anyhow::bail!(
@@ -1038,6 +1056,7 @@ fn stage_str(stage: Stage) -> &'static str {
 }
 
 fn main() -> anyhow::Result<()> {
+    application::initialise()?;
     codex_build_info::initialize!();
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
@@ -1111,6 +1130,9 @@ async fn dispatch_cli(
     };
     let open_agents_overview = matches!(&subcommand, Some(Subcommand::Agents(_)));
     match subcommand {
+        Some(Subcommand::AuditSourceMcp(args)) => {
+            codex_app_server::run_audex_source_mcp(args).await?;
+        }
         Some(Subcommand::Audit(command)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -1427,6 +1449,11 @@ async fn dispatch_cli(
                         check_package_ownership: true,
                         ..
                     } => return Ok(None),
+                    AppServerDaemonSubcommand::Update {
+                        from_cli: false, ..
+                    } if application::IS_AUDEX => {
+                        anyhow::bail!(application::UPDATE_GUIDANCE);
+                    }
                     AppServerDaemonSubcommand::Update {
                         from_cli: false, ..
                     }
@@ -2369,6 +2396,7 @@ fn unsupported_subcommand_name_for_strict_config(
         }
         Some(Subcommand::RemoteControl(remote_control)) => Some(remote_control.subcommand_name()),
         Some(Subcommand::Mcp(_)) => Some("mcp"),
+        Some(Subcommand::AuditSourceMcp(_)) => Some("audit-source-mcp"),
         Some(Subcommand::Audit(_)) => Some("audit"),
         Some(Subcommand::Plugin(_)) => Some("plugin"),
         Some(Subcommand::MigrateRollouts(_)) => Some("migrate-rollouts"),
@@ -2792,7 +2820,7 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
 
 fn print_completion(cmd: CompletionCommand) {
     let mut app = MultitoolCli::command();
-    let name = "codex";
+    let name = application::COMMAND;
     generate(cmd.shell, &mut app, name, &mut std::io::stdout());
 }
 
@@ -3530,7 +3558,10 @@ enabled = true
     fn plugin_marketplace_help_uses_plugin_namespace() {
         let help = help_from_args(&["codex", "plugin", "marketplace", "--help"]);
         assert!(
-            help.contains("Usage: codex plugin marketplace [OPTIONS] <COMMAND>"),
+            help.contains(&format!(
+                "Usage: {} plugin marketplace [OPTIONS] <COMMAND>",
+                application::COMMAND
+            )),
             "{help}"
         );
 
@@ -3541,7 +3572,8 @@ enabled = true
             ("remove", "Usage: codex plugin marketplace remove"),
         ] {
             let help = help_from_args(&["codex", "plugin", "marketplace", subcommand, "--help"]);
-            assert!(help.contains(usage), "{help}");
+            let usage = usage.replace("Usage: codex", &format!("Usage: {}", application::COMMAND));
+            assert!(help.contains(&usage), "{help}");
         }
     }
 

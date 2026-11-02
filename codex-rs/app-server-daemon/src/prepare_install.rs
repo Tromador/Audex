@@ -74,7 +74,11 @@ pub async fn update_from_cli(
             .ok()
             .map(|info| info.app_server_version),
         managed_codex_path,
-        message: "The CLI package is selected and pinned. Run `codex app-server daemon update` to return to production updates.".to_string(),
+        message: if codex_install_context::is_audex_product() {
+            "The Audex package is selected and pinned. Update it with a rebuilt local package and `audex app-server daemon update --from-cli`.".to_string()
+        } else {
+            "The CLI package is selected and pinned. Run `codex app-server daemon update` to return to production updates.".to_string()
+        },
     }))
 }
 
@@ -163,11 +167,19 @@ async fn prepare_from_package(
         "bin/codex"
     };
     let source_entrypoint = metadata["entrypoint"].as_str().unwrap_or_default();
+    let audex_product = metadata["variant"] == "audex";
+    let audex = audex_product
+        && source_entrypoint
+            == if cfg!(windows) {
+                "bin/audex.exe"
+            } else {
+                "bin/audex"
+            };
     let winget = cfg!(windows)
         && metadata["layoutVersion"] == 1
         && source_entrypoint == format!("codex-{target}.exe");
     anyhow::ensure!(
-        metadata["target"] == target && (source_entrypoint == entrypoint || winget),
+        metadata["target"] == target && (source_entrypoint == entrypoint || winget || audex),
         "the CLI package does not match this platform or executable"
     );
     validate_package(source, source_entrypoint)?;
@@ -226,7 +238,7 @@ async fn prepare_from_package(
         "daemon running state changed while awaiting confirmation; retry the command"
     );
     let backend = current_backend;
-    let stable = stable_version(&version).is_some();
+    let stable = !audex_product && stable_version(&version).is_some();
     let releases = root.join("releases");
     std::fs::create_dir_all(&releases)?;
     let stage = tempfile::Builder::new()
@@ -248,7 +260,23 @@ async fn prepare_from_package(
     );
     // Reverse the WinGet archive's root filenames only after verifying the copied
     // source. Hash the final tree for reuse, since it now differs from the source.
-    let digest = if winget {
+    let digest = if audex {
+        // Keep the genuine Audex bytes and provenance in the existing daemon layout.
+        std::fs::rename(
+            stage.path().join(source_entrypoint),
+            stage.path().join(entrypoint),
+        )?;
+        let executable_digest = staged_digests
+            .remove(Path::new(source_entrypoint))
+            .context("missing Audex entrypoint digest")?;
+        staged_digests.insert(PathBuf::from(entrypoint), executable_digest);
+        metadata["sourceEntrypoint"] = source_entrypoint.into();
+        metadata["entrypoint"] = entrypoint.into();
+        let bytes = serde_json::to_vec_pretty(&metadata)?;
+        std::fs::write(stage.path().join("codex-package.json"), &bytes)?;
+        staged_digests.insert(PathBuf::from("codex-package.json"), blake3::hash(&bytes));
+        package_tree(stage.path(), None, &mut staged_digests)?
+    } else if winget {
         std::fs::create_dir_all(stage.path().join("bin"))?;
         #[cfg(windows)]
         for (from, to) in [

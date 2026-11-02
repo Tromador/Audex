@@ -517,8 +517,7 @@ async fn follow_run(
         }
         if let Some(code) = terminal_code(&view) {
             if let Some(report) = &view.report {
-                tokio::io::stdout().write_all(report.as_bytes()).await?;
-                tokio::io::stdout().flush().await?;
+                write_report(report).await?;
             } else if code == 0 {
                 bail!("completed audit has no report")
             }
@@ -559,6 +558,13 @@ async fn follow_run(
     }
 }
 
+async fn write_report(report: &str) -> std::io::Result<()> {
+    // Flush the handle that owns the queued write before a nonzero process exit.
+    let mut stdout = tokio::io::stdout();
+    stdout.write_all(report.as_bytes()).await?;
+    stdout.flush().await
+}
+
 fn phase_name(phase: &AuditRunPhase) -> &'static str {
     match phase {
         AuditRunPhase::Created => "created",
@@ -587,3 +593,6 @@ fn operation_name(state: &AuditOperationState) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod report_output_tests;

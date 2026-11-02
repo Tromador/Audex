@@ -24,7 +24,7 @@ pub(in crate::audex) struct GenerationRecord {
     pub provider_response_id: Option<String>,
 }
 
-async fn owner_active(
+pub(super) async fn owner_active(
     connection: &mut sqlx::SqliteConnection,
     identity: &AdmissionIdentity,
     now: i64,

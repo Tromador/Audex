@@ -53,7 +53,6 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub(crate) enum ThreadToolTransport {
-    Disabled,
     Dynamic,
     Mcp(Arc<DynamicToolMcpServer>),
 }
@@ -63,8 +62,11 @@ impl ThreadToolTransport {
         &self,
         config: &crate::legacy_core::config::Config,
     ) -> std::io::Result<()> {
-        if let Self::Mcp(server) = self
-            && config.mcp_servers.get().contains_key(server.namespace)
+        if let Self::Mcp(_) = self
+            && config
+                .mcp_servers
+                .get()
+                .contains_key(dynamic_tools::NAMESPACE)
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -76,7 +78,6 @@ impl ThreadToolTransport {
 
     pub(crate) fn configure(&self, params: &mut ThreadStartParams) {
         match self {
-            Self::Disabled => params.dynamic_tools = None,
             Self::Dynamic => {
                 params.dynamic_tools = Some(dynamic_tools::non_delegation_tool_specs());
             }
@@ -90,7 +91,7 @@ impl ThreadToolTransport {
     pub(crate) fn configure_mcp(&self, config: &mut Option<HashMap<String, Value>>) {
         if let Self::Mcp(server) = self {
             config.get_or_insert_default().insert(
-                format!("mcp_servers.{}", server.namespace),
+                format!("mcp_servers.{}", dynamic_tools::NAMESPACE),
                 server.config.clone(),
             );
         }
@@ -99,19 +100,8 @@ impl ThreadToolTransport {
 
 #[derive(Clone)]
 pub(crate) struct ToolServices {
-    pub(crate) task_tools: bool,
     pub(crate) audits: bool,
     pub(crate) worktrees: Option<crate::managed_worktree_tools::ManagedWorktreeTools>,
-}
-
-impl ToolServices {
-    pub(crate) fn namespace(&self) -> &'static str {
-        if self.task_tools {
-            dynamic_tools::NAMESPACE
-        } else {
-            "codex_worktrees"
-        }
-    }
 }
 
 type ToolConnection = Arc<RwLock<Option<(AppServerRequestHandle, AppEventSender)>>>;
@@ -119,7 +109,6 @@ type ToolConnection = Arc<RwLock<Option<(AppServerRequestHandle, AppEventSender)
 pub(crate) struct DynamicToolMcpServer {
     connection: ToolConnection,
     config: Value,
-    namespace: &'static str,
     task: JoinHandle<()>,
 }
 
@@ -182,7 +171,6 @@ impl DynamicToolMcpServer {
             overrides.remove("web_search");
         }
         let connection = Arc::new(RwLock::new(Some((request_handle, app_event_tx))));
-        let namespace = services.namespace();
         let handler = DynamicToolMcpHandler {
             connection: Arc::clone(&connection),
             thread_start_params,
@@ -211,7 +199,6 @@ impl DynamicToolMcpServer {
         Ok(Self {
             connection,
             config: server_config,
-            namespace,
             task,
         })
     }
@@ -260,11 +247,7 @@ impl ServerHandler for DynamicToolMcpHandler {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let mut tools = Vec::new();
-        let mut specs = if self.services.task_tools {
-            dynamic_tools::tool_specs()
-        } else {
-            Vec::new()
-        };
+        let mut specs = dynamic_tools::tool_specs();
         if self.services.worktrees.is_some() {
             specs.extend(crate::managed_worktree_tool_specs::specs());
         }
@@ -345,7 +328,7 @@ impl ServerHandler for DynamicToolMcpHandler {
         };
         let mut thread_start_params = self.thread_start_params.clone();
         thread_start_params.config.get_or_insert_default().insert(
-            format!("mcp_servers.{}", self.services.namespace()),
+            format!("mcp_servers.{}", dynamic_tools::NAMESPACE),
             self.server_config.clone(),
         );
         // Snapshot once: an in-flight call must never switch connections or replay a mutation.
@@ -388,12 +371,6 @@ impl ServerHandler for DynamicToolMcpHandler {
                 )
                 .await
         } else {
-            if !self.services.task_tools {
-                return Err(McpError::invalid_params(
-                    "Task tools are unavailable on this connection",
-                    None,
-                ));
-            }
             dynamic_tools::execute(
                 request_handle,
                 params,

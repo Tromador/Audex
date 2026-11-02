@@ -31,6 +31,7 @@ pub(super) mod attempts;
 mod foundation_tests;
 mod foundations;
 mod reporting;
+pub(super) mod source;
 #[cfg(test)]
 mod submission_tests;
 use foundations::update_attempt_revision;

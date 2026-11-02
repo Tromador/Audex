@@ -58,6 +58,7 @@ def build_source_binaries(
         cmd = [
             cargo,
             "build",
+            *(["--locked", "--offline"] if variant.name == "audex" else []),
             "--target",
             spec.target,
             "--profile",
@@ -72,7 +73,9 @@ def build_source_binaries(
             or code_mode_host_bin is None
             or exec_server_bin is None
         ):
-            codex_v8_env = resolve_codex_v8_cargo_env(spec)
+            codex_v8_env = resolve_codex_v8_cargo_env(
+                spec, offline=variant.name == "audex"
+            )
             if codex_v8_env:
                 cargo_env = {**os.environ, **codex_v8_env}
 

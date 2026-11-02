@@ -53,6 +53,7 @@ class PackageInputs:
 
 
 PACKAGE_VARIANTS: dict[str, PackageVariant] = {
+    "audex": PackageVariant(name="audex", cargo_bin="audex", executable_stem="audex"),
     "codex": PackageVariant(
         name="codex",
         cargo_bin="codex",

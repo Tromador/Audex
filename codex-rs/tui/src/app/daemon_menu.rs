@@ -79,6 +79,9 @@ impl App {
             (DaemonUpdateSource::ThisCli, "Use this CLI build"),
         ]
         .into_iter()
+        .filter(|(source, _)| {
+            !codex_install_context::is_audex_product() || *source == DaemonUpdateSource::ThisCli
+        })
         .map(|(source, name)| SelectionItem {
             name: name.to_string(),
             is_disabled: unavailable.is_some(),
@@ -157,6 +160,10 @@ impl App {
     }
 
     pub(super) fn confirm_daemon_update(&mut self, source: DaemonUpdateSource) {
+        if codex_install_context::is_audex_product() && source == DaemonUpdateSource::PublicStable {
+            self.chat_widget.add_error_message("Audex uses locally rebuilt packages. Use this CLI build after rebuilding its complete package.".to_owned());
+            return;
+        }
         let Some(executable) = &self.daemon_cli_executable else {
             return;
         };

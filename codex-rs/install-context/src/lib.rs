@@ -19,6 +19,16 @@ const RELEASES_DIRNAME: &str = "releases";
 const RESOURCES_DIRNAME: &str = "codex-resources";
 const STANDALONE_PACKAGES_DIRNAME: &str = "standalone";
 static INSTALL_CONTEXT: OnceLock<InstallContext> = OnceLock::new();
+static AUDEX_PRODUCT: OnceLock<()> = OnceLock::new();
+
+/// Set by the compiled Audex CLI before bootstrap, independent of executable basename.
+pub fn initialise_audex_product() {
+    let _ = AUDEX_PRODUCT.set(());
+}
+
+pub fn is_audex_product() -> bool {
+    AUDEX_PRODUCT.get().is_some()
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StandalonePlatform {

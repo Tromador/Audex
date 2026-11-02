@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 build = "build.rs"
-default-run = "codex"
+default-run = "audex"
+
+[[bin]]
+name = "audex"
+path = "src/main.rs"
 
 [[bin]]
 name = "codex"

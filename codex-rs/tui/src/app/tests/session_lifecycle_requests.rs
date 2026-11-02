@@ -1498,7 +1498,27 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths_sc
         .find(|server| server.name == "codex_tui")
         .expect("local daemon must connect to the TUI MCP server")
         .tools;
-    assert_eq!(tools.len(), 9);
+    assert_eq!(
+        tools
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
+            "list_threads",
+            "list_archived_threads",
+            "read_thread",
+            "wait_threads",
+            "send_message_to_thread",
+            "create_thread",
+            "fork_thread",
+            "set_thread_title",
+            "set_thread_archived",
+            "audit_start",
+            "audit_read",
+            "audit_list",
+            "audit_cancel",
+        ])
+    );
     for tool in crate::dynamic_tools::DELEGATION_TOOLS {
         assert!(tools.contains_key(tool));
     }
@@ -2366,15 +2386,17 @@ async fn check_dynamic_tool_requests(
             }),
         },
     );
+    let event = tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 5), events.recv())
+        .await?
+        .expect("follow-up task registration event");
     let AppEvent::DynamicToolThreadStarted {
         thread,
         task_tools_available,
         registered,
-    } = tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 5), events.recv())
-        .await?
-        .expect("follow-up task registration event")
+    } = event
     else {
-        panic!("expected follow-up task registration before its next turn")
+        // A completion event carries the task tool's actual RPC error, if any.
+        panic!("expected follow-up task registration before its next turn; received {event:?}")
     };
     assert_eq!(ThreadId::from_string(&thread.id)?, created_thread_id);
     assert_eq!(recorded_params(&requests, "turn/start").len(), 1);

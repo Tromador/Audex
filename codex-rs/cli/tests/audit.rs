@@ -264,7 +264,30 @@ async fn stdin_disconnect_cancellation_and_failure_have_distinct_statuses() -> R
             .write_all(b"fn main() {}\n")?;
         request_seen(&server).await?;
         if mode == "bad" {
-            check(&child.wait_with_output()?, 2)?;
+            let listed = audit(&daemon).arg("list").output()?;
+            check(&listed, 0)?;
+            let id = String::from_utf8(listed.stdout)?
+                .split_whitespace()
+                .next()
+                .context("listed run")?
+                .to_owned();
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let read = audit(&daemon).args(["read", &id]).output()?;
+                    check(&read, 5)?;
+                    if String::from_utf8_lossy(&read.stderr).contains(" / failed (") {
+                        return anyhow::Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await??;
+            // Invalid output is wanted failed work, awaiting an operator decision.
+            assert!(child.try_wait()?.is_none());
+            signal(child.id(), libc::SIGINT)?;
+            check(&child.wait_with_output()?, 130)?;
+            check(&audit(&daemon).args(["read", &id]).output()?, 5)?;
+            check(&audit(&daemon).args(["abort", &id]).output()?, 6)?;
         } else {
             // SIGINT is a client detach, never an implicit audit/cancel.
             signal(child.id(), libc::SIGINT)?;
@@ -284,10 +307,10 @@ async fn stdin_disconnect_cancellation_and_failure_have_distinct_statuses() -> R
             assert!(!String::from_utf8_lossy(&read.stderr).contains("cancellation requested"));
             assert_no_children(daemon.pid("app-server.pid")?)?;
             let cancelled = audit(&daemon).args(["cancel", &id]).output()?;
-            check(&cancelled, 3)?;
+            check(&cancelled, 6)?;
             assert!(String::from_utf8_lossy(&cancelled.stderr).contains("cancellation requested"));
             let later = audit(&daemon).args(["read", &id]).output()?;
-            check(&later, 3)?;
+            check(&later, 6)?;
         }
         assert_eq!(server.received_requests().await.expect("requests").len(), 1);
     }
@@ -431,8 +454,7 @@ async fn missing_daemon_is_a_local_error_without_service_start() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn explicit_capacity_release_after_runtime_loss_allows_another_audit_without_replay()
--> Result<()> {
+async fn abort_after_runtime_loss_releases_capacity_without_replaying_the_original() -> Result<()> {
     let server = responses::start_mock_server().await;
     provider(&server, "blocked").await;
     let daemon = configured(&server)?;
@@ -468,31 +490,12 @@ async fn explicit_capacity_release_after_runtime_loss_allows_another_audit_witho
         anyhow::Ok(())
     })
     .await??;
-    // Cancellation follows too: pending observation must not drop the watch.
-    let mut cancellation = audit(&daemon)
-        .args(["cancel", &first])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let read = audit(&daemon).args(["read", &first]).output()?;
-            check(&read, 5)?;
-            if String::from_utf8_lossy(&read.stderr).contains("cancellation requested") {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        anyhow::Ok(())
-    })
-    .await??;
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    assert!(
-        cancellation.try_wait()?.is_none(),
-        "pending cancellation stays attached"
-    );
-    signal(cancellation.id(), libc::SIGINT)?;
-    check(&cancellation.wait_with_output()?, 130)?;
+    // Whole-audit cancel is Abort: publication does not await uncertain execution.
+    check(&audit(&daemon).args(["cancel", &first]).output()?, 6)?;
+    let stopped = audit(&daemon).args(["read", &first]).output()?;
+    check(&stopped, 6)?;
+    assert!(String::from_utf8_lossy(&stopped.stdout).contains("aborted_by_operator"));
+    assert!(String::from_utf8_lossy(&stopped.stdout).contains("incomplete / excluded"));
     let second_source = daemon.home.path().join("second.rs");
     std::fs::write(&second_source, "fn independent() {}\n")?;
     let second = audit(&daemon)
@@ -503,26 +506,7 @@ async fn explicit_capacity_release_after_runtime_loss_allows_another_audit_witho
     check(&second, 0)?;
     let second = String::from_utf8(second.stdout)?.trim().to_owned();
     check(&audit(&daemon).args(["read", &second]).output()?, 5)?;
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    check(
-        &audit(&daemon)
-            .args(["release-slot", &first, "--reason", "Accept overlap"])
-            .output()?,
-        2,
-    )?;
-    for _ in 0..2 {
-        let output = audit(&daemon)
-            .args([
-                "release-slot",
-                &first,
-                "--acknowledge-concurrent-execution-and-charges",
-                "--reason",
-                "Accept overlap",
-            ])
-            .output()?;
-        check(&output, 5)?;
-        assert!(String::from_utf8_lossy(&output.stderr).contains("capacity released by operator"));
-    }
+    // Abort released scheduling capacity automatically; no release-slot action is needed.
     tokio::time::timeout(Duration::from_secs(15), async {
         while server.received_requests().await.unwrap().len() < 2 {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -530,10 +514,10 @@ async fn explicit_capacity_release_after_runtime_loss_allows_another_audit_witho
     })
     .await?;
     let old = audit(&daemon).args(["read", &first]).output()?;
-    check(&old, 5)?;
-    assert!(String::from_utf8_lossy(&old.stderr).contains("observation pending"));
+    check(&old, 6)?;
+    assert!(String::from_utf8_lossy(&old.stdout).contains("aborted_by_operator"));
     assert!(String::from_utf8_lossy(&old.stderr).contains("capacity released by operator"));
-    check(&audit(&daemon).args(["cancel", &second]).output()?, 3)?;
+    check(&audit(&daemon).args(["cancel", &second]).output()?, 6)?;
     assert_eq!(
         server.received_requests().await.unwrap().len(),
         2,

@@ -7,6 +7,8 @@ mod report;
 mod result;
 mod reviewer;
 pub(crate) mod snapshot;
+mod source;
+pub(crate) mod source_mcp;
 mod store;
 mod tools;
 

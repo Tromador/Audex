@@ -101,6 +101,7 @@ mod app_server_tracing;
 mod attestation;
 #[allow(dead_code)]
 mod audex;
+pub use audex::source_mcp::{AudexSourceMcpArgs, run_audex_source_mcp};
 mod auth_mode;
 mod bespoke_event_handling;
 mod code_mode_host;

@@ -1265,8 +1265,13 @@ async fn worktrees_overview_groups_by_project_or_directory() {
         .map(|line| line.split('│').next().unwrap_or(line).trim_end())
         .collect::<Vec<_>>()
         .join("\n");
-    for (heading, stable) in directory_headings.iter().rev() {
-        directory_grouping = directory_grouping.replace(heading, stable);
+    // Render order follows full paths. Two long paths can have the same
+    // truncated heading, so replace complete headings once in that order.
+    let mut ordered_headings = directory_headings.iter().collect::<Vec<_>>();
+    ordered_headings.sort_by_key(|(_, stable)| *stable);
+    for (heading, stable) in ordered_headings {
+        directory_grouping =
+            directory_grouping.replacen(&format!("{heading}  "), &format!("{stable}  "), 1);
     }
     let directory_grouping = directory_grouping.replace('\\', "/");
     insta::with_settings!({snapshot_path => "../snapshots"}, {
@@ -2833,7 +2838,11 @@ async fn command_center_action_failures_remain_visible() -> Result<()> {
     .await?;
     let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 96);
     assert!(rendered.contains("Unable to complete action"), "{rendered}");
-    assert!(rendered.contains("is no longer available"), "{rendered}");
+    assert!(
+        rendered.contains(&format!("Agent thread {thread_id}")),
+        "{rendered}"
+    );
+    assert!(rendered.contains("is no longer available."), "{rendered}");
     server.shutdown().await?;
     Ok(())
 }

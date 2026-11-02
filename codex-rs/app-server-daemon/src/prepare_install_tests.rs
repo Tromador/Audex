@@ -473,3 +473,54 @@ async fn broken_selection_is_not_a_missing_installation() {
         PathBuf::from("missing-release")
     );
 }
+
+#[tokio::test]
+async fn audex_packages_normalise_without_losing_product_identity_or_unpinning() {
+    let temp = tempfile::TempDir::new().expect("temp");
+    let home = temp.path().join("home");
+    let daemon = daemon(&home);
+    let settings = DaemonSettings::default();
+    for (index, version) in ["0.152.0", "0.153.0"].into_iter().enumerate() {
+        let source = temp.path().join(format!("audex-{index}"));
+        let codex = package(&source, version);
+        let audex = source.join("bin/audex");
+        std::fs::rename(codex, &audex).expect("Audex build entrypoint");
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(source.join("codex-package.json")).unwrap())
+                .unwrap();
+        metadata["variant"] = "audex".into();
+        metadata["entrypoint"] = "bin/audex".into();
+        std::fs::write(source.join("codex-package.json"), metadata.to_string()).unwrap();
+        let mode = if index == 0 {
+            InstallMode::Missing
+        } else {
+            InstallMode::Replace
+        };
+        assert!(
+            prepare_from_package(&daemon, &settings, mode, Some(&source), &audex, |_| Ok(
+                true
+            ))
+            .await
+            .expect("Audex package selection")
+        );
+        let root = home.join("packages/app-server-daemon");
+        let selected = root.join("current").canonicalize().unwrap();
+        assert!(validate_package(&selected, "bin/codex").is_ok());
+        let retained: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(selected.join("codex-package.json")).unwrap())
+                .unwrap();
+        assert_eq!(retained["variant"], "audex");
+        assert_eq!(retained["entrypoint"], "bin/codex");
+        assert_eq!(retained["sourceEntrypoint"], "bin/audex");
+        assert_eq!(retained["version"], version);
+        assert!(!root.join("auto-update-version").exists());
+        assert!(!crate::managed_install::is_stable_standalone_release(
+            &home,
+            &selected.join("bin/codex")
+        ));
+        assert_eq!(
+            std::fs::read(&audex).unwrap(),
+            std::fs::read(selected.join("bin/codex")).unwrap()
+        );
+    }
+}
