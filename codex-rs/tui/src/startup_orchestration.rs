@@ -759,16 +759,9 @@ pub(super) async fn run_main_inner(
         ),
     ]);
     let selected_local_daemon = matches!(app_server_target, AppServerTarget::LocalDaemon { .. });
-    // Record the first connection attempt's actual mode, including embedded fallback; never reconnects.
-    let launch_telemetry = move |target: &AppServerTarget, connected: bool| {
+    let launch_telemetry = move |app_server_mode| {
         let Some(metrics) = metrics else {
             return Vec::new();
-        };
-        let app_server_mode = match (connected, target) {
-            (false, _) => "unconfirmed",
-            (true, AppServerTarget::Embedded) => "in_process",
-            (true, AppServerTarget::LocalDaemon { .. }) => "local_daemon",
-            (true, AppServerTarget::Remote { .. }) => "remote",
         };
         // Use a fixed category, not the versioned or user-provided terminal identifier.
         let terminal_info = codex_terminal_detection::terminal_info();
@@ -872,7 +865,7 @@ pub(super) async fn run_main_inner(
             if let Some(worktree) = managed_worktree.as_ref() {
                 worktree.report_startup_failure();
             }
-            launch_telemetry.record(&app_server_target, /*connected*/ false);
+            drop(launch_telemetry);
             if let Some(otel) = otel {
                 let _ = otel
                     .shutdown_with_timeout(INTERACTIVE_OTEL_SHUTDOWN_TIMEOUT)
@@ -893,7 +886,7 @@ pub(super) async fn run_main_inner(
             if let Some(worktree) = managed_worktree.as_ref() {
                 worktree.report_startup_failure();
             }
-            launch_telemetry.record(&app_server_target, /*connected*/ false);
+            drop(launch_telemetry);
             if let Some(otel) = otel {
                 let _ = otel
                     .shutdown_with_timeout(INTERACTIVE_OTEL_SHUTDOWN_TIMEOUT)

@@ -1231,7 +1231,7 @@ async fn run_ratatui_app(
     daemon_startup_warning: Option<String>,
     managed_daemon: bool,
     launch_telemetry: daemon_telemetry::Launch<
-        impl FnOnce(&AppServerTarget, bool) -> terminal_size_telemetry::LaunchTags,
+        impl FnOnce(&'static str) -> terminal_size_telemetry::LaunchTags,
     >,
     startup_draft: startup_draft::StartupDraft,
 ) -> color_eyre::Result<AppExitInfo> {
@@ -1265,6 +1265,7 @@ async fn run_ratatui_app(
                 UpdatePromptOutcome::Continue => {}
                 UpdatePromptOutcome::RunUpdate(action) => {
                     terminal_restore_guard.restore()?;
+                    launch_telemetry.record("update_requested");
                     return Ok(AppExitInfo {
                         token_usage: crate::token_usage::TokenUsage::default(),
                         thread_id: None,
@@ -1300,15 +1301,20 @@ async fn run_ratatui_app(
             ),
         )
         .await;
-    tui.terminal_size_tags =
-        launch_telemetry.record(&app_server_target, matches!(&startup_app_server, Ok(Ok(_))));
     let mut app_server_session = match startup_app_server {
-        Ok(Ok(app_server)) => AppServerSession::new(
-            backend_id,
-            app_server,
-            app_server_target.thread_params_mode(),
-        )
-        .with_local_codex_home(&initial_config.codex_home),
+        Ok(Ok(app_server)) => {
+            tui.terminal_size_tags = launch_telemetry.record(match &app_server_target {
+                AppServerTarget::Embedded => "in_process",
+                AppServerTarget::LocalDaemon { .. } => "local_daemon",
+                AppServerTarget::Remote { .. } => "remote",
+            });
+            AppServerSession::new(
+                backend_id,
+                app_server,
+                app_server_target.thread_params_mode(),
+            )
+            .with_local_codex_home(&initial_config.codex_home)
+        }
         Ok(Err(err)) => {
             terminal_restore_guard.restore_silently();
             session_log::log_session_end();
