@@ -95,6 +95,10 @@ fn is_unsupported_untrusted_approval_policy_error(err: &std::io::Error) -> bool 
     )
 }
 
+mod agent_message_board;
+pub use agent_message_board::delete_agent_message_boards;
+pub use agent_message_board::install_agent_message_board;
+
 mod analytics_utils;
 mod app_info;
 mod app_server_tracing;

@@ -51,10 +51,15 @@ fn retained_policy_allows_cold_collection_after_provider_and_catalogue_changes()
                 },
                 ModelOrigin::ExplicitConfig,
             ));
-            let recovered_threads = Arc::new(ThreadManager::new(
+            let startup = codex_core::build_startup_models(
                 &changed,
                 codex_core::test_support::auth_manager_from_auth(CodexAuth::from_api_key("dummy")),
-                models.clone(),
+                "audex-test".into(),
+                codex_core::test_support::fixed_model_catalog(models.clone()),
+            );
+            let recovered_threads = Arc::new(ThreadManager::new(
+                &changed,
+                startup,
                 codex_core::CodexAppsToolsCache::default(),
                 codex_protocol::protocol::SessionSource::Exec,
                 Arc::new(EnvironmentManager::default_for_tests()),
@@ -64,7 +69,6 @@ fn retained_policy_allows_cold_collection_after_provider_and_catalogue_changes()
                 codex_core::passthrough_image_store(),
                 history.clone(),
                 None,
-                "audex-test".into(),
                 None,
                 None,
             ));

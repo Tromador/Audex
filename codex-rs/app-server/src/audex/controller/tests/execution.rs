@@ -139,10 +139,15 @@ async fn fixture_with_transport(
         catalog,
         ModelOrigin::ExplicitConfig,
     ));
-    let threads = Arc::new(ThreadManager::new(
+    let startup = codex_core::build_startup_models(
         &config,
         auth,
-        models,
+        "audex-test".to_string(),
+        codex_core::test_support::fixed_model_catalog(models),
+    );
+    let threads = Arc::new(ThreadManager::new(
+        &config,
+        startup,
         codex_core::CodexAppsToolsCache::default(),
         codex_protocol::protocol::SessionSource::Exec,
         Arc::new(EnvironmentManager::default_for_tests()),
@@ -152,7 +157,6 @@ async fn fixture_with_transport(
         codex_core::passthrough_image_store(),
         history.clone(),
         None,
-        "audex-test".to_string(),
         None,
         None,
     ));

@@ -133,6 +133,9 @@ mod incremental_tools_resume;
 #[path = "scenarios_model_instructions.rs"]
 mod model_instructions;
 
+#[path = "scenarios/catalog_settings.rs"]
+mod catalog_settings;
+
 #[path = "scenarios_catalog_approval_instructions_tests.rs"]
 mod catalog_approval_instructions;
 
@@ -174,6 +177,9 @@ mod guardian_direct_review;
 
 #[path = "scenarios_guardian_extra_policy.rs"]
 mod guardian_extra_policy;
+
+#[path = "scenarios_guardian_reconsideration.rs"]
+mod guardian_reconsideration;
 
 #[path = "scenarios_guardian_orchestrator_connector.rs"]
 mod guardian_orchestrator_connector;

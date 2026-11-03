@@ -56,3 +56,30 @@ fn unsupported_versions_and_missing_format_four_facts_are_not_upgraded() -> anyh
     }
     Ok(())
 }
+
+/// Report freeze and whole-audit Abort decode retained usage strictly. These exhaustive
+/// literals stop compilation when upstream adds a field, so the mirror is reviewed at merge.
+#[test]
+fn native_usage_mirror_accepts_every_upstream_usage_field() -> anyhow::Result<()> {
+    use codex_protocol::protocol::TokenUsage;
+    use codex_protocol::protocol::TokenUsageInfo;
+    let counters = TokenUsage {
+        input_tokens: 1,
+        cached_input_tokens: 2,
+        cache_write_input_tokens: 3,
+        output_tokens: 4,
+        reasoning_output_tokens: 5,
+        total_tokens: 15,
+        codex_rollout_budget_units: Some(serde_json::Number::from(6)),
+    };
+    let info = TokenUsageInfo {
+        total_token_usage: counters.clone(),
+        last_token_usage: counters,
+        last_usage_includes_reasoning: Some(true),
+        model_context_window: Some(4096),
+    };
+    let usage: facts::NativeUsage = serde_json::from_str(&serde_json::to_string(&info)?)?;
+    assert_eq!(usage.total_token_usage.cache_write_input_tokens, Some(3));
+    assert_eq!(usage.last_usage_includes_reasoning, Some(true));
+    Ok(())
+}

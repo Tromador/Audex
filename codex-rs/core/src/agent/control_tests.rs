@@ -49,6 +49,7 @@ use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_models_manager::manager::ModelCatalogSettings;
 use codex_models_manager::model_info::model_info_from_slug;
 use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
@@ -3921,8 +3922,14 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
         let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
         harness.manager = ThreadManager::new(
             &parent_config,
-            auth_manager.clone(),
-            crate::thread_manager::build_models_manager(&parent_config, auth_manager),
+            crate::build_startup_models(
+                &parent_config,
+                auth_manager.clone(),
+                uuid::Uuid::new_v4().to_string(),
+                Arc::new(ModelCatalogSettings::disk(
+                    parent_config.codex_home.to_path_buf(),
+                )),
+            ),
             crate::CodexAppsToolsCache::default(),
             SessionSource::Exec,
             Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -3933,7 +3940,6 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             crate::ThreadStoreBuilder::from_config(&parent_config, harness.state_db.clone())
                 .build(),
             crate::thread_manager::local_agent_graph_store_from_state_db(harness.state_db.as_ref()),
-            uuid::Uuid::new_v4().to_string(),
             /*attestation_provider*/ None,
             /*external_time_provider*/ None,
         );
@@ -5077,8 +5083,12 @@ async fn resume_thread_subagent_restores_stored_metadata() {
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
     let manager = ThreadManager::new(
         &config,
-        auth_manager.clone(),
-        crate::thread_manager::build_models_manager(&config, auth_manager),
+        crate::build_startup_models(
+            &config,
+            auth_manager.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())),
+        ),
         crate::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -5088,7 +5098,6 @@ async fn resume_thread_subagent_restores_stored_metadata() {
         crate::thread_manager::passthrough_image_store(),
         thread_store.clone(),
         /*agent_graph_store*/ None,
-        uuid::Uuid::new_v4().to_string(),
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     );

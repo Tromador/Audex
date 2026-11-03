@@ -1,22 +1,23 @@
-//! Bridges the board extension to the selected controller, clock and active-turn services.
+//! Supplies board host capabilities through the public Core runtime interfaces.
 //!
 //! The extension owns backend construction, storage and tool registration. This adapter
 //! selects configuration and supplies host capabilities. It never starts or restores
-//! recipients and never queues a notification for an idle agent.
+//! recipients during lookup. Notifications use ordinary agent-message scheduling.
+//! Permanent board deletion uses the thread store's existing host cleanup callback.
 
-use crate::CodexThread;
-use crate::ThreadManager;
-use crate::config::Config;
-use crate::context::AgentMessageBoardNotification;
-use crate::context::ContextualUserFragment;
-use crate::tools::MULTI_AGENT_V2_NAMESPACE_DESCRIPTION;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_agent_message_board_client::RemoteAgentMessageBoard;
 use codex_agent_message_board_extension::BoardBackend;
+use codex_agent_message_board_extension::local_board_options;
+use codex_core::CodexThread;
+use codex_core::MULTI_AGENT_V2_NAMESPACE_DESCRIPTION;
+use codex_core::ThreadManager;
+use codex_core::config::Config;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ThreadStartInput;
 use codex_features::Feature;
+use codex_message_board::LocalAgentMessageBoard;
 use codex_message_board::LocalBoardConnection;
 use codex_message_board::MessageBoardHost;
 use codex_message_board::NotificationDelivery;
@@ -28,6 +29,10 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::Op;
+use codex_state::SqliteConfig;
+use codex_thread_store::ThreadStoreError;
+use codex_thread_store::ThreadStoreResult;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use std::sync::Weak;
@@ -44,7 +49,7 @@ pub fn install_agent_message_board(
         Some((
             board,
             Arc::new(LocalBoardHost {
-                expected_turn_id: Some(input.turn_id.into()),
+                remote_notifications: true,
                 ..host.as_ref().clone()
             }),
         ))
@@ -91,7 +96,7 @@ pub fn install_agent_message_board(
                     manager: manager.clone(),
                     tree,
                     caller,
-                    expected_turn_id: None,
+                    remote_notifications: false,
                     connection,
                 },
             ))
@@ -99,12 +104,30 @@ pub fn install_agent_message_board(
     );
 }
 
+/// Removes persisted agent-board data through the thread store's deletion callback.
+/// Cleanup also applies when the board feature is currently disabled.
+pub async fn delete_agent_message_boards(
+    sqlite: &SqliteConfig,
+    thread_ids: &[ThreadId],
+) -> ThreadStoreResult<()> {
+    let boards = thread_ids
+        .iter()
+        .copied()
+        .map(Into::into)
+        .collect::<Vec<_>>();
+    LocalAgentMessageBoard::delete_boards(sqlite, &local_board_options(), &boards)
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to delete agent message boards: {err}"),
+        })
+}
+
 #[derive(Clone)]
 struct LocalBoardHost {
     manager: Weak<ThreadManager>,
     tree: SessionId,
     caller: ThreadId,
-    expected_turn_id: Option<String>,
+    remote_notifications: bool,
     connection: Option<Arc<LocalBoardConnection>>,
 }
 
@@ -115,10 +138,14 @@ impl LocalBoardHost {
             .upgrade()
             .ok_or_else(|| CodexErr::ThreadNotFound(caller))?;
         if let Some(connection) = &self.connection {
-            return manager.get_thread_for_board(caller, connection).await;
+            return manager
+                .get_thread_with_extension::<LocalBoardConnection>(caller, |other| {
+                    connection.same_board(other)
+                })
+                .await;
         }
         let actor = manager.get_thread(caller).await?;
-        if actor.session.session_id() != self.tree
+        if actor.startup_metadata().session_id != self.tree
             || actor
                 .thread_extension_data()
                 .get::<LocalBoardConnection>()
@@ -132,26 +159,16 @@ impl LocalBoardHost {
     }
 
     async fn registered_path(&self, actor: &CodexThread) -> Result<AgentPath> {
-        let caller = actor.session.thread_id;
+        let caller = actor.startup_metadata().thread_id;
         if let Some(connection) = &self.connection {
             return connection.caller_path(caller);
         }
         let path = actor
-            .session_source
+            .session_source()
             .get_agent_path()
             .or_else(|| (caller == ThreadId::from(self.tree)).then(AgentPath::root))
             .ok_or_else(|| CodexErr::InvalidRequest("agent has no tree path".into()))?;
-        let resolved = actor
-            .session
-            .services
-            .agent_control
-            .resolve(
-                caller,
-                actor.session_source.parent_thread_id(),
-                &actor.session_source,
-                path.as_str(),
-            )
-            .await?;
+        let resolved = actor.resolve_agent_reference(path.as_str()).await?;
         if resolved != caller {
             return Err(CodexErr::InvalidRequest(
                 "agent does not own its tree path".into(),
@@ -182,20 +199,10 @@ impl MessageBoardHost for LocalBoardHost {
                 return self
                     .actor(caller)
                     .await
-                    .map(|actor| actor.session.thread_id);
+                    .map(|actor| actor.startup_metadata().thread_id);
             }
             let actor = self.actor(self.caller).await?;
-            actor
-                .session
-                .services
-                .agent_control
-                .resolve(
-                    self.caller,
-                    actor.session_source.parent_thread_id(),
-                    &actor.session_source,
-                    path.as_str(),
-                )
-                .await
+            actor.resolve_agent_reference(path.as_str()).await
         })
     }
 
@@ -203,13 +210,7 @@ impl MessageBoardHost for LocalBoardHost {
         Box::pin(async move {
             let actor = self.actor(caller).await?;
             self.registered_path(&actor).await?;
-            actor
-                .session
-                .services
-                .time_provider
-                .current_time(caller)
-                .await
-                .map_err(|error| CodexErr::Io(std::io::Error::other(error)))
+            actor.current_time().await
         })
     }
 
@@ -227,17 +228,29 @@ impl MessageBoardHost for LocalBoardHost {
                 Err(error) => return Err(error),
             };
             let recipient_path = self.registered_path(&recipient).await?;
-            let notice = AgentMessageBoardNotification(post);
+            let suffix = if post.truncated {
+                "\n[Use read_post for the rest.]"
+            } else {
+                ""
+            };
+            let content = format!(
+                "Message Type: CHANNEL_POST\nSender: {}\nChannel: {}\nMessage ID: {}\nThread ID: {}\nPayload:\n{}{suffix}",
+                post.metadata.author,
+                post.metadata.channel_name,
+                post.metadata.message_id,
+                post.metadata.thread_id,
+                post.text_preview,
+            );
             let communication = InterAgentCommunication::new(
-                notice.0.metadata.author.clone(),
+                post.metadata.author.clone(),
                 recipient_path,
                 Vec::new(),
-                notice.render().into_text().unwrap_or_default(),
+                content,
                 /*trigger_turn*/ false,
             );
             // Remote metadata is untrusted. Skip an oversized notice without closing
             // the receiver; the post remains available through the board tools.
-            if self.expected_turn_id.is_some()
+            if self.remote_notifications
                 && communication.content.len()
                     + communication.author.as_str().len()
                     + communication.recipient.as_str().len()
@@ -247,22 +260,13 @@ impl MessageBoardHost for LocalBoardHost {
                     "remote board notice exceeds the context budget".into(),
                 ));
             }
-            Ok(
-                if recipient
-                    .session
-                    .input_queue
-                    .deliver_mailbox_communication_to_current_turn(
-                        &recipient.session.active_turn,
-                        communication,
-                        self.expected_turn_id.as_deref(),
-                    )
-                    .await
-                {
-                    NotificationDelivery::Accepted
-                } else {
-                    NotificationDelivery::SkippedInactive
-                },
-            )
+            recipient
+                .submit(Op::InterAgentCommunication {
+                    communication,
+                    start_options: Default::default(),
+                })
+                .await?;
+            Ok(NotificationDelivery::Accepted)
         })
     }
 }

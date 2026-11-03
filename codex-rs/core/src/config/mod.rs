@@ -76,6 +76,7 @@ use codex_features::Features;
 use codex_features::FeaturesToml;
 use codex_features::MultiAgentV2ConfigToml;
 use codex_features::NetworkProxyConfigToml;
+use codex_features::RuntimeAuthMode;
 use codex_features::SleepToolMode;
 use codex_features::TokenBudgetConfigToml;
 use codex_git_utils::resolve_root_git_project_for_trust;
@@ -737,6 +738,9 @@ pub struct Config {
     /// Blank config values are treated as unset, like other Guardian policy overrides.
     pub guardian_conversation_history_prompt: Option<String>,
 
+    /// Optional bounded developer message for the gated denial reconsideration pass.
+    pub guardian_denial_reconsideration_prompt: Option<String>,
+
     /// Optional per-response history-tool budget. Guardian defaults to 4,000 tokens and
     /// preserves stricter parent tool limits.
     pub guardian_conversation_history_max_output_tokens: Option<NonZeroUsize>,
@@ -1163,6 +1167,8 @@ pub struct Config {
     pub current_time_reminder: Option<CurrentTimeReminderConfig>,
     /// How the sleep tool is selected when its feature gate is enabled.
     pub sleep_tool_mode: SleepToolMode,
+    /// Authentication mode used when runtime agent instances are enabled.
+    pub runtime_auth_mode: RuntimeAuthMode,
 
     /// Centralized feature flags; source of truth for feature gating.
     pub features: ManagedFeatures,
@@ -4030,6 +4036,15 @@ impl Config {
                 FeatureToml::Config(config) => config.mode,
             })
             .unwrap_or_default();
+        let runtime_auth_mode = cfg
+            .features
+            .as_ref()
+            .and_then(|features| features.runtime_agent_instances.as_ref())
+            .and_then(|feature| match feature {
+                FeatureToml::Enabled(_) => None,
+                FeatureToml::Config(config) => config.mode,
+            })
+            .unwrap_or_default();
         let terminal_resize_reflow = resolve_terminal_resize_reflow_config(&cfg);
 
         let agent_roles =
@@ -4302,6 +4317,20 @@ impl Config {
             .auto_review
             .as_ref()
             .and_then(|auto_review| auto_review.conversation_history_max_output_tokens);
+        let guardian_denial_reconsideration_prompt = cfg.auto_review.as_ref().and_then(|auto_review| {
+            normalize_guardian_policy_config(
+                auto_review.experimental_denial_reconsideration_prompt.as_deref(),
+            )
+        });
+        if guardian_denial_reconsideration_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.len() > crate::context::GuardianDenialReconsideration::MAX_BYTES)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "auto_review.experimental_denial_reconsideration_prompt exceeds 1,000 UTF-8 bytes",
+            ));
+        }
         let personality = personality.or(cfg.personality);
 
         let experimental_compact_prompt_path = cfg.experimental_compact_prompt_file.as_ref();
@@ -4668,6 +4697,7 @@ impl Config {
             guardian_policy_template,
             guardian_transcript_mode,
             guardian_conversation_history_prompt,
+            guardian_denial_reconsideration_prompt,
             guardian_conversation_history_max_output_tokens,
             guardian_review_timeout: cfg
                 .auto_review
@@ -4736,6 +4766,7 @@ impl Config {
             rollout_budget,
             current_time_reminder,
             sleep_tool_mode,
+            runtime_auth_mode,
             features,
             runtime_feature_defaults: BTreeMap::new(),
             suppress_unstable_features_warning: cfg
