@@ -250,10 +250,11 @@ async fn candidate(case: &Case, pool: &sqlx::SqlitePool, run: &str) -> Result<Ca
             if let Some((selection,json))=row {
                 // The retained JSON is the canonical struct serialisation; parsing
                 // it into a sorted Value would change the versioned input bytes.
-                let input_digest=digest(format!("[3,{json}]").as_bytes());
+                let version=serde_json::from_str::<Value>(&json)?["format_version"].as_u64().context("report version")?;
+                let input_digest=digest(format!("[{version},{json}]").as_bytes());
                 let path=case.home.path().join(format!("audex/reports/{run}/{input_digest}.md"));
                 if let Ok(bytes)=std::fs::read(path) {
-                    let result=Candidate { selection,id:format!("audex-report-v3:sha256:{input_digest}"),input_digest,content_digest:digest(&bytes),bytes };
+                    let result=Candidate { selection,id:format!("audex-report-v{version}:sha256:{input_digest}"),input_digest,content_digest:digest(&bytes),bytes };
                     std::fs::write(case.evidence.join(format!("candidate-{}.md",result.input_digest)),&result.bytes)?;
                     case.event(json!({"event":"candidate","selection":result.selection,"report_id":result.id,"input_digest":result.input_digest,"content_digest":result.content_digest}))?;
                     return Ok::<_,anyhow::Error>(result);
@@ -798,14 +799,18 @@ continue
             }
         );
         assert_eq!(state["generation"], if aborted { 2 } else { 1 });
+        let version = serde_json::from_str::<Value>(input_json)?["format_version"]
+            .as_u64()
+            .context("report version")?;
+        assert_eq!(version, 4);
         let expected_id = format!(
-            "audex-report-v3:sha256:{}",
-            digest(format!("[3,{input_json}]").as_bytes())
+            "audex-report-v{version}:sha256:{}",
+            digest(format!("[{version},{input_json}]").as_bytes())
         );
         let reports = case.home.path().join("audex/reports").join(&run);
         let authoritative_path = reports.join(format!(
             "{}.md",
-            digest(format!("[3,{input_json}]").as_bytes())
+            digest(format!("[{version},{input_json}]").as_bytes())
         ));
         assert!(
             !authoritative_path.exists(),

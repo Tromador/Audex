@@ -331,6 +331,43 @@ async fn public_three_reviewer_cli_preflight_replay_report_and_restart() -> Resu
             }
         }
     }
+    let frozen_db = pool(&daemon).await?;
+    let frozen_raw: String = sqlx::query_scalar("SELECT s.input_json FROM audit_report_selections s JOIN audit_runs r ON r.authoritative_selection_id=s.id WHERE r.id=?")
+        .bind(&id).fetch_one(&frozen_db).await?;
+    let frozen: Value = serde_json::from_str(&frozen_raw)?;
+    assert_eq!(frozen["format_version"], 4);
+    for reviewer in frozen["reviewers"].as_array().context("frozen reviewers")? {
+        let facts = &reviewer["provider_facts"];
+        assert_eq!(facts["route"]["value"], "daemon_configured_native");
+        assert_eq!(facts["executor"]["value"], "native");
+        assert_eq!(facts["retained_input_version"]["value"], 2);
+        let bindings = &facts["retained_bindings"]["value"];
+        assert_eq!(bindings["snapshotId"], frozen["snapshot_id"]);
+        assert_eq!(bindings["manifestDigest"], frozen["manifest_digest"]);
+        assert_eq!(bindings["briefDigest"], frozen["brief_digest"]);
+        assert_eq!(bindings["policyDigest"], reviewer["policy_digest"]);
+        assert_eq!(
+            facts["identity_evidence"]
+                .as_array()
+                .context("identity evidence")?
+                .len(),
+            2
+        );
+        let receipts = facts["receipts"].as_array().context("receipts")?;
+        assert_eq!(receipts.len(), 2);
+        assert!(
+            receipts
+                .iter()
+                .all(|r| r["operation_id"] == reviewer["operation_id"]
+                    && r["confirmed_at_ms"].is_number())
+        );
+        assert_eq!(
+            facts["subscription"]["repair_occurrences"]["status"],
+            "not_applicable"
+        );
+        assert_eq!(facts["ollama"]["resource_tag"]["status"], "not_applicable");
+    }
+    retain("format-four-native-bindings", &frozen)?;
     let report_text = String::from_utf8_lossy(&output.stdout);
     let mut previous = 0;
     for record in &records {

@@ -252,6 +252,8 @@ impl AuditStore {
             }) {
                 caveats.push("Attribution failed; received material is unvalidated history, not accepted findings.".to_owned());
             }
+            let provider_facts =
+                super::report_facts::collect(connection, &assignment, retained.as_ref()).await?;
             reviewers.push(ReviewerInput {
                 reviewer_id: row.try_get("reviewer_id")?,
                 reviewer_ordinal: row.try_get("reviewer_ordinal")?,
@@ -260,8 +262,14 @@ impl AuditStore {
                 attempt_ordinal: row.try_get("attempt_ordinal")?,
                 operation_id: row.try_get("operation_id")?,
                 provider: row.try_get("provider")?,
-                requested_model: model.clone(),
-                resolved_model: model,
+                requested_model: retained
+                    .as_ref()
+                    .map(|i| i.model.clone())
+                    .unwrap_or_else(|| model.clone()),
+                resolved_model: retained
+                    .as_ref()
+                    .and_then(|i| i.resolved_model.clone())
+                    .unwrap_or(model),
                 observed_model,
                 observation_verified: verified,
                 provider_caveats: caveats,
@@ -280,6 +288,7 @@ impl AuditStore {
                 capture_gap: row.try_get("capture_gap")?,
                 capture_failure: row.try_get("capture_failure")?,
                 capture_truncated: row.try_get("capture_truncated")?,
+                provider_facts: Some(provider_facts),
             });
         }
         let outcome = if row.try_get::<String, _>("control_intent")? == "cancel_requested" {
@@ -330,12 +339,7 @@ impl AuditStore {
                 "frozen selection digest mismatch".to_owned(),
             ));
         }
-        let input: CollectionInput = serde_json::from_str(&json)?;
-        if input.format_version != collection::FORMAT_VERSION {
-            return Err(AuditStoreError::InvalidPersistedState(
-                "unsupported frozen report format".to_owned(),
-            ));
-        }
+        let input = collection::decode(&json)?;
         if input.selection_id != id {
             return Err(AuditStoreError::InvalidPersistedState(
                 "frozen selection identity mismatch".to_owned(),
@@ -485,7 +489,7 @@ impl AuditStore {
         }
         let revision = row.try_get::<i64, _>("revision")? + 1;
         sqlx::query("INSERT INTO reports(id,run_id,format_version,input_digest,relative_path,content_digest,created_at_ms) VALUES(?,?,?,?,?,?,?)")
-            .bind(&record.id).bind(&input.run_id).bind(i64::from(collection::FORMAT_VERSION)).bind(&record.input_digest).bind(&record.relative_path).bind(&record.content_digest).bind(now_millis()).execute(&mut *tx).await?;
+            .bind(&record.id).bind(&input.run_id).bind(i64::from(input.format_version)).bind(&record.input_digest).bind(&record.relative_path).bind(&record.content_digest).bind(now_millis()).execute(&mut *tx).await?;
         let phase = if input.outcome == "success" {
             "completed"
         } else {

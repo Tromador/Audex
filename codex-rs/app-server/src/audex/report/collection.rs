@@ -2,7 +2,7 @@
 use super::*;
 use crate::audex::store::activity::ActivityRecord;
 
-pub(in crate::audex) const FORMAT_VERSION: u32 = 3;
+pub(in crate::audex) const FORMAT_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 pub(in crate::audex) struct CollectionInput {
@@ -46,11 +46,19 @@ pub(in crate::audex) struct ReviewerInput {
     pub capture_gap: Option<String>,
     pub capture_failure: Option<String>,
     pub capture_truncated: bool,
+    /// Absent only in the independent historical format-3 carrier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_facts: Option<super::facts::ProviderFacts>,
 }
 
 pub(in crate::audex) fn render(
     input: &CollectionInput,
 ) -> Result<RenderedReport, serde_json::Error> {
+    validate(input)?;
+    if input.format_version == 3 {
+        let historical = serde_json::from_slice(&serde_json::to_vec(input)?)?;
+        return super::collection_v3::render(&historical);
+    }
     let input_digest = sha256_hex(&serde_json::to_vec(&(FORMAT_VERSION, input))?);
     let id = format!("audex-report-v{FORMAT_VERSION}:sha256:{input_digest}");
     let mut output = format!(
@@ -93,6 +101,9 @@ pub(in crate::audex) fn render(
             &mut output,
             &format!("- Attempt: `{}`", reviewer.attempt_ordinal),
         );
+        if let Some(facts) = &reviewer.provider_facts {
+            super::facts::render(&mut output, facts)?;
+        }
         for caveat in &reviewer.provider_caveats {
             write_section(&mut output, "Provider caveat", caveat);
         }
@@ -174,4 +185,40 @@ pub(in crate::audex) fn render(
         content_digest: sha256_hex(&bytes),
         bytes,
     })
+}
+
+/// Decode each frozen version with its own contract before using the common
+/// selection carrier. Historical fields are never filled from live store state.
+pub(in crate::audex) fn decode(json: &str) -> Result<CollectionInput, serde_json::Error> {
+    #[derive(Deserialize)]
+    struct Version {
+        format_version: u32,
+    }
+    let version: Version = serde_json::from_str(json)?;
+    let input = match version.format_version {
+        3 => {
+            let historical: super::collection_v3::CollectionInput = serde_json::from_str(json)?;
+            serde_json::from_slice(&serde_json::to_vec(&historical)?)?
+        }
+        FORMAT_VERSION => serde_json::from_str(json)?,
+        _ => return Err(invalid("unsupported frozen report format")),
+    };
+    validate(&input)?;
+    Ok(input)
+}
+
+fn invalid(message: &str) -> serde_json::Error {
+    <serde_json::Error as serde::de::Error>::custom(message)
+}
+
+fn validate(input: &CollectionInput) -> Result<(), serde_json::Error> {
+    if !matches!(input.format_version, 3 | FORMAT_VERSION)
+        || input
+            .reviewers
+            .iter()
+            .any(|r| r.provider_facts.is_some() != (input.format_version == FORMAT_VERSION))
+    {
+        return Err(invalid("frozen report version and provider facts disagree"));
+    }
+    Ok(())
 }

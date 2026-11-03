@@ -31,6 +31,7 @@ mod attribution;
 #[cfg(test)]
 mod foundation_tests;
 mod foundations;
+mod report_facts;
 mod reporting;
 #[cfg(test)]
 mod retained_tests;

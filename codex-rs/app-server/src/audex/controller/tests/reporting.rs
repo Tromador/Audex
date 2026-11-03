@@ -902,3 +902,6 @@ async fn partial_only_collection_preserves_unfinished_text_without_claiming_a_co
     );
     Ok(())
 }
+
+#[path = "report_format4.rs"]
+mod format4;

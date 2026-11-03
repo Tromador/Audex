@@ -393,7 +393,10 @@ async fn candidate(home: &Path, run: &str) -> Result<(Value, Vec<u8>)> {
     tokio::time::timeout(Duration::from_secs(20),async{loop{
         let row=sql(home,"SELECT s.id,s.input_digest,s.input_json FROM audit_report_selections s JOIN audit_runs r ON r.authoritative_selection_id=s.id WHERE r.id=?",json!([run]));
         if let Some(row)=row.as_array().unwrap().first(){
-            let report_digest=digest(format!("[3,{}]",row["input_json"].as_str().unwrap()).as_bytes());
+            let input = row["input_json"].as_str().unwrap();
+            let version = serde_json::from_str::<Value>(input)?["format_version"].as_u64().expect("report version");
+            assert_eq!(version, 4);
+            let report_digest=digest(format!("[{version},{input}]").as_bytes());
             let path=home.join("audex/reports").join(run).join(format!("{report_digest}.md"));
             if path.is_file(){let mut row=row.clone();row["reportInputDigest"]=json!(report_digest);return Ok((row,std::fs::read(path)?));}
         }

@@ -2,6 +2,8 @@ use super::snapshot::manifest::sha256_hex;
 use serde::{Deserialize, Serialize};
 
 pub(super) mod collection;
+mod collection_v3;
+pub(super) mod facts;
 
 pub(super) const REPORT_FORMAT_VERSION: u32 = 2;
 
@@ -181,3 +183,6 @@ fn escape_inline(value: &str) -> String {
 fn escape_code(value: &str) -> String {
     value.replace('`', "\\`")
 }
+
+#[cfg(test)]
+mod tests;
