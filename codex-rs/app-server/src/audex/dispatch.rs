@@ -16,7 +16,6 @@ use codex_thread_store::{
     ThreadStore, ThreadStoreError,
 };
 use futures::future::BoxFuture;
-use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -146,26 +145,7 @@ impl DispatchFailure {
 
 type DispatchResult = Result<Observation, DispatchFailure>;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct RetainedInput {
-    version: u32,
-    brief: String,
-    provider: String,
-    model: String,
-    reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
-    #[serde(default)]
-    #[serde(rename = "requireServedIdentity")]
-    _require_served_identity: bool,
-    #[serde(rename = "expectedServedModel")]
-    _expected_served_model: Option<String>,
-    #[serde(rename = "resolvedModel")]
-    _resolved_model: Option<String>,
-    #[serde(rename = "executionAdapter")]
-    _execution_adapter: Option<String>,
-    #[serde(rename = "authenticationRoute")]
-    _authentication_route: Option<String>,
-}
+use super::retained::RetainedInput;
 
 impl CodexDispatch {
     pub(super) fn new(
@@ -250,8 +230,9 @@ impl CodexDispatch {
         let store = self.store().await?;
         let run = store.run_for_operation(operation).await?;
         let (input, _, policy, _) = store.attempt_input(operation).await?;
-        let input: RetainedInput = serde_json::from_str(&input)?;
-        anyhow::ensure!(input.version == 1, "unsupported retained audit input");
+        let input = RetainedInput::decode(&input)?;
+        input.require_native()?;
+        let settings = super::backends::BackendSettings::load(store.root_path())?;
         let snapshot = SnapshotStore::new(
             self.config.codex_home.join("audex").join("snapshots"),
             Arc::new(LocalFileSystem::unsandboxed()),
@@ -266,10 +247,10 @@ impl CodexDispatch {
             ReviewerRequest {
                 run_id: run.run_id,
                 assignment_id: run.assignment_id,
-                brief: input.brief,
-                provider: input.provider,
-                model: input.model,
-                reasoning_effort: input.reasoning_effort,
+                brief: input.brief.clone(),
+                provider: input.provider.clone(),
+                model: input.model.clone(),
+                reasoning_effort: input.reasoning_effort.clone(),
             },
             {
                 let wake = self.wake.get().cloned();
@@ -291,6 +272,17 @@ impl CodexDispatch {
             prepared.policy_digest == policy,
             "reviewer policy changed since run creation"
         );
+        input.validate_prepared(
+            &snapshot,
+            &prepared,
+            &self.config,
+            &settings,
+            if run.scheduling == "sequential" {
+                codex_app_server_protocol::AuditScheduling::Sequential
+            } else {
+                codex_app_server_protocol::AuditScheduling::Automatic
+            },
+        )?;
         Ok((snapshot, prepared))
     }
 

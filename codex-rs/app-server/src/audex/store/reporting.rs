@@ -199,13 +199,25 @@ impl AuditStore {
                 None
             };
             let model: String = row.try_get("model")?;
-            let evidence=sqlx::query("SELECT expected_model,observed_model,identity_state,model_scope FROM audit_request_admissions WHERE assignment_id=? ORDER BY admitted_at_ms,request_id")
-                .bind(&assignment).fetch_all(&mut *connection).await?;
+            let retained = super::attribution::retained(connection, &assignment).await?;
+            let subscription = retained.as_ref().is_some_and(|input| {
+                input.route()
+                    == codex_app_server_protocol::AuditAuthenticationRoute::ClaudeSubscription
+            });
+            let evidence = sqlx::query(if subscription {
+                "SELECT expected_model,observed_model,identity_state,'message' AS model_scope FROM audit_client_model_observations WHERE assignment_id=? ORDER BY execution_id,message_id"
+            } else {
+                "SELECT expected_model,observed_model,identity_state,model_scope FROM audit_request_admissions WHERE assignment_id=? ORDER BY admitted_at_ms,request_id"
+            }).bind(&assignment).fetch_all(&mut *connection).await?;
             let verified = !evidence.is_empty()
                 && evidence.iter().all(|e| {
                     e.get::<String, _>("identity_state") == "verified"
                         && e.get::<Option<String>, _>("model_scope").as_deref()
-                            == Some("generation")
+                            == Some(if subscription {
+                                "message"
+                            } else {
+                                "generation"
+                            })
                 });
             let observed_model = evidence
                 .iter()

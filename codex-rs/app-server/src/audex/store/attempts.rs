@@ -53,6 +53,18 @@ pub(super) async fn require_active_attempt(
 }
 
 impl AuditStore {
+    pub(in crate::audex) async fn has_control_action(
+        &self,
+        key: &str,
+    ) -> Result<bool, AuditStoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM audit_attempt_actions WHERE action_key=?)",
+        )
+        .bind(key)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     pub(in crate::audex) async fn attempt_by_assignment(
         &self,
         run: &str,
@@ -190,6 +202,37 @@ impl AuditStore {
             if request.action == AttemptAction::Retry {
                 let retained = sqlx::query("SELECT i.request_json,i.input_digest,i.policy_json,i.policy_digest,o.input_digest AS operation_digest,t.policy_digest AS bound_policy FROM audit_attempt_inputs i JOIN audit_attempts t ON t.assignment_id=i.assignment_id JOIN operations o ON o.assignment_id=i.assignment_id WHERE i.assignment_id=?")
                     .bind(&request.assignment_id).fetch_one(&mut *tx).await?;
+                let raw: String = retained.try_get("request_json")?;
+                if serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()
+                    .is_some_and(|v| v["version"] == 2)
+                {
+                    let input =
+                        crate::audex::retained::RetainedInput::decode(&raw).map_err(|_| {
+                            AuditStoreError::InvalidPersistedState(
+                                "invalid retained Retry bindings".to_owned(),
+                            )
+                        })?;
+                    input.require_native().map_err(|_| {
+                        AuditStoreError::InvalidTransition(
+                            "retained reviewer route is unavailable for Retry".to_owned(),
+                        )
+                    })?;
+                    let settings =
+                        crate::audex::backends::BackendSettings::load(self.root.as_path())
+                            .map_err(|_| {
+                                AuditStoreError::InvalidTransition(
+                                    "backend configuration is unavailable for Retry".to_owned(),
+                                )
+                            })?;
+                    input
+                        .validate_backend_configuration(&settings)
+                        .map_err(|_| {
+                            AuditStoreError::InvalidTransition(
+                                "backend configuration changed since approval".to_owned(),
+                            )
+                        })?;
+                }
                 let input_digest: String = retained.try_get("input_digest")?;
                 let policy_digest: String = retained.try_get("policy_digest")?;
                 if sha256_hex(retained.try_get::<String, _>("request_json")?.as_bytes())

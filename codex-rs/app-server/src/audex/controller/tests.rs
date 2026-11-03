@@ -8,6 +8,7 @@ mod foundations;
 mod remaining;
 mod reporting;
 mod residual;
+mod retained;
 mod roster;
 use codex_models_manager::{ModelOrigin, manager::StaticModelsManager};
 use codex_protocol::openai_models::ModelsResponse;
@@ -186,8 +187,23 @@ impl Dispatch for Fake {
 async fn attest_fake_completion(store: &AuditStore, run: &AuditRunRecord) -> anyhow::Result<()> {
     // A controlled fake completion explicitly includes served identity evidence.
     // Physical transport attribution is covered by the native HTTP/WS fixtures.
-    sqlx::query("INSERT OR IGNORE INTO audit_request_admissions(request_id,assignment_id,operation_id,execution_id,owner,owner_generation,run_stop_generation,transport,admitted_at_ms,send_started_at_ms,expected_model,observed_model,identity_state,model_scope) SELECT ?,?,?, 'controlled-fake','fixture',?,0,'controlled_fake',0,0,?,?,'verified','generation' WHERE EXISTS(SELECT 1 FROM audit_attempts WHERE assignment_id=? AND disposition='active')")
-        .bind(format!("fake-generation:{}",run.operation_id)).bind(&run.assignment_id).bind(&run.operation_id).bind(run.owner_generation).bind(&run.model).bind(&run.model).bind(&run.assignment_id)
+    let input = store.attempt_input(&run.operation_id).await?;
+    let retained = crate::audex::retained::RetainedInput::decode(&input.0)?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO audit_execution(operation_id,thread_id,policy_digest) VALUES(?,?,?)",
+    )
+    .bind(&run.operation_id)
+    .bind(format!("controlled-fake:{}", run.operation_id))
+    .bind(input.2)
+    .execute(&store.pool_for_tests())
+    .await?;
+    let execution = store
+        .execution(&run.operation_id)
+        .await?
+        .expect("fixture execution")
+        .0;
+    sqlx::query("INSERT OR IGNORE INTO audit_request_admissions(request_id,assignment_id,operation_id,execution_id,owner,owner_generation,run_stop_generation,transport,admitted_at_ms,send_started_at_ms,expected_model,observed_model,identity_state,model_scope) SELECT ?,?,?,?,'fixture',?,0,'controlled_fake',0,0,?,?,'verified','generation' WHERE EXISTS(SELECT 1 FROM audit_attempts WHERE assignment_id=? AND disposition='active')")
+        .bind(format!("fake-generation:{}",run.operation_id)).bind(&run.assignment_id).bind(&run.operation_id).bind(execution).bind(run.owner_generation).bind(retained.expected_model()).bind(retained.expected_model()).bind(&run.assignment_id)
         .execute(&store.pool_for_tests()).await?;
     Ok(())
 }

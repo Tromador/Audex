@@ -118,7 +118,13 @@ impl AuditStore {
         .fetch_one(&mut *tx)
         .await?;
         let input: serde_json::Value = serde_json::from_str(&input)?;
+        if input["authenticationRoute"] == "claude_subscription" {
+            return Err(AuditStoreError::InvalidTransition(
+                "subscription observations cannot acquire generation admissions".to_owned(),
+            ));
+        }
         let expected = if input["requireServedIdentity"] == true
+            || input["version"] == 2
             || matches!(transport, "native_http" | "native_websocket")
         {
             let ready:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM audit_request_admissions WHERE assignment_id=? AND (identity_state NOT IN ('legacy','verified') OR (expected_model IS NOT NULL AND COALESCE(model_scope,'')<>'generation')))")
@@ -321,6 +327,15 @@ impl AuditStore {
         &self,
         assignment: &str,
     ) -> Result<Vec<codex_app_server_protocol::AuditGenerationIdentity>, AuditStoreError> {
+        let retained = self.retained_selection(assignment).await?;
+        if retained["authenticationRoute"] == "claude_subscription" {
+            return sqlx::query("SELECT message_id,expected_model,observed_model,identity_state FROM audit_client_model_observations WHERE assignment_id=? ORDER BY execution_id,message_id")
+                .bind(assignment).fetch_all(&self.pool).await?.into_iter().map(|row| Ok(codex_app_server_protocol::AuditGenerationIdentity {
+                    request_id: row.try_get("message_id")?, transport: "claude_client_message".to_owned(),
+                    expected_model: row.try_get("expected_model")?, observed_model: row.try_get("observed_model")?,
+                    state: row.try_get("identity_state")?, evidence_scope: Some("message".to_owned()),
+                })).collect();
+        }
         sqlx::query("SELECT request_id,transport,expected_model,observed_model,identity_state,model_scope FROM audit_request_admissions WHERE assignment_id=? ORDER BY admitted_at_ms,request_id")
             .bind(assignment).fetch_all(&self.pool).await?.into_iter().map(|row|Ok(codex_app_server_protocol::AuditGenerationIdentity {
                 request_id:row.try_get("request_id")?,transport:row.try_get("transport")?,expected_model:row.try_get("expected_model")?,observed_model:row.try_get("observed_model")?,state:row.try_get("identity_state")?,evidence_scope:row.try_get("model_scope")?,

@@ -345,6 +345,23 @@ impl AuditController {
                             && params.expected_served_model.is_none(),
                         "roster and singular reviewer selection are mutually exclusive"
                     );
+                    for selection in roster {
+                        selection.validate().map_err(anyhow::Error::msg)?;
+                    }
+                    if roster.iter().any(|selection| {
+                        selection.authentication_route
+                            != AuditAuthenticationRoute::DaemonConfiguredNative
+                    }) {
+                        if AuditStore::request_key_exists_read_only(&self.root, &params.request_key)
+                            .await?
+                        {
+                            return Err(super::store::AuditStoreError::IdempotencyConflict(
+                                params.request_key.clone(),
+                            )
+                            .into());
+                        }
+                        anyhow::bail!("reviewer route is unavailable for commissioning");
+                    }
                     roster
                         .iter()
                         .map(|r| {
@@ -535,6 +552,7 @@ impl AuditController {
             .find_idempotent_request(&params.request_key, &identity)
             .await?
         {
+            // A replay retrieves the original approval; it authorises no fresh execution.
             return self.view(&existing.run_id).await;
         }
         anyhow::ensure!(!self.stop.is_cancelled(), "server is quiescing");
@@ -542,6 +560,7 @@ impl AuditController {
             self.dispatch.available(),
             "reviewer execution is unavailable"
         );
+        let settings = super::backends::BackendSettings::load(self.root.as_path())?;
         let mut commissions = Vec::with_capacity(reviewers.len());
         for selection in reviewers {
             // Preflight never starts a thread; all attempts are commissioned together.
@@ -566,13 +585,30 @@ impl AuditController {
             ))
             .await?;
             let policy_json = serde_json::to_string(&prepared.policy)?;
-            let request_json = serde_json::to_string(&serde_json::json!({
-                "version":1, "brief":params.brief, "provider":selection.provider, "model":selection.model,
-                "reasoningEffort":prepared.options.config.model_reasoning_effort,
-                "requireServedIdentity":true,"expectedServedModel":selection.expected_served_model,
-                "resolvedModel":prepared.policy["model_metadata"]["slug"],
-                "executionAdapter":"native","authenticationRoute":"daemon_configured_native",
-            }))?;
+            let bindings = super::retained::PolicyBindings::native(
+                &snapshot,
+                &params.brief,
+                &prepared,
+                &self.config,
+                &selection.provider,
+                &settings,
+                params.scheduling.clone(),
+            )?;
+            let request_json = serde_json::to_string(&super::retained::RetainedInput {
+                version: 2,
+                brief: params.brief.clone(),
+                provider: selection.provider.clone(),
+                model: selection.model.clone(),
+                reasoning_effort: prepared.options.config.model_reasoning_effort.clone(),
+                require_served_identity: true,
+                expected_served_model: selection.expected_served_model,
+                resolved_model: prepared.policy["model_metadata"]["slug"]
+                    .as_str()
+                    .map(str::to_owned),
+                execution_adapter: Some(AuditExecutionAdapter::Native),
+                authentication_route: Some(AuditAuthenticationRoute::DaemonConfiguredNative),
+                bindings: Some(bindings),
+            })?;
             let request_digest = sha256_hex(request_json.as_bytes());
             commissions.push(super::store::ReviewerCommission {
                 request: CreateRunRequest {
@@ -982,6 +1018,17 @@ impl AuditController {
                     )
                     .await?;
             } else if self.dispatch.available() && !self.stop.is_cancelled() {
+                if self.revalidate_retained(&run).await.is_err() {
+                    store
+                        .finish_operation(
+                            &run.operation_id,
+                            run.attempt_revision,
+                            AssignmentState::Failed,
+                            "retained execution policy or configuration is unavailable or changed",
+                        )
+                        .await?;
+                    return self.progress(id).await;
+                }
                 let now = chrono::Utc::now().timestamp_millis();
                 if store
                     .claim_operation_with_limit(

@@ -27,10 +27,13 @@ static AUDEX_MIGRATOR: Migrator = sqlx_macros::migrate!("./migrations/audex");
 pub(super) mod activity;
 pub(super) mod admission;
 pub(super) mod attempts;
+mod attribution;
 #[cfg(test)]
 mod foundation_tests;
 mod foundations;
 mod reporting;
+#[cfg(test)]
+mod retained_tests;
 pub(super) mod source;
 #[cfg(test)]
 mod submission_tests;
@@ -944,6 +947,39 @@ pub(crate) enum AuditStoreError {
 }
 
 impl AuditStore {
+    pub(in crate::audex) async fn request_key_exists_read_only(
+        root: &AbsolutePathBuf,
+        key: &str,
+    ) -> anyhow::Result<bool> {
+        let path = root.join(DATABASE_FILENAME);
+        if !path.exists() {
+            return Ok(false);
+        }
+        let sqlite =
+            codex_state::SqliteConfig::from_sqlite_home_with_nfs_enforcement(root.clone(), false);
+        let pool = sqlite
+            .open_read_only_pool(&path, Some(BUSY_TIMEOUT))
+            .await?;
+        let found = async {
+            let mut tx = pool.begin().await?;
+            // The scheduler can have created the file but not yet committed its schema.
+            let ready: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit_runs')")
+                .fetch_one(&mut *tx).await?;
+            let found = if ready {
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_runs WHERE request_key=?)")
+                    .bind(key).fetch_one(&mut *tx).await?
+            } else { false };
+            tx.commit().await?;
+            Ok::<_, sqlx::Error>(found)
+        }.await;
+        pool.close().await;
+        Ok(found?)
+    }
+
+    pub(in crate::audex) fn root_path(&self) -> &Path {
+        self.root.as_path()
+    }
+
     pub(super) async fn find_request(
         &self,
         key: &str,
@@ -1959,13 +1995,7 @@ impl AuditStore {
         require_operation_state(context.operation_state, OperationState::Accepted)?;
         let next_revision = context.attempt_revision + 1;
         let now = now_millis();
-        let attribution_ok:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM audit_attempts t LEFT JOIN audit_attempt_inputs i ON i.assignment_id=t.assignment_id WHERE t.assignment_id=? AND (t.attribution_failure IS NOT NULL OR EXISTS(SELECT 1 FROM audit_request_admissions g WHERE g.assignment_id=t.assignment_id AND g.expected_model IS NOT NULL AND (g.identity_state<>'verified' OR COALESCE(g.model_scope,'')<>'generation')) OR (CASE WHEN json_valid(i.request_json) THEN COALESCE(json_extract(i.request_json,'$.requireServedIdentity'),0) ELSE 0 END=1 AND (NOT EXISTS(SELECT 1 FROM audit_request_admissions g WHERE g.assignment_id=t.assignment_id) OR EXISTS(SELECT 1 FROM audit_request_admissions g WHERE g.assignment_id=t.assignment_id AND g.identity_state<>'verified')))))")
-            .bind(&context.assignment_id).fetch_one(&mut *transaction).await?;
-        if !attribution_ok {
-            return Err(AuditStoreError::InvalidTransition(
-                "completed result has no verified per-generation model attribution".to_owned(),
-            ));
-        }
+        attribution::require_completion(&mut transaction, &context.assignment_id, &digest).await?;
         sqlx::query("UPDATE operations SET state='observed_terminal', updated_at_ms=? WHERE id=?")
             .bind(now)
             .bind(operation_id)

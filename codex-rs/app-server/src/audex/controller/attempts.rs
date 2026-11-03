@@ -2,6 +2,56 @@ use super::*;
 use crate::audex::store::attempts::{AttemptAction, ControlRequest};
 
 impl AuditController {
+    pub(super) async fn revalidate_retained(&self, record: &AuditRunRecord) -> anyhow::Result<()> {
+        let (raw, policy_json, policy_digest, manifest_digest) = self
+            .store()
+            .await?
+            .attempt_input(&record.operation_id)
+            .await?;
+        let input = super::super::retained::RetainedInput::decode(&raw)?;
+        input.require_native()?;
+        let settings = super::super::backends::BackendSettings::load(self.root.as_path())?;
+        let snapshot = self
+            .snapshots()
+            .open(&SnapshotId::parse(record.snapshot_id.clone())?)
+            .await?;
+        anyhow::ensure!(
+            sha256_hex(policy_json.as_bytes()) == policy_digest
+                && sha256_hex(&snapshot.manifest().to_pretty_bytes()?) == manifest_digest,
+            "retained Retry source or policy digest mismatch"
+        );
+        let prepared = Box::pin(reviewer::prepare(
+            &self.config,
+            self.models.as_ref(),
+            &snapshot,
+            reviewer::ReviewerRequest {
+                run_id: record.run_id.clone(),
+                assignment_id: record.assignment_id.clone(),
+                brief: input.brief.clone(),
+                provider: input.provider.clone(),
+                model: input.model.clone(),
+                reasoning_effort: input.reasoning_effort.clone(),
+            },
+            Arc::new(|_| {}),
+        ))
+        .await?;
+        anyhow::ensure!(
+            prepared.policy_digest == policy_digest,
+            "reviewer policy changed since run creation"
+        );
+        input.validate_prepared(
+            &snapshot,
+            &prepared,
+            &self.config,
+            &settings,
+            if record.scheduling == "sequential" {
+                AuditScheduling::Sequential
+            } else {
+                AuditScheduling::Automatic
+            },
+        )
+    }
+
     pub(super) async fn abort_audit(&self, run: &str) -> anyhow::Result<()> {
         let store = self.store().await?;
         // No attempt gate: a stalled observation or termination cannot delay stop.
@@ -69,7 +119,11 @@ impl AuditController {
                 && record.phase != RunPhase::Reporting
                 && record.assignment_state != AssignmentState::Succeeded
                 && capture.disposition != "ignored",
-            execution_adapter: AuditExecutionAdapter::Native,
+            execution_adapter: retained["executionAdapter"]
+                .as_str()
+                .map(|value| serde_json::from_value(serde_json::Value::String(value.to_owned())))
+                .transpose()?
+                .unwrap_or_default(),
             authentication_route: retained["authenticationRoute"]
                 .as_str()
                 .unwrap_or("native_legacy_unspecified")
@@ -174,6 +228,11 @@ impl AuditController {
             authorise_retry: params.authorise_retry,
             acknowledge_possible_overlap: params.acknowledge_possible_overlap,
         };
+        if request.action == AttemptAction::Retry
+            && !store.has_control_action(&request.action_key).await?
+        {
+            self.revalidate_retained(&record).await?;
+        }
         // No attempt transition gate or collector flush mutex is acquired here.
         let capture = self.dispatch.capture(&record.operation_id);
         let prefix = capture.as_ref().map(|capture| capture.control_prefix());

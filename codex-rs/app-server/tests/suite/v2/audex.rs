@@ -227,3 +227,6 @@ mod access_tests;
 
 #[path = "audex_typed_selections.rs"]
 mod typed_selections;
+
+#[path = "audex_retained_policy.rs"]
+mod retained_policy;
