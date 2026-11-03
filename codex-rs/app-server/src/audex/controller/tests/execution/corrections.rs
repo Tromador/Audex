@@ -41,7 +41,7 @@ fn retained_policy_allows_cold_collection_after_provider_and_catalogue_changes()
                 changed.model_provider_id.clone(),
             )
             .await?;
-            let history = thread_store_from_config(&changed, Some(state));
+            let history = ThreadStoreBuilder::from_config(&changed, Some(state)).build();
             let mut model = codex_models_manager::model_info::model_info_from_slug("audit-test");
             model.display_name = "Changed catalogue metadata after submission".into();
             let models = Arc::new(StaticModelsManager::new(
@@ -108,7 +108,7 @@ fn cancellation_after_configuration_change_uses_existing_runtime_and_retained_id
         first.drive(&id).await?;
         let mut changed = (*first.config).clone();
         changed.model_providers.clear();
-        let history = thread_store_from_config(&changed, None);
+        let history = ThreadStoreBuilder::from_config(&changed, None).build();
         let dispatch = Arc::new(CodexDispatch::new(
             Arc::new(changed),
             threads.clone(),

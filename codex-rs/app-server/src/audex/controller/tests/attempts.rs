@@ -485,6 +485,7 @@ async fn capture_deduplicates_identified_replay_and_complete_overlap_but_preserv
                     delivery: None,
                     questions: None,
                 }),
+                content_token_count: None,
                 started_at_ms: None,
                 completed_at_ms: 0,
             }),

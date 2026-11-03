@@ -477,9 +477,16 @@ impl CodexThread {
 
     /// Submits turn input without requiring the caller to inspect thread state.
     ///
-    /// The result describes whether Core started a turn, steered an active
-    /// turn, or declined it without recording or enqueueing the input.
-    /// User input and named standalone function-call outputs are accepted.
+    /// User input reports whether Core started or steered a turn. Agent messages
+    /// report acceptance into native delivery, which can wait for a later turn.
+    /// Declined input is neither recorded nor enqueued.
+    /// User input, agent messages, and named standalone function-call outputs are accepted.
+    /// Agent messages contain unformatted plaintext or encrypted content. Core adds
+    /// the agent-message context wrapper; callers must not add it themselves.
+    /// Agent messages request work here regardless of their `trigger_turn` flag.
+    /// Agent messages retain the recipient's settings. Only the message and `start`
+    /// options are passed to native delivery; `thread_settings`, `turn_extension_init`,
+    /// `additional_context`, and `responsesapi_client_metadata` are ignored.
     pub async fn start_or_steer_turn(
         &self,
         request: impl Into<WithTurnExtensionData<TurnInputRequest>>,
@@ -510,8 +517,8 @@ impl CodexThread {
             TurnInputSubmission::NotSubmitted { reason } => {
                 Ok(StartIfIdleSubmission::NotSubmitted { reason })
             }
-            TurnInputSubmission::Steered { .. } => {
-                unreachable!("start-if-idle submission cannot steer")
+            TurnInputSubmission::Steered { .. } | TurnInputSubmission::Accepted => {
+                unreachable!("start-if-idle submission must start or decline")
             }
         }
     }
@@ -578,8 +585,8 @@ impl CodexThread {
             TurnInputSubmission::NotSubmitted { reason } => {
                 Ok(StartIfIdleSubmission::NotSubmitted { reason })
             }
-            TurnInputSubmission::Steered { .. } => {
-                unreachable!("recovered turn submission cannot steer")
+            TurnInputSubmission::Steered { .. } | TurnInputSubmission::Accepted => {
+                unreachable!("recovered turn submission must start or decline")
             }
         }
     }
@@ -645,8 +652,8 @@ impl CodexThread {
             TurnInputSubmission::NotSubmitted { reason } => {
                 Ok(SteerSubmission::NotSubmitted { reason })
             }
-            TurnInputSubmission::Started { .. } => {
-                unreachable!("steer-only submission cannot start a turn")
+            TurnInputSubmission::Started { .. } | TurnInputSubmission::Accepted => {
+                unreachable!("steer-only submission must steer or decline")
             }
         }
     }
@@ -924,7 +931,7 @@ impl CodexThread {
         Ok(())
     }
 
-    /// Review the final injected exec call if approval is required, without executing it.
+    /// Review the final injected exec, patch, or permission request without executing it.
     pub async fn guardian_review(
         &self,
         cancellation: &CancellationToken,
@@ -934,7 +941,10 @@ impl CodexThread {
         }
         let history = self.session.clone_history().await;
         let tool_call = history.raw_items().next_back().cloned().ok_or_else(|| {
-            CodexErr::InvalidRequest("expected a final plaintext exec_command call".into())
+            CodexErr::InvalidRequest(
+                "expected a final plaintext exec_command, apply_patch, or request_permissions call"
+                    .into(),
+            )
         })?;
         crate::guardian::review_tool_call(&self.session, history, &tool_call, cancellation).await
     }
@@ -1359,12 +1369,8 @@ impl CodexThread {
         self.session
             .services
             .mcp_runtime
-            .latest_call_tool(
-                server, tool, /*environment_id*/ None, arguments, meta,
-                /*requested_timeout*/ None, /*wait_for_server*/ true,
-            )
+            .latest_call_tool_without_attribution(server, tool, arguments, meta)
             .await
-            .map(|call| call.result)
     }
 
     pub fn enabled(&self, feature: Feature) -> bool {
@@ -1402,6 +1408,10 @@ impl CodexThread {
         &self,
         control: &dyn AgentControl,
     ) -> CodexResult<()> {
+        // The host checks and reserves capacity when the task starts.
+        if self.session.host_turn_admission().is_some() {
+            return Ok(());
+        }
         if self.session.active_turn.lock().await.is_some() {
             return Ok(());
         }

@@ -8,6 +8,7 @@ use crate::config::NetworkProxySpec;
 use crate::config::PermissionProfileSnapshot;
 use crate::config::test_config;
 use crate::context::ContextualUserFragment;
+use crate::environment_selection::EnvironmentAttachment;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::guardian::approval_request::guardian_request_target_item_id;
 use crate::guardian::review::guardian_review_session_config;
@@ -278,6 +279,7 @@ fn guardian_mcp_request(server: &str, tool_name: &str) -> GuardianApprovalReques
             open_world_hint: Some(true),
             read_only_hint: None,
         }),
+        prompt_permissions: None,
     }
 }
 
@@ -678,10 +680,14 @@ async fn approval_permissions_use_the_owning_environment() -> anyhow::Result<()>
         ));
     let mut windows = secondary.clone();
     let windows_cwd = PathUri::parse("file:///C:/guardian-secondary")?;
-    windows.environment = Arc::new(codex_exec_server::Environment::create_for_tests(Some(
-        "ws://127.0.0.1:1".into(),
-    ))?);
     windows.selection.environment_id = "windows".into();
+    let (attachment, _guard, _) = EnvironmentAttachment::new(
+        &windows.selection.environment_id,
+        Arc::new(codex_exec_server::Environment::create_for_tests(Some(
+            "ws://127.0.0.1:1".into(),
+        ))?),
+    );
+    windows.attachment = attachment;
     windows.selection.cwd = windows_cwd.clone();
     windows.config_mut().workspace_roots = vec![windows_cwd.clone()];
     windows.config_mut().permission_profile =
@@ -3556,11 +3562,9 @@ async fn guardian_review_routes_required_actions(
 #[tokio::test]
 async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() -> anyhow::Result<()>
 {
-    const TEST_STACK_SIZE_BYTES: usize = 4 * 1024 * 1024;
-
+    // Inherit the test runner's stack budget, including the larger Windows CI setting.
     let handle = std::thread::Builder::new()
         .name("guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history".to_string())
-        .stack_size(TEST_STACK_SIZE_BYTES)
         .spawn(|| -> anyhow::Result<()> {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

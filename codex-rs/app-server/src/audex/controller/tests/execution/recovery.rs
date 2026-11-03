@@ -253,7 +253,7 @@ fn preflight_failure_is_durably_local_and_never_submitted() -> anyhow::Result<()
         let dispatch = Arc::new(CodexDispatch::new(
             Arc::new(changed.clone()),
             threads.clone(),
-            thread_store_from_config(&changed, None),
+            ThreadStoreBuilder::from_config(&changed, None).build(),
             Arc::new(|_, _| Box::pin(async { Ok(()) })),
         ));
         let controller = AuditController::new(

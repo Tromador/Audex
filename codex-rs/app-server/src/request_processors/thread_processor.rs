@@ -9,6 +9,9 @@ mod audex_access;
 
 mod workspace_switching;
 
+#[path = "thread_resume_account.rs"]
+mod thread_resume_account;
+
 use super::persisted_resume_settings::PersistedResumeSettings;
 use super::persisted_resume_settings::latest_owned_thread_settings;
 use super::persisted_resume_settings::latest_persisted_model_settings;
@@ -46,6 +49,7 @@ use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_thread_store::LocalHistoryAccount;
 use codex_thread_store::PersistContext;
 use std::ops::ControlFlow;
 
@@ -91,6 +95,7 @@ async fn remove_pending_thread_metadata(
 }
 
 struct ThreadListFilters {
+    account: Option<LocalHistoryAccount>,
     model_providers: Option<Vec<String>>,
     source_kinds: Option<Vec<ThreadSourceKind>>,
     archived: bool,
@@ -2756,6 +2761,7 @@ impl ThreadRequestProcessor {
         params: ThreadListParams,
     ) -> Result<ThreadListResponse, JSONRPCErrorError> {
         let ThreadListParams {
+            current_account_only,
             cursor,
             limit,
             excluded_thread_ids,
@@ -2877,6 +2883,7 @@ impl ThreadRequestProcessor {
                 store_sort_key,
                 sort_direction,
                 ThreadListFilters {
+                    account: self.local_history_account(current_account_only),
                     model_providers,
                     source_kinds,
                     archived: archived.unwrap_or(false),
@@ -2926,6 +2933,7 @@ impl ThreadRequestProcessor {
         params: ThreadSearchParams,
     ) -> Result<ThreadSearchResponse, JSONRPCErrorError> {
         let ThreadSearchParams {
+            current_account_only,
             cursor,
             limit,
             sort_key,
@@ -2952,6 +2960,7 @@ impl ThreadRequestProcessor {
         let mut cursor_obj = cursor;
         let mut last_cursor = cursor_obj.clone();
         let mut remaining = requested_page_size;
+        let account = self.local_history_account(current_account_only);
         let mut search_results = Vec::with_capacity(requested_page_size);
         let mut next_cursor = None;
 
@@ -2959,6 +2968,7 @@ impl ThreadRequestProcessor {
             let page = self
                 .thread_store
                 .search_threads(StoreSearchThreadsParams {
+                    account: account.clone(),
                     page_size: remaining.min(THREAD_LIST_MAX_LIMIT),
                     cursor: cursor_obj.clone(),
                     sort_key: store_sort_key,
@@ -4050,37 +4060,37 @@ impl ThreadRequestProcessor {
         let prepared_model_context = prepared_config
             .as_mut()
             .and_then(|prepared| prepared.model_context.take());
-        let resume_result = if let Some(history) = history {
-            self.resume_thread_from_history(history.as_slice())
-                .await
-                .map(|thread_history| (thread_history, None))
-        } else if let Some(stored_thread) = stored_thread_from_running_probe {
-            self.load_resume_initial_history_from_stored_thread(
-                *stored_thread,
-                prepared_model_context,
+        let (thread_history, resume_source_thread) = if let Some(history) = history {
+            (
+                self.resume_thread_from_history(history.as_slice()).await?,
+                None,
             )
-            .await
-            .map(|(thread_history, stored_thread)| (thread_history, Some(stored_thread)))
         } else {
-            match self
-                .read_stored_thread_for_resume(
-                    &thread_id,
-                    path.as_ref(),
-                    /*include_history*/ false,
-                )
-                .await
-            {
-                Ok(stored_thread) => self
-                    .load_resume_initial_history_from_stored_thread(
-                        stored_thread,
-                        prepared_model_context,
+            let stored_thread = match stored_thread_from_running_probe {
+                Some(stored_thread) => *stored_thread,
+                None => {
+                    self.read_stored_thread_for_resume(
+                        &thread_id,
+                        path.as_ref(),
+                        /*include_history*/ false,
                     )
-                    .await
-                    .map(|(thread_history, stored_thread)| (thread_history, Some(stored_thread))),
-                Err(error) => Err(error),
-            }
+                    .await?
+                }
+            };
+            thread_resume_account::check(
+                &self.config.features,
+                app_server_client_name.as_deref(),
+                &self.auth_manager,
+                &stored_thread,
+            )?;
+            let (thread_history, stored_thread) = self
+                .load_resume_initial_history_from_stored_thread(
+                    stored_thread,
+                    prepared_model_context,
+                )
+                .await?;
+            (thread_history, Some(stored_thread))
         };
-        let (thread_history, resume_source_thread) = resume_result?;
         // Path-based resume can use an empty request thread ID. Coordinate once its real
         // identity is known; unrelated loaded threads never wait for this cold startup.
         let _goal_resume_guard = if let InitialHistory::Resumed(resumed) = &thread_history {
@@ -4722,6 +4732,12 @@ impl ThreadRequestProcessor {
         };
 
         if let Some((existing_thread_id, existing_thread, mut source_thread)) = running_thread {
+            thread_resume_account::check(
+                &self.config.features,
+                app_server_client_name.as_deref(),
+                &self.auth_manager,
+                &source_thread,
+            )?;
             let paginated_resume =
                 matches!(source_thread.history_mode, ThreadHistoryMode::Paginated);
             let existing_thread_rollout_path = existing_thread.rollout_path();
@@ -6025,6 +6041,22 @@ impl ThreadRequestProcessor {
         Ok(GetConversationSummaryResponse { summary })
     }
 
+    /// Local discovery matches each recorded creator ID to the current login. Threads with
+    /// no creator IDs or predating enforcement are shared; API-key logins see all local history.
+    fn local_history_account(&self, current_account_only: bool) -> Option<LocalHistoryAccount> {
+        if !current_account_only || !self.thread_store.as_any().is::<LocalThreadStore>() {
+            return None;
+        }
+        let auth = self.auth_manager.auth_cached();
+        if auth.as_ref().is_some_and(CodexAuth::is_api_key_auth) {
+            return None;
+        }
+        Some(LocalHistoryAccount {
+            user_id: auth.as_ref().and_then(CodexAuth::get_chatgpt_user_id),
+            account_id: auth.as_ref().and_then(CodexAuth::get_account_id),
+        })
+    }
+
     async fn list_threads_common(
         &self,
         requested_page_size: usize,
@@ -6034,6 +6066,7 @@ impl ThreadRequestProcessor {
         filters: ThreadListFilters,
     ) -> Result<(Vec<StoredThread>, Option<String>), JSONRPCErrorError> {
         let ThreadListFilters {
+            account,
             model_providers,
             source_kinds,
             archived,
@@ -6096,9 +6129,24 @@ impl ThreadRequestProcessor {
                 .await
                 .map_err(thread_store_list_error)?;
 
+            let page_thread_ids: Vec<_> = page.items.iter().map(|item| item.thread_id).collect();
+            let mut original_paths = None;
             let mut filtered = Vec::with_capacity(page.items.len());
             for it in page.items {
                 if crate::audex::controller::is_reviewer_source(it.thread_source.as_ref()) {
+                    continue;
+                }
+                if let Some(account) = &account
+                    && !account
+                        .includes(
+                            &self.config.codex_home,
+                            it.thread_id,
+                            it.rollout_path.as_deref(),
+                            &page_thread_ids,
+                            &mut original_paths,
+                        )
+                        .await
+                {
                     continue;
                 }
                 let source = with_thread_spawn_agent_metadata(

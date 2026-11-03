@@ -158,6 +158,9 @@ use super::analytics::wait_for_analytics_payload;
 use super::analytics::wait_for_goal_event;
 use super::analytics::wait_for_matching_analytics_event;
 
+#[path = "thread_resume_account_tests.rs"]
+mod account_tests;
+
 #[cfg(target_os = "linux")]
 #[path = "thread_resume_network_tests.rs"]
 mod network_tests;
@@ -255,6 +258,14 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
     )
     .await??;
     timeout(DEFAULT_READ_TIMEOUT, primary.shutdown_gracefully()).await??;
+
+    assert!(
+        !codex_rollout::read_session_meta_line(&path)
+            .await?
+            .meta
+            .account_scoped,
+        "resuming legacy history must keep its cross-account visibility"
+    );
 
     let mut secondary = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -4790,6 +4801,7 @@ async fn thread_resume_prefers_persisted_git_metadata_for_local_threads() -> Res
     let rollout_dir = rollout_path.parent().expect("rollout parent directory");
     std::fs::create_dir_all(rollout_dir)?;
     let session_meta = SessionMeta {
+        account_scoped: false,
         attached_thread: false,
         creator_user_id: None,
         creator_account_id: None,

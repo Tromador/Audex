@@ -1,7 +1,7 @@
 //! Real Codex model/tool loop; HTTP is confined to a local deterministic provider.
 use super::*;
 use crate::audex::dispatch::CodexDispatch;
-use codex_core::{ThreadManager, thread_store_from_config};
+use codex_core::{ThreadManager, ThreadStoreBuilder};
 use codex_exec_server::EnvironmentManager;
 use codex_login::CodexAuth;
 use codex_protocol::ThreadId;
@@ -122,7 +122,7 @@ async fn fixture_with_transport(
     )
     .await
     .expect("thread state database");
-    let history = thread_store_from_config(&config, Some(state));
+    let history = ThreadStoreBuilder::from_config(&config, Some(state)).build();
     let auth = codex_core::test_support::auth_manager_from_auth(auth);
     let mut catalog: ModelsResponse = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
