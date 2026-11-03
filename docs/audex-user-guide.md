@@ -327,48 +327,11 @@ The controller records distinct stages such as `created`, `reviewing`, `reportin
 
 ## 7. Build and update a local Linux/WSL package
 
-This section is for running **your own source build** rather than a packaged release. These commands match the repository's current Python package builder and a GNU/Linux Rust toolchain.
+Use [Build, install and update Audex](audex-build-install.md) for the authoritative source-build, complete-package installation and update procedure.
 
-### Build
+`audex app-server daemon update --from-cli` selects the package containing the executable that invokes it. Install the newly built package and invoke its `bin/audex` as documented before selecting it. Running the command through an older installed executable selects that older package again.
 
-From the Audex checkout:
-
-```bash
-cd ~/projects/Audex/codex-rs
-cargo build -p codex-cli --bin codex
-
-cd ~/projects/Audex
-CODEX_REPO_ROOT="$PWD" python3 scripts/build_codex_package.py \
-    --target x86_64-unknown-linux-gnu \
-    --package-dir "$HOME/.chatgpt/Audex/package" \
-    --entrypoint-bin codex-rs/target/debug/codex \
-    --strip none
-```
-
-The builder also compiles or collects required auxiliary executables. On Ubuntu, building the bundled Bubblewrap executable requires the `libcap-dev` package (for `libcap.pc`). The builder's default Linux target is musl; use the explicit GNU target above unless the musl toolchain and dependencies have been installed deliberately.
-
-The builder needs `CODEX_REPO_ROOT` when invoked directly; the repository's `just assemble-codex-package` recipe normally sets this variable.
-
-### Replace a previously built local package
-
-After rebuilding the CLI:
-
-```bash
-cd ~/projects/Audex
-CODEX_REPO_ROOT="$PWD" python3 scripts/build_codex_package.py \
-    --target x86_64-unknown-linux-gnu \
-    --package-dir "$HOME/.chatgpt/Audex/package" \
-    --entrypoint-bin codex-rs/target/debug/codex \
-    --strip none --force
-```
-
-The daemon has its **own installed copy** of the package. Replacing the source package alone does not update that running backend. Install and pin the rebuilt package explicitly:
-
-```bash
-audex app-server daemon update --from-cli
-```
-
-This operation may restart the daemon; do it when no audit or operator work needs to stay active. Restart your TUI against the same socket afterwards.
+Package selection may restart the daemon. Do it when no audit or operator work needs to stay active, then reopen the TUI against the same runtime home and socket.
 
 ### Daemon lifecycle
 
@@ -384,9 +347,9 @@ Stopping the daemon is optional after using the TUI or CLI. Leave it running whe
 
 | Symptom | What to check |
 | --- | --- |
-| `CODEX_HOME` does not exist | Create `"$AUDEX_HOME/home"` with `mkdir -p` before the first daemon start. |
+| `CODEX_HOME` does not exist | Without an override, Audex creates `$HOME/.chatgpt/Audex/codex-home`. If you explicitly set `CODEX_HOME`, use a non-empty directory path and create it with `mkdir -p "$CODEX_HOME"` before starting. |
 | `/audit` says it requires the managed daemon | Check `audex app-server daemon version`, exit the TUI and launch using `audex --remote unix://` rather than implicit discovery or `--no-daemon`. |
-| Running version is a stock Codex release | Verify your `audex` function and `CODEX_HOME`. Both the client and the managed daemon must use the Audex installation. |
+| Running version is a stock Codex release | Run `type -a audex` and check for a shadowing alias, function or older executable. Verify the installed and selected package manifests using the [installation procedure](audex-build-install.md), and use the same effective `CODEX_HOME` for client and daemon. |
 | Audit protocol is incompatible | Use the matching packaged client and daemon. Update the daemon explicitly when the package changes. |
 | CLI cannot find a daemon socket | Start it with `audex app-server daemon start`. The CLI does not start or update the daemon itself. |
 | Packaging says `CODEX_REPO_ROOT` is missing | Invoke the script with `CODEX_REPO_ROOT="$PWD"` from the repository root. |

@@ -168,7 +168,13 @@ async fn daemon_startup(command: &str) -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let workspace_path = workspace.path().canonicalize()?;
     #[cfg(unix)]
-    let home = tempfile::Builder::new().tempdir_in("/tmp")?;
+    let home = {
+        let root = std::env::var_os("AUDEX_TEST_TMPDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        fs::create_dir_all(&root)?;
+        tempfile::Builder::new().tempdir_in(root)?
+    };
     #[cfg(not(unix))]
     let home = tempfile::tempdir()?;
     // Keep cold Rosetta translation outside the timed startup assertions.
