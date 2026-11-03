@@ -43,7 +43,7 @@ impl ChatWidget {
         let mut items = vec![SelectionItem {
             name: "Start a source audit".to_owned(),
             description: Some(
-                "Choose source and ordered native reviewers; confirm disclosure before inference"
+                "Choose source and ordered reviewers; confirm routes and disclosure before inference"
                     .to_owned(),
             ),
             actions: vec![Box::new(|tx| tx.send(AppEvent::AuditPrompt))],
@@ -97,7 +97,7 @@ impl ChatWidget {
             "Start a source audit".to_owned(),
             "--file ./example.rs --reviewer PROVIDER:MODEL --reviewer PROVIDER:MODEL [--sequential], or --snippet 'code' --name example.rs [--model MODEL --provider PROVIDER]".to_owned(),
             "--file ".to_owned(),
-            Some("Single-reviewer defaults use this conversation. Repeat --reviewer in order (duplicates stay distinct); reviewer JSON supports reasoningEffort/expectedServedModel. --audex-md/--agents-md select explicit context. Confirm before submission.".to_owned()),
+            Some("Single-reviewer defaults use this conversation. Repeat --reviewer in order (duplicates stay distinct); reviewer JSON supports executionAdapter/authenticationRoute and reasoningEffort/expectedServedModel. External routes remain unavailable. --audex-md/--agents-md select explicit context. Confirm before submission.".to_owned()),
             Box::new(move |args| tx.send(AppEvent::AuditCommand { thread_id, args })),
         ));
         self.request_redraw();
@@ -400,23 +400,13 @@ fn audit_start_disclosure(params: &AuditStartParams) -> String {
             content.chars().take(160).collect::<String>()
         ),
     };
-    let roster = params.reviewers.clone().unwrap_or_else(|| {
-        vec![codex_app_server_protocol::AuditReviewerSelection {
-            provider: params.provider.clone().unwrap_or_default(),
-            model: params.model.clone().unwrap_or_default(),
-            reasoning_effort: params.reasoning_effort.clone(),
-            expected_served_model: params.expected_served_model.clone(),
-            execution_adapter: Default::default(),
-        }]
-    });
     let mut text = format!(
-        "Source: {source}\nBrief: {}\nScheduling: {:?} (automatic is bounded; sequential permits one active reviewer reservation)\nOrdered native roster:\n",
-        params.brief, params.scheduling
+        "Source: {source}\nBrief: {}\nScheduling: {:?} (automatic is bounded; sequential permits one active reviewer reservation)\n{}",
+        params.brief,
+        params.scheduling,
+        codex_app_server_client::audit::reviewer_selection_disclosure(params)
     );
-    for (index, reviewer) in roster.iter().enumerate() {
-        text.push_str(&format!("{}. {} / {}; reasoning={:?}; served-model binding={:?}\n   Authentication route: daemon_configured_native (daemon credentials; API/subscription billing category and amounts are not verified here).\n",index+1,reviewer.model,reviewer.provider,reviewer.reasoning_effort,reviewer.expected_served_model));
-    }
-    text.push_str(&format!("AUDEX guidance: {}\nAGENTS evidence: {}\nSelected source, brief and explicit context are disclosed to every selected provider, including queued reviewers. All reviewers use the same sealed snapshot. Operator tools and history are not inherited.\nRequest key: {}",context_disclosure(params.audex_guidance.as_deref()),context_disclosure(params.agents_evidence.as_deref()),params.request_key));
+    text.push_str(&format!("AUDEX guidance: {}\nAGENTS evidence: {}\nIf the complete roster passes preflight, selected source, brief and explicit context will be disclosed to every selected provider, including queued reviewers. An unavailable route refuses the entire roster. All reviewers use the same sealed snapshot. Operator tools and history are not inherited.\nRequest key: {}",context_disclosure(params.audex_guidance.as_deref()),context_disclosure(params.agents_evidence.as_deref()),params.request_key));
     text
 }
 
@@ -622,6 +612,7 @@ mod management_tests {
             expected_served_model: None,
             reasoning_effort: None,
             execution_adapter: Default::default(),
+            authentication_route: Default::default(),
         };
         let params = AuditStartParams {
             request_key: "stable".into(),

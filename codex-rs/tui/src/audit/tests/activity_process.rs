@@ -117,6 +117,7 @@ stream_max_retries=0
                         expected_served_model: None,
                         reasoning_effort: None,
                         execution_adapter: Default::default(),
+                        authentication_route: Default::default(),
                     })
                     .collect(),
             ),

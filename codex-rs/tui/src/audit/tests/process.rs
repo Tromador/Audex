@@ -272,16 +272,14 @@ stream_max_retries=0
         provider: None,
         reviewers: Some(
             (0..3)
-                .map(|index| codex_app_server_protocol::AuditReviewerSelection {
-                    provider: if index == 2 {
-                        "readiness_fixture".into()
-                    } else {
-                        "audit_fixture".into()
-                    },
-                    model: "audit-test".into(),
-                    reasoning_effort: None,
-                    expected_served_model: None,
-                    execution_adapter: Default::default(),
+                .map(|index| {
+                    serde_json::from_value(json!({
+                        "provider": if index == 2 { "readiness_fixture" } else { "audit_fixture" },
+                        "model": "audit-test",
+                        "executionAdapter": "native",
+                        "authenticationRoute": "daemon_configured_native"
+                    }))
+                    .expect("typed native reviewer")
                 })
                 .collect(),
         ),

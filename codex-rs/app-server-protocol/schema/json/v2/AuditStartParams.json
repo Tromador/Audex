@@ -2,16 +2,35 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AuditAuthenticationRoute": {
+      "description": "Authentication selection is independent of provider and model. Only the daemon-configured native route is currently available for commissioning.",
+      "enum": [
+        "daemon_configured_native",
+        "claude_subscription",
+        "claude_api",
+        "ollama_local"
+      ],
+      "type": "string"
+    },
     "AuditExecutionAdapter": {
       "description": "Execution mechanism is distinct from the configured provider and authentication route.",
       "enum": [
-        "native"
+        "native",
+        "claude_client"
       ],
       "type": "string"
     },
     "AuditReviewerSelection": {
       "additionalProperties": false,
       "properties": {
+        "authenticationRoute": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuditAuthenticationRoute"
+            }
+          ],
+          "default": "daemon_configured_native"
+        },
         "executionAdapter": {
           "allOf": [
             {
@@ -153,7 +172,7 @@
       "type": "string"
     },
     "reviewers": {
-      "description": "Ordered native roster. Mutually exclusive with the singular selection.",
+      "description": "Ordered reviewer roster. Mutually exclusive with the singular native selection.",
       "items": {
         "$ref": "#/definitions/AuditReviewerSelection"
       },

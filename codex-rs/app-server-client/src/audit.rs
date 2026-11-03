@@ -71,6 +71,37 @@ pub fn require_audit_protocol_version(version: u32) -> Result<(), AuditClientErr
     Ok(())
 }
 
+/// Shared CLI/TUI disclosure of every selected route, before submission.
+/// Availability does not assert that credentials or billing have been verified.
+pub fn reviewer_selection_disclosure(params: &AuditStartParams) -> String {
+    let roster = params.reviewers.clone().unwrap_or_else(|| {
+        vec![codex_app_server_protocol::AuditReviewerSelection {
+            provider: params.provider.clone().unwrap_or_default(),
+            model: params.model.clone().unwrap_or_default(),
+            expected_served_model: params.expected_served_model.clone(),
+            reasoning_effort: params.reasoning_effort.clone(),
+            execution_adapter: Default::default(),
+            authentication_route: Default::default(),
+        }]
+    });
+    let mut text = "Ordered roster (including queued reviewers):\n".to_owned();
+    for (index, reviewer) in roster.iter().enumerate() {
+        let availability = match reviewer.validate() {
+            Err(reason) => reason,
+            Ok(()) if reviewer.authentication_route
+                == codex_app_server_protocol::AuditAuthenticationRoute::DaemonConfiguredNative =>
+                "daemon credentials; authentication/billing category and amounts are not verified here",
+            Ok(()) => "unavailable for commissioning; authentication and billing configuration have not been verified",
+        };
+        text.push_str(&format!(
+            "{}. {} / {}; executor={}; authentication route={}; reasoning={:?}; served-model binding={:?}\n   {availability}.\n",
+            index + 1, reviewer.model, reviewer.provider, reviewer.execution_adapter,
+            reviewer.authentication_route, reviewer.reasoning_effort, reviewer.expected_served_model
+        ));
+    }
+    text
+}
+
 #[derive(Clone)]
 pub struct AuditClient {
     handle: AppServerRequestHandle,
@@ -201,3 +232,7 @@ fn request_id(method: &str) -> RequestId {
     let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     RequestId::String(format!("audex-client-{method}-{id}"))
 }
+
+#[cfg(test)]
+#[path = "audit_tests.rs"]
+mod tests;

@@ -2,7 +2,7 @@ use crate::{JsonSchema, TS};
 use serde::{Deserialize, Serialize};
 
 /// Audex CLI contract, independent of the Codex executable's package version.
-pub const AUDIT_PROTOCOL_VERSION: u32 = 5;
+pub const AUDIT_PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -34,7 +34,7 @@ pub struct AuditStartParams {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
-    /// Ordered native roster. Mutually exclusive with the singular selection.
+    /// Ordered reviewer roster. Mutually exclusive with the singular native selection.
     pub reviewers: Option<Vec<AuditReviewerSelection>>,
     /// Explicitly qualified served-model alias for the singular selection.
     pub expected_served_model: Option<String>,
@@ -187,9 +187,40 @@ pub struct AuditProgressNotification {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export_to = "v2/")]
+#[derive(strum_macros::Display)]
+#[strum(serialize_all = "snake_case")]
 pub enum AuditExecutionAdapter {
     #[default]
     Native,
+    ClaudeClient,
+}
+
+impl AuditExecutionAdapter {
+    pub const ALL: [Self; 2] = [Self::Native, Self::ClaudeClient];
+}
+
+/// Authentication selection is independent of provider and model. Only the
+/// daemon-configured native route is currently available for commissioning.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "v2/")]
+#[derive(strum_macros::Display)]
+#[strum(serialize_all = "snake_case")]
+pub enum AuditAuthenticationRoute {
+    #[default]
+    DaemonConfiguredNative,
+    ClaudeSubscription,
+    ClaudeApi,
+    OllamaLocal,
+}
+
+impl AuditAuthenticationRoute {
+    pub const ALL: [Self; 4] = [
+        Self::DaemonConfiguredNative,
+        Self::ClaudeSubscription,
+        Self::ClaudeApi,
+        Self::OllamaLocal,
+    ];
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -203,6 +234,38 @@ pub struct AuditReviewerSelection {
     pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub execution_adapter: AuditExecutionAdapter,
+    #[serde(default)]
+    pub authentication_route: AuditAuthenticationRoute,
+}
+
+impl AuditReviewerSelection {
+    /// Structural validation only; availability is enforced by the controller.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.provider.trim().is_empty() || self.model.trim().is_empty() {
+            return Err("reviewer provider and model must be nonempty");
+        }
+        if self
+            .expected_served_model
+            .as_ref()
+            .is_some_and(|alias| alias.trim().is_empty() || alias.len() > 1024)
+        {
+            return Err("expected served-model identity must be nonempty and bounded");
+        }
+        if !matches!(
+            (&self.execution_adapter, &self.authentication_route),
+            (
+                AuditExecutionAdapter::Native,
+                AuditAuthenticationRoute::DaemonConfiguredNative
+                    | AuditAuthenticationRoute::OllamaLocal
+            ) | (
+                AuditExecutionAdapter::ClaudeClient,
+                AuditAuthenticationRoute::ClaudeSubscription | AuditAuthenticationRoute::ClaudeApi
+            )
+        ) {
+            return Err("incompatible reviewer executor and authentication route");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
@@ -267,6 +330,10 @@ mod tests {
         assert!(params.reviewers.is_none());
         assert_eq!(params.model.as_deref(), Some("model"));
         assert_eq!(params.scheduling, AuditScheduling::Automatic);
-        assert_eq!(AUDIT_PROTOCOL_VERSION, 5);
+        assert_eq!(AUDIT_PROTOCOL_VERSION, 6);
     }
 }
+
+#[cfg(test)]
+#[path = "audit_typed_selection_tests.rs"]
+mod typed_selection_tests;

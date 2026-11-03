@@ -84,7 +84,7 @@ pub(crate) struct AuditCommand {
     model: Option<String>,
     #[arg(long)]
     provider: Option<String>,
-    /// Repeat in reviewer order; PROVIDER:MODEL or native reviewer JSON.
+    /// Repeat in reviewer order; native PROVIDER:MODEL shorthand or typed reviewer JSON.
     #[arg(long="reviewer", conflicts_with_all=["model","provider","expected_served_model"])]
     reviewers: Vec<String>,
     #[arg(long)]
@@ -205,7 +205,10 @@ fn parse_reviewer(
     value: &str,
 ) -> Result<codex_app_server_protocol::AuditReviewerSelection, String> {
     if value.trim_start().starts_with('{') {
-        return serde_json::from_str(value).map_err(|error| error.to_string());
+        let reviewer: codex_app_server_protocol::AuditReviewerSelection =
+            serde_json::from_str(value).map_err(|error| error.to_string())?;
+        reviewer.validate().map_err(str::to_owned)?;
+        return Ok(reviewer);
     }
     let (provider, model) = value
         .split_once(':')
@@ -219,6 +222,7 @@ fn parse_reviewer(
         reasoning_effort: None,
         expected_served_model: None,
         execution_adapter: Default::default(),
+        authentication_route: Default::default(),
     })
 }
 
@@ -264,7 +268,7 @@ pub(crate) fn tool_specs() -> Vec<DynamicToolSpec> {
                 {"type":"object","properties":{"type":{"const":"snippet"},"name":{"type":"string"},"content":{"type":"string"}},"required":["type","name","content"],"additionalProperties":false}
             ]},
             "model":{"type":"string"},"provider":{"type":"string"},"brief":{"type":"string"},
-            "reviewers":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"object","properties":{"provider":{"type":"string"},"model":{"type":"string"},"reasoningEffort":{"type":"string"},"expectedServedModel":{"type":"string"},"executionAdapter":{"enum":["native"]}},"required":["provider","model"],"additionalProperties":false}},
+            "reviewers":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"object","properties":{"provider":{"type":"string"},"model":{"type":"string"},"reasoningEffort":{"type":"string"},"expectedServedModel":{"type":"string"},"executionAdapter":{"enum":codex_app_server_protocol::AuditExecutionAdapter::ALL},"authenticationRoute":{"enum":codex_app_server_protocol::AuditAuthenticationRoute::ALL}},"required":["provider","model"],"additionalProperties":false}},
             "scheduling":{"enum":["automatic","sequential"]},"expectedServedModel":{"type":"string"},"requestKey":{"type":"string"},
             "audexGuidance":{"type":"string"},"agentsEvidence":{"type":"string"}
         }), vec!["source"]),

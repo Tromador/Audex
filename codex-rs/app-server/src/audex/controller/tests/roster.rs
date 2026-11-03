@@ -29,6 +29,15 @@ async fn public_roster_is_atomic_ordered_and_idempotent_even_after_lost_acknowle
         .await
         .expect("idempotent replay");
     assert_eq!(replay["run"]["runId"], id);
+    let mut explicit_native = params.clone();
+    for selection in explicit_native["reviewers"].as_array_mut().unwrap() {
+        selection["executionAdapter"] = json!("native");
+        selection["authenticationRoute"] = json!("daemon_configured_native");
+    }
+    let replay = api(&controller, "audit/start", explicit_native)
+        .await
+        .expect("native defaults retain identity");
+    assert_eq!(replay["run"]["runId"], id);
     let attempts = controller.store().await?.attempts(&id).await?;
     assert_eq!(attempts.len(), 3);
     for (ordinal, a) in attempts.iter().enumerate() {
@@ -321,5 +330,51 @@ async fn model_disqualification_is_durable_and_fences_generations_without_discar
             "no implicit replacement inference"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_route_preflight_rejects_whole_roster_before_capture_or_dispatch()
+-> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (controller, fake, notifications) = fixture(&temp).await;
+    for (executor, route, message) in [
+        ("claude_client", "claude_subscription", "unavailable"),
+        ("claude_client", "claude_api", "unavailable"),
+        ("native", "ollama_local", "unavailable"),
+        ("native", "claude_subscription", "incompatible"),
+        ("native", "claude_api", "incompatible"),
+        ("claude_client", "daemon_configured_native", "incompatible"),
+        ("claude_client", "ollama_local", "incompatible"),
+    ] {
+        for position in 0..3 {
+            let mut params = request(&controller, "rejected", 3, false);
+            params["reviewers"][position]["executionAdapter"] = json!(executor);
+            params["reviewers"][position]["authenticationRoute"] = json!(route);
+            let error = api(&controller, "audit/start", params).await.unwrap_err();
+            assert!(error.message.contains(message), "{error:?}");
+            assert!(
+                controller.store.get().is_none(),
+                "preflight must not open the store"
+            );
+            assert!(
+                !controller.root.exists(),
+                "no captured source or durable state"
+            );
+            assert_eq!(fake.starts.load(Ordering::SeqCst), 0);
+            assert!(notifications.lock().unwrap().is_empty());
+        }
+    }
+    // An explicit scheduler tick must still find no valid preceding member to launch.
+    controller.tick().await?;
+    assert!(
+        controller
+            .store()
+            .await?
+            .list_run_ids("", 100)
+            .await?
+            .is_empty()
+    );
+    assert_eq!(fake.starts.load(Ordering::SeqCst), 0);
     Ok(())
 }

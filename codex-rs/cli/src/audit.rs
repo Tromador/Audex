@@ -40,7 +40,7 @@ pub(crate) struct AuditCommand {
     /// Reviewer model. Uses the daemon's declared value, or requires this flag.
     #[arg(long)]
     model: Option<String>,
-    /// Ordered native selection, repeated for each reviewer. Accepts PROVIDER:MODEL or a JSON AuditReviewerSelection.
+    /// Ordered selection, repeated for each reviewer. Accepts native PROVIDER:MODEL shorthand or a JSON AuditReviewerSelection.
     #[arg(long = "reviewer", conflicts_with_all = ["model", "provider", "expected_served_model"])]
     reviewers: Vec<String>,
     /// Run at most one reviewer from this audit at a time.
@@ -196,7 +196,10 @@ fn parse_reviewer(
     value: &str,
 ) -> anyhow::Result<codex_app_server_protocol::AuditReviewerSelection> {
     if value.trim_start().starts_with('{') {
-        return serde_json::from_str(value).context("invalid reviewer JSON");
+        let reviewer: codex_app_server_protocol::AuditReviewerSelection =
+            serde_json::from_str(value).context("invalid reviewer JSON")?;
+        reviewer.validate().map_err(anyhow::Error::msg)?;
+        return Ok(reviewer);
     }
     let (provider, model) = value
         .split_once(':')
@@ -210,6 +213,7 @@ fn parse_reviewer(
         model: model.to_owned(),
         reasoning_effort: None,
         execution_adapter: Default::default(),
+        authentication_route: Default::default(),
         expected_served_model: None,
     })
 }
@@ -420,6 +424,10 @@ async fn execute(
                 audex_guidance,
                 agents_evidence,
             };
+            eprint!(
+                "{}",
+                codex_app_server_client::audit::reviewer_selection_disclosure(&params)
+            );
             eprintln!("Audit request key: {request_key}");
             let run = audits.start(params).await.inspect_err(|error| {
                 if error.start_acknowledgement_uncertain() {

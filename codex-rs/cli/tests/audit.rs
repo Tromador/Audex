@@ -13,6 +13,9 @@ mod attempt_controls;
 #[path = "audit/roster.rs"]
 mod roster;
 
+#[path = "audit/typed_selections.rs"]
+mod typed_selections;
+
 #[cfg(target_os = "linux")]
 #[path = "audit/process_integration.rs"]
 mod process_integration;
@@ -538,6 +541,12 @@ async fn incompatible_protocol_and_missing_selection_fail_before_submission() ->
             json!({}),
             vec!["--model", "audit-test", "--provider", "audit_fixture"],
             "compatibility check failed",
+        ),
+        (
+            Some(5),
+            json!({}),
+            vec!["--model", "audit-test", "--provider", "audit_fixture"],
+            "incompatible Audex daemon protocol 5; this client requires 6",
         ),
         (
             Some(AUDIT_PROTOCOL_VERSION + 1),

@@ -5,4 +5,4 @@
 /**
  * Execution mechanism is distinct from the configured provider and authentication route.
  */
-export type AuditExecutionAdapter = "native";
+export type AuditExecutionAdapter = "native" | "claude_client";

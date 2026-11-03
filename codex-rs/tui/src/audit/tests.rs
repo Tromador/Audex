@@ -408,3 +408,51 @@ async fn attempt_wait_observes_original_history_and_never_follows_a_successor() 
         "no successor read, inference or control"
     );
 }
+
+#[tokio::test]
+async fn typed_reviewer_json_is_shared_by_slash_commands_and_tool_schema() {
+    let specs = tool_specs();
+    let DynamicToolSpec::Function(start) = &specs[0] else {
+        panic!("function")
+    };
+    let properties = &start.input_schema["properties"]["reviewers"]["items"]["properties"];
+    assert_eq!(
+        properties["executionAdapter"]["enum"],
+        json!(codex_app_server_protocol::AuditExecutionAdapter::ALL)
+    );
+    assert_eq!(
+        properties["authenticationRoute"]["enum"],
+        json!(codex_app_server_protocol::AuditAuthenticationRoute::ALL)
+    );
+    for (executor, route) in [
+        ("native", "daemon_configured_native"),
+        ("claude_client", "claude_subscription"),
+        ("claude_client", "claude_api"),
+        ("native", "ollama_local"),
+    ] {
+        let selection = json!({"provider":"p", "model":"m", "executionAdapter":executor, "authenticationRoute":route});
+        let command = parse_command(&format!(
+            "--snippet source --name x.rs --reviewer '{selection}' --reviewer p:m --sequential"
+        ))
+        .unwrap();
+        let AuditAction::Start(args) = command.action(std::path::Path::new(".")).await.unwrap()
+        else {
+            panic!("start")
+        };
+        let roster = args.reviewers.unwrap();
+        assert_eq!(roster.len(), 2);
+        assert_eq!(roster[0].execution_adapter.to_string(), executor);
+        assert_eq!(roster[0].authentication_route.to_string(), route);
+        assert_eq!(
+            roster[1].authentication_route,
+            codex_app_server_protocol::AuditAuthenticationRoute::DaemonConfiguredNative
+        );
+    }
+    for selection in [
+        r#"{"provider":"","model":"m"}"#,
+        r#"{"provider":"p","model":"m","executionAdapter":"native","authenticationRoute":"claude_api"}"#,
+        r#"{"provider":"p","model":"m","authenticationRoute":"unknown"}"#,
+    ] {
+        assert!(parse_reviewer(selection).is_err());
+    }
+}

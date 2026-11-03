@@ -224,3 +224,6 @@ stream_max_retries = 0
 
 #[path = "audex_access.rs"]
 mod access_tests;
+
+#[path = "audex_typed_selections.rs"]
+mod typed_selections;

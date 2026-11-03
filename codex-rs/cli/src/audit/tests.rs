@@ -319,3 +319,35 @@ fn ordered_roster_sequential_alias_and_exact_attempt_forms_parse() {
     ])
     .expect("explicit retry");
 }
+
+#[test]
+fn typed_reviewer_json_accepts_exact_routes_and_rejects_malformed_pairs() {
+    for (executor, route) in [
+        ("native", "daemon_configured_native"),
+        ("claude_client", "claude_subscription"),
+        ("claude_client", "claude_api"),
+        ("native", "ollama_local"),
+    ] {
+        let selection = serde_json::json!({"provider":"p", "model":"m", "executionAdapter":executor, "authenticationRoute":route});
+        let reviewer = parse_reviewer(&selection.to_string()).unwrap();
+        assert_eq!(reviewer.execution_adapter.to_string(), executor);
+        assert_eq!(reviewer.authentication_route.to_string(), route);
+    }
+    for selection in [
+        r#"{"provider":"","model":"m"}"#,
+        r#"{"provider":"p","model":"m","executionAdapter":"native","authenticationRoute":"claude_api"}"#,
+        r#"{"provider":"p","model":"m","authenticationRoute":"unknown"}"#,
+    ] {
+        assert!(parse_reviewer(selection).is_err());
+    }
+    let shorthand = parse_reviewer("p:model:tag").unwrap();
+    assert_eq!(shorthand.model, "model:tag");
+    assert_eq!(
+        shorthand.execution_adapter,
+        codex_app_server_protocol::AuditExecutionAdapter::Native
+    );
+    assert_eq!(
+        shorthand.authentication_route,
+        codex_app_server_protocol::AuditAuthenticationRoute::DaemonConfiguredNative
+    );
+}

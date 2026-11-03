@@ -155,7 +155,8 @@
     "AuditExecutionAdapter": {
       "description": "Execution mechanism is distinct from the configured provider and authentication route.",
       "enum": [
-        "native"
+        "native",
+        "claude_client"
       ],
       "type": "string"
     },

@@ -685,3 +685,6 @@ fn pending_observer_recovers_and_delivers_report_once_without_another_inference(
         Ok(())
     })
 }
+
+#[path = "typed_selections.rs"]
+mod typed_selections;

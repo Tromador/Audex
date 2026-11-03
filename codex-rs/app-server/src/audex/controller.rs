@@ -347,13 +347,21 @@ impl AuditController {
                     );
                     roster
                         .iter()
-                        .map(|r| ReviewerSelection {
-                            provider: r.provider.clone(),
-                            model: r.model.clone(),
-                            reasoning_effort: r.reasoning_effort.clone(),
-                            expected_served_model: r.expected_served_model.clone(),
+                        .map(|r| {
+                            r.validate().map_err(anyhow::Error::msg)?;
+                            anyhow::ensure!(
+                                r.authentication_route == AuditAuthenticationRoute::DaemonConfiguredNative,
+                                "reviewer route {:?} with executor {:?} is unavailable for commissioning",
+                                r.authentication_route, r.execution_adapter
+                            );
+                            Ok(ReviewerSelection {
+                                provider: r.provider.clone(),
+                                model: r.model.clone(),
+                                reasoning_effort: r.reasoning_effort.clone(),
+                                expected_served_model: r.expected_served_model.clone(),
+                            })
                         })
-                        .collect()
+                        .collect::<anyhow::Result<Vec<_>>>()?
                 } else {
                     vec![ReviewerSelection {
                         provider: params

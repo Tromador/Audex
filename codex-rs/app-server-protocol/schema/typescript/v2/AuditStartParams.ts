@@ -7,7 +7,7 @@ import type { AuditSource } from "./AuditSource";
 
 export type AuditStartParams = { requestKey: string, source: AuditSource, brief: string, provider: string | null, model: string | null, reasoningEffort: string | null,
 /**
- * Ordered native roster. Mutually exclusive with the singular selection.
+ * Ordered reviewer roster. Mutually exclusive with the singular native selection.
  */
 reviewers: Array<AuditReviewerSelection> | null,
 /**

@@ -61,6 +61,7 @@ export type { AuditAttemptReadResponse } from "./AuditAttemptReadResponse";
 export type { AuditAttemptView } from "./AuditAttemptView";
 export type { AuditAttemptsParams } from "./AuditAttemptsParams";
 export type { AuditAttemptsResponse } from "./AuditAttemptsResponse";
+export type { AuditAuthenticationRoute } from "./AuditAuthenticationRoute";
 export type { AuditCancelParams } from "./AuditCancelParams";
 export type { AuditCancelResponse } from "./AuditCancelResponse";
 export type { AuditCapabilitiesParams } from "./AuditCapabilitiesParams";
