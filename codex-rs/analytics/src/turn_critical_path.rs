@@ -30,13 +30,18 @@ impl TurnCriticalPath {
 }
 
 /// Category totals over the server turn interval, truncated to milliseconds.
-/// Sampling and compaction both contribute to inference. Independent truncation
-/// can leave the category sum up to five milliseconds below duration_ms.
+/// Inference is the compatibility total of sampling and compaction, not another leaf.
+/// Independent truncation can leave the seven leaf categories up to six milliseconds
+/// below duration_ms, and sampling_ms + compaction_ms up to one below inference_ms.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TurnCriticalPathDurations {
     pub duration_ms: u64,
     pub inference_ms: u64,
+    pub sampling_ms: u64,
+    pub compaction_ms: u64,
     pub auto_review_ms: u64,
+    /// Portion of auto_review_ms outside observed Guardian turn execution; not additive.
+    pub auto_review_overhead_ms: Option<u64>,
     pub user_wait_ms: u64,
     pub tools_ms: u64,
     pub overhead_ms: u64,
@@ -48,7 +53,10 @@ pub(crate) struct CriticalPathEventParams {
     critical_path_status: &'static str,
     critical_path_duration_ms: Option<u64>,
     critical_path_inference_ms: Option<u64>,
+    critical_path_sampling_ms: Option<u64>,
+    critical_path_compaction_ms: Option<u64>,
     critical_path_auto_review_ms: Option<u64>,
+    critical_path_auto_review_overhead_ms: Option<u64>,
     critical_path_user_wait_ms: Option<u64>,
     critical_path_tools_ms: Option<u64>,
     critical_path_overhead_ms: Option<u64>,
@@ -62,7 +70,11 @@ impl From<TurnCriticalPath> for CriticalPathEventParams {
             critical_path_status: path.status(),
             critical_path_duration_ms: durations.map(|value| value.duration_ms),
             critical_path_inference_ms: durations.map(|value| value.inference_ms),
+            critical_path_sampling_ms: durations.map(|value| value.sampling_ms),
+            critical_path_compaction_ms: durations.map(|value| value.compaction_ms),
             critical_path_auto_review_ms: durations.map(|value| value.auto_review_ms),
+            critical_path_auto_review_overhead_ms: durations
+                .and_then(|value| value.auto_review_overhead_ms),
             critical_path_user_wait_ms: durations.map(|value| value.user_wait_ms),
             critical_path_tools_ms: durations.map(|value| value.tools_ms),
             critical_path_overhead_ms: durations.map(|value| value.overhead_ms),

@@ -86,6 +86,10 @@ pub struct CodexHarnessMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_source: Option<RetainedSource>,
 
+    /// The harness rendered client-supplied untrusted additional context as a standalone tool output.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub additional_context_tool_output: bool,
+
     /// Whether a developer message was supplied by a client or a client requested tool-output retention.
     #[serde(default)]
     pub client_authored: bool,
@@ -107,6 +111,10 @@ pub struct CodexHarnessMetadata {
     /// Whether a response configuration update was created by the Codex harness itself.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub harness_authored_configuration: bool,
+
+    /// The exact input to this opaque checkpoint contained no audio or file-backed images.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compaction_without_file_error_sources: bool,
 
     /// Producer compatibility for an opaque compaction item, never the currently selected model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -280,6 +288,7 @@ mod sender_user_messages;
 pub use sender_user_messages::SenderUserMessages;
 
 pub use reconciled_retained_context::ReconciledRetainedContext;
+pub use retained_context::AcceptedFileAudio;
 pub use retained_context::RetainedContext;
 pub use retained_context::RetainedContextEntry;
 pub use retained_context::RetainedContextEvent;

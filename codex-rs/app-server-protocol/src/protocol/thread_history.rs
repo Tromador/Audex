@@ -4833,6 +4833,7 @@ mod tests {
                     misalignment: None,
                     message: "Selected model is at capacity. Please try a different model.".into(),
                     codex_error_info: Some(CodexErrorInfo::PolicyCapacityUnavailable),
+                    rejected_audio_file_ids: Vec::new(),
                 }),
                 completed_at: Some(20),
                 duration_ms: Some(10_000),
@@ -5242,6 +5243,7 @@ mod tests {
                 misalignment: None,
                 message: "rollback failed".into(),
                 codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                rejected_audio_file_ids: Vec::new(),
             }),
         ];
 
@@ -5289,6 +5291,7 @@ mod tests {
                 misalignment: None,
                 message: "request-level failure".into(),
                 codex_error_info: Some(CodexErrorInfo::BadRequest),
+                rejected_audio_file_ids: Vec::new(),
             }),
         ];
 
@@ -5347,6 +5350,7 @@ mod tests {
                 codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
                     http_status_code: Some(502),
                 }),
+                rejected_audio_file_ids: Vec::new(),
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 root_turn_id: None,
@@ -5412,6 +5416,7 @@ mod tests {
                     misalignment: None,
                     message: "Selected model is at capacity. Please try a different model.".into(),
                     codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
+                    rejected_audio_file_ids: Vec::new(),
                 }),
                 completed_at: Some(20),
                 duration_ms: Some(10_000),
@@ -5454,10 +5459,13 @@ mod tests {
 
     #[test]
     fn rebuilds_hook_prompt_items_from_rollout_response_items() {
-        let hook_prompt = build_hook_prompt_message(&[
-            CoreHookPromptFragment::from_single_hook("Retry with tests.", "hook-run-1"),
-            CoreHookPromptFragment::from_single_hook("Then summarize cleanly.", "hook-run-2"),
-        ])
+        let hook_prompt = build_hook_prompt_message(
+            &[
+                CoreHookPromptFragment::from_single_hook("Retry with tests.", "hook-run-1"),
+                CoreHookPromptFragment::from_single_hook("Then summarize cleanly.", "hook-run-2"),
+            ],
+            &codex_protocol_test_support::uuid_v7_item_id_generator_for_test(),
+        )
         .expect("hook prompt message");
         let items = vec![
             RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {

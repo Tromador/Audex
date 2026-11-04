@@ -104,7 +104,15 @@ pub(crate) struct KeymapActionId {
 
 impl KeymapActionId {
     pub(crate) fn is_side_pane(self) -> bool {
-        self.context == KeymapContext::Global && self.action == "hide_pane"
+        self.context == KeymapContext::Global
+            && matches!(
+                self.action,
+                "focus_main_composer"
+                    | "focus_sidebar_content"
+                    | "hide_pane"
+                    | "focus_pane_left"
+                    | "focus_pane_right"
+            )
     }
 
     /// Whether two actions can be active together, including list-specific exceptions.
@@ -299,7 +307,11 @@ define_runtime_action_bindings! {
         find_transcript,
         select_transcript,
         focus_activity,
+        focus_main_composer,
+        focus_sidebar_content,
         hide_pane,
+        focus_pane_left,
+        focus_pane_right,
         open_warnings => runtime_only,
         open_external_editor,
         copy,

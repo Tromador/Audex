@@ -81,6 +81,7 @@ use codex_login::default_client::add_originator_header;
 use codex_otel::SessionTelemetry;
 use codex_otel::WEBSOCKET_CONTINUATION_COUNT_METRIC;
 use codex_otel::current_span_w3c_trace_context;
+use codex_protocol::ItemIdGenerator;
 use codex_protocol::ResponseItemId;
 use codex_protocol::auth::AuthMode;
 
@@ -200,9 +201,9 @@ fn session_telemetry_for_request(
 ///
 /// This is intentionally kept minimal so `ModelClient` does not need to hold a full `Config`. Most
 /// configuration is per turn and is passed explicitly to streaming/unary methods.
-#[derive(Debug)]
 struct ModelClientState {
     thread_id: ThreadId,
+    item_id_generator: ItemIdGenerator,
     provider: SharedModelProvider,
     workspace_routing: WorkspaceRoutingContext,
     auth_env_telemetry: AuthEnvTelemetry,
@@ -223,6 +224,51 @@ struct ModelClientState {
     cached_websocket_session: StdMutex<WebsocketSession>,
     /// Last full tool list used for sampling, retained across turns and connection resets.
     last_inference_tools: StdMutex<Option<Arc<[ToolSpec]>>>,
+}
+
+impl std::fmt::Debug for ModelClientState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelClientState")
+            .field("thread_id", &self.thread_id)
+            .field("provider", &self.provider)
+            .field("workspace_routing", &self.workspace_routing)
+            .field("auth_env_telemetry", &self.auth_env_telemetry)
+            .field("session_source", &self.session_source)
+            .field("originator", &self.originator)
+            .field("model_verbosity", &self.model_verbosity)
+            .field(
+                "content_item_kinds_enabled",
+                &self.content_item_kinds_enabled,
+            )
+            .field(
+                "reasoning_effort_override_enabled",
+                &self.reasoning_effort_override_enabled,
+            )
+            .field(
+                "enable_request_compression",
+                &self.enable_request_compression,
+            )
+            .field("include_timing_metrics", &self.include_timing_metrics)
+            .field("beta_features_header", &self.beta_features_header)
+            .field(
+                "concurrent_reasoning_summaries_enabled",
+                &self.concurrent_reasoning_summaries_enabled,
+            )
+            .field(
+                "output_token_replay_enabled",
+                &self.output_token_replay_enabled,
+            )
+            .field("include_attestation", &self.include_attestation)
+            .field("attestation_provider", &self.attestation_provider)
+            .field("disable_websockets", &self.disable_websockets)
+            .field(
+                "agent_identity_session_fallback",
+                &self.agent_identity_session_fallback,
+            )
+            .field("cached_websocket_session", &self.cached_websocket_session)
+            .field("last_inference_tools", &self.last_inference_tools)
+            .finish()
+    }
 }
 
 enum ClientRouting {
@@ -561,6 +607,7 @@ impl ModelClient {
         model_provider: SharedModelProvider,
         agent_identity_policy: AgentIdentityAuthPolicy,
         thread_id: ThreadId,
+        item_id_generator: ItemIdGenerator,
         session_source: SessionSource,
         originator: String,
         model_verbosity: Option<VerbosityConfig>,
@@ -596,6 +643,7 @@ impl ModelClient {
         Self {
             state: Arc::new(ModelClientState {
                 thread_id,
+                item_id_generator,
                 provider: model_provider,
                 workspace_routing,
                 auth_env_telemetry,
@@ -1948,7 +1996,7 @@ impl ResponsesHttpExecutor<'_> {
                         stream,
                         request_session_telemetry,
                         inference_trace_attempt,
-                        Arc::clone(&self.client.state.provider),
+                        &self.client.state,
                         interceptors,
                         /*last_response_tx*/ None,
                         generation.clone(),
@@ -2295,7 +2343,7 @@ impl ModelClientSession {
                 stream_result,
                 request_session_telemetry,
                 inference_trace_attempt,
-                Arc::clone(&self.client.state.provider),
+                &self.client.state,
                 interceptors,
                 Some(last_response_tx),
                 generation.clone(),
@@ -2583,7 +2631,7 @@ fn map_response_stream(
     mut api_stream: codex_api::ResponseStream,
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
-    provider: SharedModelProvider,
+    client: &ModelClientState,
     interceptors: Vec<Box<dyn codex_extension_api::ModelResponseInterceptor>>,
     last_response_tx: Option<oneshot::Sender<LastResponse>>,
     generation: Option<codex_api::GenerationRequest>,
@@ -2596,7 +2644,7 @@ fn map_response_stream(
         crate::model_request::intercept_stream(Box::pin(api_stream), interceptors),
         session_telemetry,
         inference_trace_attempt,
-        provider,
+        client,
         last_response_tx,
         generation,
     );
@@ -2610,7 +2658,7 @@ fn map_response_events<S>(
     api_stream: S,
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
-    provider: SharedModelProvider,
+    client: &ModelClientState,
     mut last_response_tx: Option<oneshot::Sender<LastResponse>>,
     generation: Option<codex_api::GenerationRequest>,
 ) -> ResponseStream
@@ -2624,6 +2672,8 @@ where
         mpsc::channel::<Result<ResponseEvent>>(RESPONSE_STREAM_CHANNEL_CAPACITY);
     let consumer_dropped = CancellationToken::new();
     let consumer_dropped_for_stream = consumer_dropped.clone();
+    let provider = Arc::clone(&client.provider);
+    let item_id_generator = Arc::clone(&client.item_id_generator);
 
     tokio::spawn(async move {
         let mut logged_error = false;
@@ -2685,7 +2735,7 @@ where
                         item.set_id(
                             active_item_id
                                 .take()
-                                .or_else(|| item.id_prefix().map(ResponseItemId::new)),
+                                .or_else(|| item.id_prefix().map(item_id_generator.as_ref())),
                         );
                     }
                     active_item_id = None;
@@ -2745,7 +2795,7 @@ where
                 Ok(mut event) => {
                     if let ResponseEvent::OutputItemAdded(item) = &mut event {
                         if item.id().is_none_or(|id| id.is_empty()) {
-                            item.set_id(item.id_prefix().map(ResponseItemId::new));
+                            item.set_id(item.id_prefix().map(item_id_generator.as_ref()));
                         }
                         active_item_id = item.id().cloned();
                     }

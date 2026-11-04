@@ -2252,6 +2252,7 @@ dependencies = [
  "codex-extension-items",
  "codex-history",
  "codex-protocol",
+ "codex-protocol-test-support",
  "codex-rollout",
  "codex-secrets",
  "codex-shell-command",
@@ -2439,18 +2440,23 @@ name = "codex-backend-client"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "codex-api",
  "codex-backend-openapi-models",
+ "codex-features",
  "codex-http-client",
  "codex-login",
  "codex-model-provider",
  "codex-protocol",
+ "codex-runtime-agent-instance",
  "http 1.4.0",
  "pretty_assertions",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "url",
+ "uuid",
  "wiremock",
 ]
 
@@ -3332,7 +3338,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "which 8.0.0",
  "windows-sys 0.61.2",
  "wiremock",
 ]
@@ -3761,6 +3766,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "codex-protocol",
+ "codex-protocol-test-support",
  "pretty_assertions",
  "schemars 0.8.22",
  "serde",
@@ -4597,6 +4603,7 @@ name = "codex-protocol-test-support"
 version = "0.0.0"
 dependencies = [
  "codex-protocol",
+ "uuid",
 ]
 
 [[package]]
@@ -4780,6 +4787,7 @@ name = "codex-runtime-agent-instance"
 version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "codex-agent-identity",
  "codex-api",
  "codex-features",
@@ -4787,6 +4795,7 @@ dependencies = [
  "codex-login",
  "codex-utils-redacted-string",
  "ed25519-dalek",
+ "futures",
  "http 1.4.0",
  "pretty_assertions",
  "rand 0.9.3",
@@ -5030,6 +5039,7 @@ dependencies = [
  "codex-install-context",
  "codex-otel",
  "codex-protocol",
+ "codex-protocol-test-support",
  "codex-rollout",
  "codex-state",
  "codex-utils-absolute-path",
@@ -5642,6 +5652,7 @@ dependencies = [
  "dirs-next",
  "dunce",
  "glob",
+ "ignore",
  "pretty_assertions",
  "rand 0.8.6",
  "serde",
@@ -16675,7 +16686,7 @@ dependencies = [
 [[package]]
 name = "v8"
 version = "152.2.0"
-source = "git+https://github.com/seanh-oai/rusty_v8.git?rev=350c5a859a9b3c84ab8701b3ad51e3b7699b30c0#350c5a859a9b3c84ab8701b3ad51e3b7699b30c0"
+source = "git+https://github.com/openai-oss-forks/rusty_v8.git?rev=90a65f887a0c0f048f3784afbcb320b373c8a2e0#90a65f887a0c0f048f3784afbcb320b373c8a2e0"
 dependencies = [
  "bindgen",
  "bitflags 2.13.1",

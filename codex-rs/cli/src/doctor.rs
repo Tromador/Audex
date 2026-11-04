@@ -2518,6 +2518,7 @@ fn websocket_error_detail(err: &ApiError) -> String {
         | ApiError::ContextWindowExceeded
         | ApiError::QuotaExceeded
         | ApiError::UsageNotIncluded
+        | ApiError::SessionBudgetExceeded
         | ApiError::FlexUnavailable
         | ApiError::ServerOverloaded { .. }
         | ApiError::PolicyCapacityUnavailable { .. } => format!("handshake error: {err}"),
@@ -3370,7 +3371,10 @@ mod tests {
             },
             ApiError::RateLimit(message()),
             ApiError::InvalidRequest { message: message() },
-            ApiError::InvalidAudioInput { message: message() },
+            ApiError::InvalidAudioInput {
+                message: message(),
+                per_recording: true,
+            },
             ApiError::ModelNotFound {
                 message: message(),
                 status: Some(http::StatusCode::NOT_FOUND),

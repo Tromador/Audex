@@ -849,6 +849,7 @@ impl Session {
                         misalignment: None,
                         message: format!("failed to submit turn input: {reason:?}"),
                         codex_error_info: Some(CodexErrorInfo::BadRequest),
+                        rejected_audio_file_ids: Vec::new(),
                     }),
                 })
                 .await;
@@ -1017,7 +1018,7 @@ async fn capture_sender_user_messages(
     if !matches!(item, ResponseItem::FunctionCallOutput { call_id: None, .. }) {
         return None;
     }
-    Session::assign_missing_response_item_id(item);
+    session.assign_missing_response_item_id(item);
     session
         .services
         .local_agent_runtime
