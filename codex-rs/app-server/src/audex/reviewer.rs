@@ -33,7 +33,7 @@ Do not execute source or invent evidence. Report only supported findings with ma
 Do not seek or consume other reviewers' findings. Return only the required structured JSON result.
 Every finding is an unverified model claim, not a proven defect.";
 
-const OUTPUT_CONTRACT: &str = "Return AuditResultV1 JSON matching the supplied schema. Findings must use manifest paths and non-empty half-open byte ranges. Optional line numbers are 1-based and LF-delimited (CRLF is one delimiter); end_line is the line containing end_byte - 1. Omit both line numbers if unsure. An empty findings list is valid.";
+pub(super) const OUTPUT_CONTRACT: &str = "Return AuditResultV1 JSON matching the supplied schema. Findings must use manifest paths and non-empty half-open byte ranges. Optional line numbers are 1-based and LF-delimited (CRLF is one delimiter); end_line is the line containing end_byte - 1. Omit both line numbers if unsure. An empty findings list is valid.";
 
 pub(super) struct ReviewerRequest {
     pub run_id: String,

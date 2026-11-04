@@ -237,6 +237,56 @@ fn parse_stat(stat: &[u8]) -> Result<(String, u64)> {
     Ok((state.to_string(), start_ticks))
 }
 
+/// Verified Linux child identity. The nonce argument binds a process to its launch.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxChildIdentity {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub process_group: u32,
+    pub boot_id: String,
+    pub start_ticks: u64,
+}
+
+/// Reuses the daemon's stat parser; checks identity on both sides of argv inspection.
+#[cfg(target_os = "linux")]
+pub fn read_linux_child_identity(pid: u32, nonce_argument: &str) -> Result<LinuxChildIdentity> {
+    let path = format!("/proc/{pid}/stat");
+    let stat = std::fs::read(&path)?;
+    let (state, start_ticks) = parse_stat(&stat)?;
+    anyhow::ensure!(state != "Z" && state != "X", "child is no longer live");
+    let end = stat
+        .iter()
+        .rposition(|b| *b == b')')
+        .context("missing comm")?;
+    let fields: Vec<_> = std::str::from_utf8(&stat[end + 1..])?
+        .split_whitespace()
+        .collect();
+    let parent_pid = fields.get(1).context("missing parent")?.parse()?;
+    let process_group = fields.get(2).context("missing group")?.parse()?;
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))?;
+    anyhow::ensure!(
+        !nonce_argument.is_empty()
+            && cmdline
+                .split(|b| *b == 0)
+                .any(|arg| arg == nonce_argument.as_bytes()),
+        "launch nonce argument mismatch"
+    );
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+        .trim()
+        .to_owned();
+    anyhow::ensure!(!boot_id.is_empty(), "empty boot identity");
+    let (_, after) = parse_stat(&std::fs::read(path)?)?;
+    anyhow::ensure!(start_ticks == after, "child identity changed");
+    Ok(LinuxChildIdentity {
+        pid,
+        parent_pid,
+        process_group,
+        boot_id,
+        start_ticks,
+    })
+}
+
 #[cfg(test)]
 #[path = "pid_identity_tests.rs"]
 mod tests;

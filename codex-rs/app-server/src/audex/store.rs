@@ -31,6 +31,7 @@ mod attribution;
 #[cfg(test)]
 mod foundation_tests;
 mod foundations;
+pub(super) mod launch;
 mod report_facts;
 mod reporting;
 #[cfg(test)]

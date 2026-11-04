@@ -51,6 +51,35 @@ impl ReadOnlySource {
         Ok(authority)
     }
 
+    #[cfg(target_os = "linux")]
+    pub(in crate::audex) async fn verify_launch_parent(
+        &self,
+        parent: u32,
+        required: bool,
+    ) -> anyhow::Result<()> {
+        let Some(launch) =
+            super::launch::read_launch(&self.pool, &self.identity.operation_id).await?
+        else {
+            anyhow::ensure!(!required, "missing launch authority");
+            return Ok(());
+        };
+        anyhow::ensure!(
+            launch.execution_id == self.identity.execution_id,
+            "launch nonce mismatch"
+        );
+        let expected = launch
+            .child_identity()
+            .ok_or_else(|| anyhow::anyhow!("unverified launch parent"))?;
+        anyhow::ensure!(
+            expected.pid == parent && expected.process_group == parent,
+            "bridge has a foreign launch parent"
+        );
+        let actual =
+            codex_app_server_daemon::read_linux_child_identity(parent, &launch.mcp_config_path)?;
+        anyhow::ensure!(actual == expected, "launch parent identity changed");
+        Ok(())
+    }
+
     async fn check(&self) -> Result<bool, AuditStoreError> {
         // A new read transaction on every check sees the latest committed stop.
         // Share native admission's owner predicate rather than recreate its rules.

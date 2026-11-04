@@ -17,6 +17,8 @@ use wiremock::{
 
 mod admission;
 mod corrections;
+#[cfg(target_os = "linux")]
+mod external;
 mod foundations;
 mod preparation;
 mod recovery;
@@ -172,8 +174,19 @@ async fn fixture_with_transport(
     if let Some(cleanup) = &hooks.cleanup {
         dispatch = dispatch.with_cleanup(cleanup.clone());
     }
+    let external_checkpoint = hooks.checkpoint.clone();
     dispatch.hooks = hooks;
     let dispatch = Arc::new(dispatch);
+    let mut routed = crate::audex::routing::RoutedDispatch::new(
+        config.codex_home.join("audex"),
+        dispatch,
+        codex_utils_cargo_bin::cargo_bin("audex").expect("built real source bridge"),
+    );
+    #[cfg(target_os = "linux")]
+    {
+        routed.external.checkpoint = external_checkpoint;
+    }
+    let dispatch = Arc::new(routed);
     (
         AuditController::new(
             config,

@@ -96,7 +96,17 @@ impl ServerHandler for SourceMcpServer {
 
 /// Serve the actual bridge over stdin/stdout, with no normal app-server startup.
 pub async fn run_audex_source_mcp(args: AudexSourceMcpArgs) -> anyhow::Result<()> {
-    bind_parent(args.parent_pid)?;
+    // Zero selects the durable launch-parent binding; explicit parents retain
+    // the existing standalone bridge qualification interface.
+    #[cfg(target_os = "linux")]
+    let parent = if args.parent_pid == 0 {
+        (unsafe { libc::getppid() }) as u32
+    } else {
+        args.parent_pid
+    };
+    #[cfg(not(target_os = "linux"))]
+    let parent = args.parent_pid;
+    bind_parent(parent)?;
     anyhow::ensure!(args.binding.len() <= 16 * 1024, "invalid source binding");
     let identity: AdmissionIdentity = serde_json::from_str(&args.binding)?;
     let root = AbsolutePathBuf::from_absolute_path(args.state_root)?;
@@ -109,6 +119,11 @@ pub async fn run_audex_source_mcp(args: AudexSourceMcpArgs) -> anyhow::Result<()
     )
     .await
     .map_err(|_| anyhow::anyhow!("source authority unavailable or refused"))?;
+    #[cfg(target_os = "linux")]
+    authority
+        .verify_launch_parent(parent, args.parent_pid == 0)
+        .await?;
+    bind_parent(parent)?;
     let snapshot = SnapshotStore::new(
         root.join("snapshots"),
         Arc::new(LocalFileSystem::unsandboxed()),
@@ -142,7 +157,7 @@ fn bind_parent(expected: u32) -> anyhow::Result<()> {
         );
         // The parent may have died before prctl; never serve that orphan.
         anyhow::ensure!(
-            unsafe { libc::getppid() } as u32 == expected,
+            (unsafe { libc::getppid() }) as u32 == expected,
             "bridge parent changed"
         );
         Ok(())

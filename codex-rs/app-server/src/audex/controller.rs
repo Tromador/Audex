@@ -155,10 +155,15 @@ impl AuditController {
             )
             .with_cleanup(cleanup),
         );
+        let routed = Arc::new(super::routing::RoutedDispatch::new(
+            config.codex_home.join("audex"),
+            dispatch.clone(),
+            std::env::current_exe().expect("daemon executable"),
+        ));
         let controller = Self::new(
             config,
             threads.get_models_manager(),
-            dispatch.clone(),
+            routed,
             Arc::new(move |progress| {
                 outgoing.try_send_server_notification(ServerNotification::AuditProgress(progress));
             }),
@@ -1018,7 +1023,7 @@ impl AuditController {
                     )
                     .await?;
             } else if self.dispatch.available() && !self.stop.is_cancelled() {
-                if self.revalidate_retained(&run).await.is_err() {
+                if self.revalidate_retained(&run, true).await.is_err() {
                     store
                         .finish_operation(
                             &run.operation_id,

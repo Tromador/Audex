@@ -2,14 +2,22 @@ use super::*;
 use crate::audex::store::attempts::{AttemptAction, ControlRequest};
 
 impl AuditController {
-    pub(super) async fn revalidate_retained(&self, record: &AuditRunRecord) -> anyhow::Result<()> {
+    pub(super) async fn revalidate_retained(
+        &self,
+        record: &AuditRunRecord,
+        for_launch: bool,
+    ) -> anyhow::Result<()> {
         let (raw, policy_json, policy_digest, manifest_digest) = self
             .store()
             .await?
             .attempt_input(&record.operation_id)
             .await?;
         let input = super::super::retained::RetainedInput::decode(&raw)?;
-        input.require_native()?;
+        // Internal launch can reach the owned adapter. Public Retry keeps its
+        // existing availability guard until external lifecycle qualification.
+        if !for_launch || input.adapter() != AuditExecutionAdapter::ClaudeClient {
+            input.require_native()?;
+        }
         let settings = super::super::backends::BackendSettings::load(self.root.as_path())?;
         let snapshot = self
             .snapshots()
@@ -20,6 +28,11 @@ impl AuditController {
                 && sha256_hex(&snapshot.manifest().to_pretty_bytes()?) == manifest_digest,
             "retained Retry source or policy digest mismatch"
         );
+        if for_launch && input.adapter() == AuditExecutionAdapter::ClaudeClient {
+            // The adapter checks the complete retained launch policy before any
+            // spawn. Do not construct a native reviewer or resolve its catalogue.
+            return input.validate_backend_configuration(&settings);
+        }
         let prepared = Box::pin(reviewer::prepare(
             &self.config,
             self.models.as_ref(),
@@ -231,7 +244,7 @@ impl AuditController {
         if request.action == AttemptAction::Retry
             && !store.has_control_action(&request.action_key).await?
         {
-            self.revalidate_retained(&record).await?;
+            self.revalidate_retained(&record, false).await?;
         }
         // No attempt transition gate or collector flush mutex is acquired here.
         let capture = self.dispatch.capture(&record.operation_id);

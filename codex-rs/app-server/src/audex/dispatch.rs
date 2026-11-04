@@ -32,6 +32,9 @@ type HistoryHook = Arc<
 >;
 
 #[cfg(test)]
+pub(super) type Checkpoint = Arc<dyn Fn(&'static str) -> BoxFuture<'static, ()> + Send + Sync>;
+
+#[cfg(test)]
 #[derive(Default)]
 pub(super) struct DispatchTestHooks {
     pub config: Option<Arc<dyn Fn(&mut Config) + Send + Sync>>,
