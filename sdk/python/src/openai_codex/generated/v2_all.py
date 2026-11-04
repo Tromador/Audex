@@ -473,6 +473,13 @@ class AuditAttemptsParams(BaseModel):
     run_id: Annotated[str, Field(alias="runId")]
 
 
+class AuditAuthenticationRoute(Enum):
+    daemon_configured_native = "daemon_configured_native"
+    claude_subscription = "claude_subscription"
+    claude_api = "claude_api"
+    ollama_local = "ollama_local"
+
+
 class AuditCancelParams(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -495,13 +502,9 @@ class AuditCapabilitiesResponse(BaseModel):
     protocol_version: Annotated[int, Field(alias="protocolVersion", ge=0)]
 
 
-class AuditExecutionAdapter(RootModel[Literal["native"]]):
-    root: Annotated[
-        Literal["native"],
-        Field(
-            description="Execution mechanism is distinct from the configured provider and authentication route."
-        ),
-    ]
+class AuditExecutionAdapter(Enum):
+    native = "native"
+    claude_client = "claude_client"
 
 
 class AuditGenerationIdentity(BaseModel):
@@ -529,6 +532,16 @@ class AuditListParams(BaseModel):
     )
     after: str | None = None
     limit: Annotated[int | None, Field(ge=0)] = None
+
+
+class AuditLocalExecution(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    cleanup_finished_at_ms: Annotated[int | None, Field(alias="cleanupFinishedAtMs")] = None
+    status: str
+    stop_confirmed_at_ms: Annotated[int | None, Field(alias="stopConfirmedAtMs")] = None
+    stop_requested_at_ms: Annotated[int | None, Field(alias="stopRequestedAtMs")] = None
 
 
 class AuditOperationState(Enum):
@@ -567,9 +580,12 @@ class AuditReviewerSelection(BaseModel):
         extra="forbid",
         populate_by_name=True,
     )
-    execution_adapter: Annotated[
-        AuditExecutionAdapter | None, Field(alias="executionAdapter", validate_default=True)
-    ] = "native"
+    authentication_route: Annotated[
+        AuditAuthenticationRoute | None, Field(alias="authenticationRoute")
+    ] = "daemon_configured_native"
+    execution_adapter: Annotated[AuditExecutionAdapter | None, Field(alias="executionAdapter")] = (
+        "native"
+    )
     expected_served_model: Annotated[
         str | None,
         Field(
@@ -644,7 +660,9 @@ class AuditStartParams(BaseModel):
     request_key: Annotated[str, Field(alias="requestKey")]
     reviewers: Annotated[
         list[AuditReviewerSelection] | None,
-        Field(description="Ordered native roster. Mutually exclusive with the singular selection."),
+        Field(
+            description="Ordered reviewer roster. Mutually exclusive with the singular native selection."
+        ),
     ] = None
     scheduling: AuditScheduling | None = "automatic"
     source: AuditSource
@@ -7633,6 +7651,13 @@ class AuditAttemptView(BaseModel):
     ]
     execution_adapter: Annotated[AuditExecutionAdapter, Field(alias="executionAdapter")]
     expected_served_model: Annotated[str | None, Field(alias="expectedServedModel")] = None
+    local_execution: Annotated[
+        AuditLocalExecution | None,
+        Field(
+            alias="localExecution",
+            description="Live local cleanup receipts, independent of the frozen contribution and remote billing.",
+        ),
+    ] = None
     model: Annotated[str, Field(description="Requested selection, retained for compatibility.")]
     model_evidence: Annotated[
         list[AuditGenerationIdentity],
