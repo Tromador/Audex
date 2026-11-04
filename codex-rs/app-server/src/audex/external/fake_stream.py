@@ -67,7 +67,7 @@ def partial(kind, **fields):
 
 def assistant(ident, blocks, served=model):
     return emit("assistant", message={"id": ident, "role": "assistant", "model": served,
-        "content": blocks, "usage": {"input_tokens": 11, "output_tokens": 7, "credentials": secret}, "thinking": secret})
+        "content": blocks, "stop_reason": "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn", "usage": {"input_tokens": 11, "output_tokens": 7, "credentials": secret}, "thinking": secret})
 
 
 def gate(name):
@@ -100,14 +100,12 @@ if mode == "multi_record":
         partial("content_block_delta", index=index, delta={"type": kind + "_delta", kind: secret if kind == "thinking" else "Distinct equal block."})
         assistant("multi-text", [{"type": kind, kind: secret if kind == "thinking" else "Distinct equal block."}], model)
         partial("content_block_stop", index=index)
-    partial("message_stop")
-    partial("message_start", message={"id": "multi-tool", "model": model})
-    for index, call in enumerate(["multi-call-1", "multi-call-2"]):
+    for index, call in enumerate(["multi-call-1", "multi-call-2"], start=3):
         tool = {"type": "tool_use", "id": call, "name": "mcp__audex_source__list", "input": {}}
         partial("content_block_start", index=index, content_block=tool)
-        assistant("multi-tool", [tool], model)
+        assistant("multi-text", [tool], model)
         partial("content_block_stop", index=index)
-        assistant("multi-tool", [tool], model)
+        assistant("multi-text", [tool], model)
     partial("message_stop")
     for call in ["multi-call-1", "multi-call-2", "multi-call-1"]:
         emit("user", message={"role": "user", "content": [{"type": "tool_result", "tool_use_id": call, "content": [{"type": "text", "text": '{"entries":[]}'}]}]})
@@ -121,18 +119,26 @@ delta = partial("content_block_delta", index=1, delta={"type": "text_delta", "te
 sys.stdout.write(json.dumps(delta) + "\n")  # same stable event identity: no second delta
 sys.stdout.flush()
 partial("content_block_stop", index=1)
-partial("message_stop")
-assistant("progress", [{"type": "thinking", "thinking": secret, "signature": secret}, {"type": "text", "text": "Public progress."}],
+tool1 = {"type": "tool_use", "id": "call-1", "name": "mcp__audex_source__list", "input": {}}
+partial("content_block_start", index=2, content_block=tool1)
+assistant("progress", [{"type": "thinking", "thinking": secret, "signature": secret}, {"type": "text", "text": "Public progress."}, tool1],
           "contradictory-model" if mode == "model_conflict" else model)
-assistant("identical-but-distinct", [{"type": "text", "text": "Public progress."}], model)
-assistant("identical-but-distinct", [{"type": "text", "text": "Public progress."}], model)  # same full message identity
-for i in [1, 2]:
-    tool = {"type": "tool_use", "id": f"call-{i}", "name": "mcp__audex_source__list", "input": {"credentials": secret}}
-    assistant(f"tool-message-{i}", [tool], model)
-    assistant(f"tool-message-{i}", [tool], model)  # repeated observation, different outer UUID
-    result = {"type": "tool_result", "tool_use_id": f"call-{i}", "content": [{"type": "text", "text": json.dumps({"entries": [], "api_key": secret})}, {"type": "thinking", "thinking": secret}]}
+partial("content_block_stop", index=2)
+partial("message_delta", delta={"stop_reason": "tool_use"})
+partial("message_stop")
+
+
+def tool_result(call):
+    result = {"type": "tool_result", "tool_use_id": call, "content": [{"type": "text", "text": json.dumps({"entries": [], "api_key": secret})}, {"type": "thinking", "thinking": secret}]}
     emit("user", message={"role": "user", "content": [result]}, tool_use_result={"secret": secret})
     emit("user", message={"role": "user", "content": [result]})
+
+
+tool_result("call-1")
+tool2 = {"type": "tool_use", "id": "call-2", "name": "mcp__audex_source__list", "input": {"credentials": secret}}
+assistant("identical-but-distinct", [{"type": "text", "text": "Public progress."}, tool2], model)
+assistant("identical-but-distinct", [{"type": "text", "text": "Public progress."}, tool2], model)
+tool_result("call-2")
 if scenario.get("gate"):
     gate("before-terminal")
 if mode == "malformed":

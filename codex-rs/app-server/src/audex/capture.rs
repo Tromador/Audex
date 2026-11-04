@@ -15,6 +15,8 @@ use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 pub(crate) const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 const FLUSH_BYTES: usize = 64 * 1024;
+// One bounded external policy notice must fit even while ordinary capture is full.
+const POLICY_NOTICE_BYTES: usize = 2048;
 
 #[derive(Clone)]
 pub(crate) struct CaptureHandle(Arc<CaptureInner>);
@@ -37,6 +39,7 @@ struct Pending {
     bytes: usize,
     closed: bool,
     source_finished: bool,
+    external: bool,
     control_markers: usize,
     failure: Option<&'static str>,
     offsets: HashMap<(String, String), i64>,
@@ -170,6 +173,7 @@ impl CaptureHandle {
 
     pub(super) fn bind_external_interrupt(&self, interrupt: Arc<dyn Fn() + Send + Sync>) {
         *self.0.external_interrupt.lock().expect("capture interrupt") = Some(interrupt);
+        self.0.pending.lock().expect("capture buffer").external = true;
     }
 
     pub(crate) fn request_interrupt(&self) {
@@ -326,8 +330,10 @@ impl CaptureHandle {
                 if pending.closed {
                     return Ok(());
                 }
-                if pending.entries.len() < MAX_BATCH_ENTRIES
-                    && pending.bytes + input.payload.len() <= MAX_BATCH_BYTES
+                let reserve = usize::from(pending.external);
+                if pending.entries.len() < MAX_BATCH_ENTRIES - reserve
+                    && pending.bytes + input.payload.len()
+                        <= MAX_BATCH_BYTES - reserve * POLICY_NOTICE_BYTES
                 {
                     pending.bytes += input.payload.len();
                     pending.entries.push_back(input.clone());
@@ -347,6 +353,48 @@ impl CaptureHandle {
         self.failed("capture buffer bound exceeded; output may be missing")
             .await;
         Err(anyhow::anyhow!("capture buffer bound exceeded"))
+    }
+
+    /// Enqueue before the first await, so a competing control snapshots the notice.
+    /// A control that already took its prefix owns the cutoff; subsequent input is fenced.
+    /// Commit directly through the same journal, independent of a delayed periodic flush.
+    pub(super) async fn client_policy_notice(&self, input: ActivityInput) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            input.payload.len() <= POLICY_NOTICE_BYTES,
+            "policy notice too large"
+        );
+        let inputs = {
+            let mut pending = self.0.pending.lock().expect("capture buffer");
+            if pending.closed || pending.control_markers != 0 {
+                return Ok(false);
+            }
+            pending.bytes += input.payload.len();
+            pending.entries.push_back(input);
+            pending.control_markers += 1;
+            pending.entries.iter().cloned().collect::<Vec<_>>()
+        };
+        let result = self
+            .0
+            .store
+            .append_activity(&self.0.identity, &inputs)
+            .await;
+        self.completion_finished(false);
+        let appended = result?;
+        {
+            let mut pending = self.0.pending.lock().expect("capture buffer");
+            for entry in &inputs {
+                if pending
+                    .entries
+                    .front()
+                    .is_some_and(|e| e.producer_key == entry.producer_key)
+                {
+                    let entry = pending.entries.pop_front().expect("committed entry");
+                    pending.bytes -= entry.payload.len();
+                }
+            }
+        }
+        self.notify_committed();
+        Ok(!appended.fenced)
     }
 
     pub(super) async fn allowed(&self) -> bool {

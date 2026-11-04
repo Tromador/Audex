@@ -13,6 +13,8 @@ use std::os::fd::AsRawFd;
 use std::process::{ChildStderr, ChildStdout};
 use tokio::io::unix::AsyncFd;
 
+mod repair;
+
 type Result<T> = std::result::Result<T, &'static str>;
 const MAX_RECORD: usize = 2 * 1024 * 1024;
 const MAX_STREAM: usize = 64 * 1024 * 1024;
@@ -49,6 +51,8 @@ struct Block {
 }
 #[derive(Default)]
 struct Stream {
+    repairs: repair::Tracker,
+    policy_stop_started: bool,
     session: Option<String>,
     current: Option<String>,
     messages: HashMap<String, Message>,
@@ -209,6 +213,8 @@ impl Collector {
                         let event: Value = serde_json::from_slice(&line).map_err(|_| "external_malformed_jsonl")?;
                         line.clear();
                         if let Some(terminal) = self.event(&mut state, &event).await? {
+                            #[cfg(test)]
+                            if let Some(checkpoint) = &self.checkpoint { checkpoint("client_terminal_received").await; }
                             // Join any in-flight batch/failure before publishing terminal
                             // evidence. A failed flush cannot race a recoverable success.
                             self.capture.flush().await.map_err(|_| "external_capture_write_failed")?;
@@ -341,6 +347,50 @@ impl Collector {
             return Err("external_event_identity_bound_exhausted");
         }
         state.seen.insert(uuid.into(), digest); // ephemeral only, including hashes; never persisted
+        if self.route == "claude_subscription"
+            && let Some(notice) = state.repairs.observe(value)?
+        {
+            if !self
+                .capture
+                .client_policy_notice(notice.activity)
+                .await
+                .map_err(|_| "external_policy_disclosure_write_failed")?
+            {
+                return Err("external_policy_observation_fenced");
+            }
+            // Request local interruption promptly. Already initiated remote work
+            // and charges are not prevented by this owned-process signal.
+            self.capture.request_interrupt();
+            if !state.policy_stop_started {
+                state.policy_stop_started = true;
+                let (store, capture, identity) = (
+                    self.store.clone(),
+                    self.capture.clone(),
+                    self.identity.clone(),
+                );
+                #[cfg(test)]
+                let checkpoint = self.checkpoint.clone();
+                tokio::spawn(async move {
+                    #[cfg(test)]
+                    if let Some(checkpoint) = checkpoint {
+                        checkpoint("client_policy_stop").await;
+                    }
+                    let prefix = capture.control_prefix();
+                    let stopped = store
+                        .stop_client_for_policy(&identity, capture.identity(), &prefix)
+                        .await;
+                    capture.completion_finished(stopped.is_ok());
+                    capture.request_interrupt();
+                    if stopped.is_err() {
+                        capture.failed("external_policy_stop_write_failed").await;
+                    }
+                    capture.notify_committed();
+                });
+            }
+            if notice.anomaly {
+                return Err("external_client_request_policy_anomaly");
+            }
+        }
         match kind {
             "system" => {
                 let status = match value["subtype"].as_str() {

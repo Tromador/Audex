@@ -69,7 +69,54 @@ pub(super) async fn capture_allowed(
         .fetch_one(connection).await?)
 }
 
+fn is_policy_notice(input: &ActivityInput) -> bool {
+    input.kind == "status"
+        && input.producer_key.starts_with("client-policy:")
+        && input.payload.len() <= 2048
+}
+
 pub(super) async fn append_batch(
+    connection: &mut sqlx::SqliteConnection,
+    identity: &CaptureIdentity,
+    inputs: &[ActivityInput],
+) -> Result<Appended, AuditStoreError> {
+    if !inputs.iter().any(is_policy_notice) {
+        return append_batch_inner(connection, identity, inputs).await;
+    }
+    sqlx::query("SAVEPOINT audex_policy_prefix")
+        .execute(&mut *connection)
+        .await?;
+    match append_batch_inner(connection, identity, inputs).await {
+        Ok(appended) => {
+            sqlx::query("RELEASE audex_policy_prefix")
+                .execute(&mut *connection)
+                .await?;
+            Ok(appended)
+        }
+        Err(AuditStoreError::Database(error)) => Err(error.into()),
+        Err(_) => {
+            sqlx::query("ROLLBACK TO audex_policy_prefix")
+                .execute(&mut *connection)
+                .await?;
+            sqlx::query("RELEASE audex_policy_prefix")
+                .execute(&mut *connection)
+                .await?;
+            let notices: Vec<_> = inputs
+                .iter()
+                .filter(|e| is_policy_notice(e))
+                .cloned()
+                .collect();
+            let appended = append_batch_inner(connection, identity, &notices).await?;
+            if !appended.fenced {
+                sqlx::query("UPDATE audit_attempts SET capture_failure=COALESCE(capture_failure,'public prefix conflicted at client policy observation'),capture_gap=COALESCE(capture_gap,'public prefix could not be retained; client policy evidence preserved') WHERE assignment_id=?")
+                    .bind(&identity.assignment_id).execute(connection).await?;
+            }
+            Ok(appended)
+        }
+    }
+}
+
+async fn append_batch_inner(
     connection: &mut sqlx::SqliteConnection,
     identity: &CaptureIdentity,
     inputs: &[ActivityInput],
@@ -109,6 +156,7 @@ pub(super) async fn append_batch(
             truncated,
         });
     }
+    let policy_batch = inputs.iter().any(is_policy_notice);
     for input in inputs {
         validate_nonempty("activity producer key", &input.producer_key, 1024)?;
         if input.payload.len() > MAX_ENTRY_BYTES
@@ -180,10 +228,22 @@ pub(super) async fn append_batch(
                     .bind(offset + payload.len() as i64).bind(input.kind=="assistant_message").execute(&mut *connection).await?;
             }
         }
-        if bytes + payload.len() as i64 > MAX_CAPTURE_BYTES || sequence >= 65_536 {
+        // Policy disclosure is bounded independently of public output. It must
+        // survive a full capture prefix, including a control racing the collector.
+        let policy_notice = is_policy_notice(input)
+            && sequence < 65_536 + 4096
+            && bytes + payload.len() as i64 <= MAX_CAPTURE_BYTES + 4096 * 2048;
+        if !policy_notice
+            && ((policy_batch && truncated)
+                || bytes + payload.len() as i64 > MAX_CAPTURE_BYTES
+                || sequence >= 65_536)
+        {
             truncated = true;
             sqlx::query("UPDATE audit_attempts SET capture_truncated=1,capture_gap=COALESCE(capture_gap,'capture limit reached') WHERE assignment_id=?")
                 .bind(&identity.assignment_id).execute(&mut *connection).await?;
+            if policy_batch {
+                continue;
+            }
             break;
         }
         sequence += 1;

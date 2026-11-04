@@ -7,6 +7,7 @@ mod lifecycle_qualification;
 mod native_peer;
 mod official_client;
 mod publication_races;
+mod repairs;
 mod restart_qualification;
 mod socket_qualification;
 mod stop_storage;

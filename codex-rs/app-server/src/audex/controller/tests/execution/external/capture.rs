@@ -128,7 +128,7 @@ fn public_capture_deduplicates_by_identity_and_freezes_external_evidence() -> an
             "subscription must not fabricate permits"
         );
         let observations = store.model_evidence(&run.assignment_id).await?;
-        assert_eq!(observations.len(), 5);
+        assert_eq!(observations.len(), 3);
         assert!(
             observations.iter().all(|o| o.state == "verified"
                 && o.observed_model.as_deref() == Some("claude-haiku-5-5"))
@@ -146,7 +146,7 @@ fn public_capture_deduplicates_by_identity_and_freezes_external_evidence() -> an
             64
         );
         assert_eq!(facts["client_terminal"]["value"]["verified"], true);
-        assert_eq!(facts["usage"]["value"].as_array().unwrap().len(), 6);
+        assert_eq!(facts["usage"]["value"].as_array().unwrap().len(), 4);
         assert!(facts["receipts"].as_array().unwrap().is_empty());
         let aggregate = facts["usage"]["value"]
             .as_array()

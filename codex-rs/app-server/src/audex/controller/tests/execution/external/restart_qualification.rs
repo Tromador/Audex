@@ -89,6 +89,19 @@ fn isolated_lifecycle_daemon() -> anyhow::Result<()> {
             if stage == "accepted" {
                 assert_eq!(read_report_identity(&store, id).await?, saved["report"]);
             }
+            if stage == "client_policy_stop" {
+                let events = store.activity(&run.assignment_id, 0, 256).await?;
+                assert!(
+                    events
+                        .iter()
+                        .any(|e| e.payload.contains("client-initiated repair occurred"))
+                );
+                controller.abort_audit(id).await?;
+                assert!(
+                    serde_json::to_string(&store.freeze_report(id).await?)?
+                        .contains("client-initiated repair occurred")
+                );
+            }
             let count = std::fs::read_to_string(home.join("stream-launches"))
                 .unwrap_or_default()
                 .lines()
@@ -97,7 +110,7 @@ fn isolated_lifecycle_daemon() -> anyhow::Result<()> {
                 count,
                 usize::from(matches!(
                     stage.as_str(),
-                    "captured" | "terminal_persisted" | "accepted"
+                    "captured" | "terminal_persisted" | "accepted" | "client_policy_stop"
                 ))
             );
             std::fs::write(root.join("recovered.json"), json!({"stage":stage,"execution":original.execution_id,
@@ -136,6 +149,16 @@ fn isolated_lifecycle_daemon() -> anyhow::Result<()> {
             hooks,
         )
         .await;
+        if stage == "client_policy_stop" {
+            let id = super::repairs::seed(
+                &controller,
+                &temp,
+                json!({"mode":"max_tokens","subsequent":false}),
+            )
+            .await?;
+            controller.drive(&id).await?;
+            std::future::pending::<()>().await;
+        }
         let id = seed_stream(&controller, &temp, "valid", true).await?;
         std::fs::write(
             temp.path().join("stream-scenario.json"),
@@ -184,6 +207,7 @@ fn daemon_restart_reconciles_every_durable_boundary_without_replay() -> anyhow::
             "captured",
             "terminal_persisted",
             "accepted",
+            "client_policy_stop",
             "unreadable",
             "reused",
         ] {

@@ -141,6 +141,20 @@ pub(super) async fn collect(
             });
         }
     }
+    let policy_notices: Vec<String> = if subscription {
+        sqlx::query_scalar("SELECT a.payload FROM audit_activity a JOIN audit_attempts t ON t.assignment_id=a.assignment_id WHERE a.assignment_id=? AND a.kind='status' AND a.producer_key LIKE 'client-policy:%' AND a.sequence<=COALESCE(t.output_cutoff,t.output_sequence) ORDER BY a.sequence")
+            .bind(assignment).fetch_all(&mut *connection).await?
+    } else {
+        Vec::new()
+    };
+    let repair_count = policy_notices
+        .iter()
+        .filter(|raw| {
+            serde_json::from_str::<serde_json::Value>(raw)
+                .ok()
+                .is_some_and(|v| v["label"] == "client-initiated repair occurred")
+        })
+        .count() as u64;
     let admission = retained.map(|input| if subscription {
         "Bound successful client terminal and verified per-message identity; no Audex per-generation admission. Provider-internal corrective requests may occur."
     } else if input.version == 2 || input.require_served_identity {
@@ -197,11 +211,26 @@ pub(super) async fn collect(
         },
         subscription: SubscriptionFacts {
             repair_disclosure: if subscription {
-                Fact::known("Subscription permits provider-internal corrective requests without Audex generation admission; occurrence requires separate evidence.".to_owned())
+                let mut disclosure = "Subscription permits the qualified client corrective requests without Audex generation admission. Interruption is best effort; initiated sends and remote charges are unconfirmed.".to_owned();
+                for notice in &policy_notices {
+                    disclosure.push('\n');
+                    disclosure.push_str(notice);
+                }
+                Fact::known(disclosure)
             } else {
                 Fact::NotApplicable
             },
-            repair_occurrences: applicable(subscription),
+            repair_occurrences: if subscription && !policy_notices.is_empty() {
+                if repair_count == policy_notices.len() as u64 {
+                    Fact::known(repair_count)
+                } else {
+                    Fact::unavailable(
+                        "client-policy anomalies were observed; the repair-occurrence count cannot be established",
+                    )
+                }
+            } else {
+                applicable(subscription)
+            },
         },
         ollama: OllamaFacts {
             model_digest: applicable(local),
