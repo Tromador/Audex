@@ -21,12 +21,18 @@ fn pinned_client_fake_api_and_real_bridge_complete_the_production_path() -> anyh
         let native_server = responses::start_mock_server().await;
         let (controller, threads) = real_fixture(&temp, &native_server.uri()).await;
         let id = seed_external(&controller, &temp, "pinned-official").await?;
+        // F2: this integration must exercise the corrected no-machine-lock path.
+        std::fs::remove_file(
+            controller
+                .root
+                .join("c71-system-policy/managed-settings.json"),
+        )?;
         let store = controller.store().await?;
         let run = store.load_run(&id).await?;
         let runtime = temp.path().join("client-runtime").canonicalize()?;
         let settings: BackendSettings = serde_json::from_value(
             json!({"version":1,"claudeSubscription":{
-                "executable":binary,"clientVersion":"2.1.314","profile":temp.path().join("unused"),"runtimeRoot":runtime
+                "executable":binary,"clientVersion":"2.1.314","profile":temp.path().join("subscription-profile"),"runtimeRoot":runtime
             }}),
         )?;
         std::fs::write(
@@ -76,6 +82,14 @@ fn pinned_client_fake_api_and_real_bridge_complete_the_production_path() -> anyh
             ready["url"].as_str().unwrap(),
         )?;
         controller.drive(&id).await?;
+        if store.submission_boundary(&run.operation_id).await? == SubmissionBoundary::Unsubmitted {
+            let reason: Option<String> =
+                sqlx::query_scalar("SELECT error FROM operations WHERE id=?")
+                    .bind(&run.operation_id)
+                    .fetch_one(&store.pool_for_tests())
+                    .await?;
+            anyhow::bail!("official client refused before prompt: {reason:?}");
+        }
         let observed = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 controller.dispatch.reconcile_resources().await?;

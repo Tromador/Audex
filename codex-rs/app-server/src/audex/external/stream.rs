@@ -25,6 +25,7 @@ pub(super) struct Collector {
     pub capture: CaptureHandle,
     pub identity: AdmissionIdentity,
     pub route: String,
+    pub billing_source: &'static str,
     pub expected_model: String,
     #[cfg(test)]
     pub checkpoint: Option<super::super::dispatch::Checkpoint>,
@@ -315,6 +316,11 @@ impl Collector {
         } else {
             if kind != "system" || value["subtype"] != "init" {
                 return Err("external_session_init_missing");
+            }
+            if self.route == "claude_subscription" && value["apiKeySource"] != self.billing_source {
+                // Init follows prompt delivery. Retain the submission boundary;
+                // this mismatch is never evidence that a charge was prevented.
+                return Err("external_billing_source_mismatch_after_submission_charge_unknown");
             }
             self.store
                 .bind_client_session(&self.identity, session, false)

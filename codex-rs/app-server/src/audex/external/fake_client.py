@@ -30,7 +30,9 @@ if (Path(sys.argv[0]).parent / "early-bridge").exists():
     pending = bridge.stderr.readline().decode().strip()
     assert pending == "Audex source bridge waiting for committed launch identity", pending
     (directory / "early-bridge.json").write_text(json.dumps({"bridge_pid": bridge.pid, "identity_pending": True}))
-prompt = sys.stdin.buffer.readline()
+from fake_policy import handshake
+
+prompt = handshake()
 if not prompt:
     sys.exit(0)
 assert sys.stdin.buffer.read() == b"", "duplicate prompt"
@@ -59,7 +61,18 @@ assert set(os.environ) <= {
 }
 assert Path.cwd() == directory / "cwd" and not list(Path.cwd().iterdir())
 assert Path(os.environ["HOME"]) == directory / "home"
-assert not list(Path(os.environ["CLAUDE_CONFIG_DIR"]).iterdir())
+assert Path(os.environ["CLAUDE_CONFIG_DIR"]) == Path(sys.argv[0]).parent / "subscription-profile"
+assert json.loads(Path(os.environ["CLAUDE_CONFIG_DIR"], "settings.json").read_text())["disableAllHooks"] is True
+assert "--setting-sources=user" in sys.argv
+assert os.environ["PATH"] == "/usr/bin:/bin"
+assert os.environ["USER"] == "audex-reviewer"
+assert os.environ["LANG"] == "C.UTF-8" and os.environ["TERM"] == "dumb"
+for key in ["CLAUDE_CODE_MAX_RETRIES", "CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES"]:
+    assert os.environ[key] == "0"
+for key in ["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK", "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK",
+            "CLAUDE_CODE_DISABLE_REFUSAL_RETRY", "DISABLE_COMPACT", "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+            "CLAUDE_CODE_DISABLE_CLAUDE_MDS", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]:
+    assert os.environ[key] == "1"
 assert sys.argv[sys.argv.index("--tools") + 1] == ""
 assert sys.argv[sys.argv.index("--allowedTools") + 1].split(",") == [f"mcp__audex_source__{n}" for n in ["list", "read", "search"]]
 assert not {"--resume", "--continue", "--fallback-model", "--json-schema"}.intersection(sys.argv)

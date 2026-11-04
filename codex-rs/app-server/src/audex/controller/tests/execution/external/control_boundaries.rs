@@ -9,6 +9,7 @@ fn controls_at_launch_and_terminal_boundaries_never_replay_or_cross_attempts() -
         for stage in [
             "launch_intent",
             "child_identity",
+            "policy_verified",
             "prompt_write_started",
             "terminal_persisted",
         ] {

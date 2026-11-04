@@ -19,6 +19,8 @@ pub(super) struct Prepared {
     pub record: LaunchRecord,
     pub prompt: Vec<u8>,
     pub mcp_digest: String,
+    pub policy: Option<super::policy::Policy>,
+    pub billing_source: &'static str,
 }
 
 fn private_directory(path: &Path) -> anyhow::Result<()> {
@@ -112,17 +114,6 @@ pub(super) async fn prepare(
                 == super::super::snapshot::AccessLimits::default().max_search_results,
         "retained external policy mismatch"
     );
-    // System-wide managed client policy cannot be disabled by env_clear. Until
-    // route qualification owns its interpretation, reject any such contribution.
-    for path in [
-        "/etc/claude-code/managed-settings.json",
-        "/etc/claude-code/managed-mcp.json",
-    ] {
-        anyhow::ensure!(
-            !Path::new(path).try_exists()?,
-            "managed client configuration requires qualification"
-        );
-    }
     let runtime_root = Path::new(runtime_root);
     let host_home =
         std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("daemon home unavailable"))?;
@@ -132,6 +123,41 @@ pub(super) async fn prepare(
         "client runtime must be outside the daemon home"
     );
     private_directory(runtime_root)?;
+    let subscription_policy = if route == "claude_subscription" {
+        let profile = Path::new(
+            &settings
+                .claude_subscription
+                .as_ref()
+                .expect("selected route")
+                .profile,
+        );
+        anyhow::ensure!(
+            !profile.starts_with(runtime_root) && !runtime_root.starts_with(profile),
+            "profile and runtime must be separate"
+        );
+        let machine = PathBuf::from("/etc/claude-code");
+        #[cfg(test)]
+        let machine = if root.join("c71-system-policy").is_dir() {
+            root.join("c71-system-policy")
+        } else {
+            machine
+        };
+        Some(super::policy::Policy::inspect(
+            profile, &host_home, &machine,
+        )?)
+    } else {
+        for name in [
+            "managed-settings.json",
+            "managed-mcp.json",
+            "managed-settings.d",
+        ] {
+            anyhow::ensure!(
+                !Path::new("/etc/claude-code").join(name).try_exists()?,
+                "API managed policy requires qualification"
+            );
+        }
+        None
+    };
     anyhow::ensure!(
         runtime_root == runtime_root.canonicalize()?,
         "runtime root must be resolved"
@@ -160,6 +186,7 @@ pub(super) async fn prepare(
         version,
         route,
         tools,
+        subscription_policy,
     )
     .await;
     if result.is_err() {
@@ -180,6 +207,7 @@ async fn prepare_files(
     version: &str,
     route: &str,
     tools: Vec<String>,
+    policy: Option<super::policy::Policy>,
 ) -> anyhow::Result<Prepared> {
     for name in ["cwd", "home", "profile", "tmp", "bridge-home"] {
         create_directory(&directory.join(name))?;
@@ -210,7 +238,12 @@ async fn prepare_files(
         ("TMPDIR".into(), directory.join("tmp").display().to_string()),
         (
             "CLAUDE_CONFIG_DIR".into(),
-            directory.join("profile").display().to_string(),
+            policy
+                .as_ref()
+                .map(|p| p.profile.clone())
+                .unwrap_or_else(|| directory.join("profile"))
+                .display()
+                .to_string(),
         ),
     ]);
     for (key, value) in [
@@ -258,6 +291,9 @@ async fn prepare_files(
     .collect();
     if route == "claude_api" {
         args.push("--bare".into());
+    } else {
+        // Empty CWD alone does not exclude ancestor project/local settings.
+        args.push("--setting-sources=user".into());
     }
     let context = snapshot
         .context_documents()
@@ -275,6 +311,13 @@ async fn prepare_files(
     )?;
     prompt.push(b'\n');
     anyhow::ensure!(prompt.len() <= 256 * 1024, "external prompt exceeds bound");
+    let billing_source = if route == "claude_subscription" {
+        "none"
+    } else {
+        "ANTHROPIC_API_KEY"
+    };
+    #[cfg(test)]
+    let mut billing_source = billing_source;
     #[cfg(test)]
     if let Ok(endpoint) = std::fs::read_to_string(root.join("c63-fake-api")) {
         // This compiled-test-only fixture has no normal route or credential path.
@@ -290,12 +333,20 @@ async fn prepare_files(
             "official client fixture requires an isolated network namespace"
         );
         environment.insert("ANTHROPIC_BASE_URL".into(), endpoint.to_string());
+        anyhow::ensure!(
+            policy
+                .as_ref()
+                .is_none_or(|p| !p.profile.join(".credentials.json").exists()),
+            "fake API must never receive profile credentials"
+        );
         environment.insert("ANTHROPIC_API_KEY".into(), "dummy-c63-offline".into());
+        billing_source = "ANTHROPIC_API_KEY";
     }
     let executable_digest = sha256_hex(&std::fs::read(executable)?);
     let configuration = json!({"version":1,"executable":executable,"clientVersion":version,
         "executableDigest":executable_digest, "args":args,"environment":environment,
-        "cwd":directory.join("cwd"),"mcp":mcp,"promptDigest":sha256_hex(&prompt)});
+        "cwd":directory.join("cwd"),"mcp":mcp,"promptDigest":sha256_hex(&prompt),
+        "subscriptionPolicyDigest":policy.as_ref().map(|p| &p.digest),"policyHandshakeVersion":3});
     let mut command = Command::new(executable);
     command
         .args(args)
@@ -332,6 +383,8 @@ async fn prepare_files(
             prompt_write_started_at_ms: None,
         },
         prompt,
+        policy,
+        billing_source,
         mcp_digest: sha256_hex(&serde_json::to_vec(&mcp)?),
     })
 }

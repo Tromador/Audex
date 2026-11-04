@@ -1,7 +1,9 @@
 //! Owned launch and captured terminal evidence; workflow acceptance stays in the controller.
 mod config;
+mod handshake;
 mod lifecycle;
 mod owner;
+mod policy;
 mod recovery;
 mod socket_identity;
 mod stream;
@@ -117,7 +119,7 @@ impl ExternalDispatch {
             owner_generation: run.owner_generation,
             run_stop_generation: store.run_stop_generation(&request.run_id).await?,
         };
-        let prepared = config::prepare(
+        let mut prepared = config::prepare(
             store.root_path(),
             &self.bridge,
             &input,
@@ -159,6 +161,9 @@ impl ExternalDispatch {
                 .await?,
             "launch authority stopped before spawn"
         );
+        if let Some(policy) = &prepared.policy {
+            policy.recheck()?;
+        }
         let spawned = owner::launch(prepared.spec).await?;
         #[cfg(test)]
         self.checkpoint("child_spawned").await;
@@ -172,6 +177,27 @@ impl ExternalDispatch {
         );
         #[cfg(test)]
         self.checkpoint("child_identity").await;
+        let spawned = if let Some(policy) = &mut prepared.policy {
+            handshake::qualify(
+                spawned,
+                policy,
+                input.expected_model(),
+                prepared.billing_source,
+                store,
+                &identity,
+            )
+            .await?
+        } else {
+            spawned
+        };
+        #[cfg(test)]
+        self.checkpoint("policy_verified").await;
+        input.validate_backend_configuration(&super::backends::BackendSettings::load(
+            store.root_path(),
+        )?)?;
+        if let Some(policy) = &prepared.policy {
+            policy.verify_before_prompt()?;
+        }
         anyhow::ensure!(
             codex_app_server_daemon::read_linux_child_identity(
                 spawned.owned.identity.pid,
@@ -208,6 +234,7 @@ impl ExternalDispatch {
             capture: capture.clone(),
             identity: identity.clone(),
             route: prepared.record.route.clone(),
+            billing_source: prepared.billing_source,
             expected_model: input.expected_model().to_owned(),
             #[cfg(test)]
             checkpoint: self.checkpoint.clone(),

@@ -11,6 +11,7 @@ mod restart_qualification;
 mod socket_qualification;
 mod stop_storage;
 mod stream_qualification;
+mod subscription_policy;
 use crate::audex::backends::BackendSettings;
 use crate::audex::retained::RetainedInput;
 use crate::audex::snapshot::manifest::sha256_hex;
@@ -55,9 +56,32 @@ async fn retain_external(
         std::os::unix::fs::symlink(&runtime, &runtime_link)?;
         runtime
     };
+    let profile = temp.path().join("subscription-profile");
+    std::fs::create_dir_all(&profile)?;
+    std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(
+        profile.join("settings.json"),
+        json!({
+            "disableAllHooks":true,"disableClaudeAiConnectors":true,"syncClaudeAiPlugins":false,
+            "syncClaudeAiSkills":false,"autoMemoryEnabled":false,"crossSessionInbound":"refuse",
+            "permissions":{"deny":["SendMessage","ListAgents"]},"theme":"dark"
+        })
+        .to_string(),
+    )?;
+    std::fs::create_dir_all(controller.root.join("c71-system-policy"))?;
+    std::fs::write(
+        controller
+            .root
+            .join("c71-system-policy/managed-settings.json"),
+        r#"{"forceRemoteSettingsRefresh":true}"#,
+    )?;
+    std::fs::write(
+        temp.path().join("fake_policy.py"),
+        include_str!("../../../external/fake_policy.py"),
+    )?;
     let settings: BackendSettings = serde_json::from_value(
         json!({"version":1,"claudeSubscription":{
-            "executable":executable,"clientVersion":"2.1.314","profile":temp.path().join("unused-profile"),"runtimeRoot":runtime
+            "executable":executable,"clientVersion":"2.1.314","profile":profile,"runtimeRoot":runtime
         }}),
     )?;
     std::fs::write(

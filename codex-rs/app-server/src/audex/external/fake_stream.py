@@ -18,7 +18,9 @@ config = json.loads(config_path.read_text())["mcpServers"]["audex_source"]
 args = config["args"]
 binding = json.loads(args[args.index("--binding") + 1])
 assert not any(k in os.environ for k in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_BASE_URL"])
-prompt = sys.stdin.buffer.readline()
+from fake_policy import handshake
+
+prompt = sys.stdin.buffer.readline() if "--bare" in sys.argv else handshake()
 assert prompt and sys.stdin.buffer.read() == b""
 assignment = json.loads(json.loads(prompt)["message"]["content"])
 with (root / "stream-launches").open("a") as launches:
@@ -79,7 +81,8 @@ def gate(name):
 
 if scenario.get("gate_start"):
     gate("before-public")
-emit("system", subtype="init", model="init-is-not-served-model", credentials={"token": secret})
+billing = {} if mode == "missing_billing" else {"apiKeySource": "ANTHROPIC_API_KEY" if mode == "wrong_billing" else "none"}
+emit("system", subtype="init", model="init-is-not-served-model", credentials={"token": secret}, **billing)
 sys.stderr.write(secret + "\n")
 sys.stderr.flush()
 if mode == "wrong_execution":
