@@ -1,9 +1,12 @@
-//! Narrow owned-client launch boundary. Stream acceptance is added by the collector.
+//! Owned launch and captured terminal evidence; workflow acceptance stays in the controller.
 mod config;
 mod owner;
-use super::controller::{DispatchRequest, Observation};
+mod stream;
+use super::capture::CaptureHandle;
+use super::controller::{DispatchRequest, Observation, WorkState};
 use super::retained::RetainedInput;
 use super::snapshot::{CaptureLimits, SnapshotId, SnapshotStore};
+use super::store::activity::CaptureIdentity;
 use super::store::{AuditStore, SubmissionBoundary, admission::AdmissionIdentity};
 use codex_exec_server::LocalFileSystem;
 use std::collections::HashMap;
@@ -13,6 +16,7 @@ use std::sync::{Arc, Mutex};
 pub(super) struct ExternalDispatch {
     bridge: PathBuf,
     children: Mutex<HashMap<String, OwnedAttempt>>,
+    wake: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     #[cfg(test)]
     pub checkpoint: Option<super::dispatch::Checkpoint>,
 }
@@ -21,6 +25,14 @@ struct OwnedAttempt {
     child: owner::OwnedChild,
     authority: AdmissionIdentity,
     nonce_argument: String,
+    capture: CaptureHandle,
+    collector: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for OwnedAttempt {
+    fn drop(&mut self) {
+        self.collector.abort();
+    }
 }
 
 impl ExternalDispatch {
@@ -28,9 +40,22 @@ impl ExternalDispatch {
         Self {
             bridge,
             children: Mutex::new(HashMap::new()),
+            wake: std::sync::OnceLock::new(),
             #[cfg(test)]
             checkpoint: None,
         }
+    }
+
+    pub fn set_wake(&self, wake: Arc<tokio::sync::Notify>) {
+        let _ = self.wake.set(wake);
+    }
+
+    pub fn capture(&self, operation: &str) -> Option<CaptureHandle> {
+        self.children
+            .lock()
+            .expect("client owners")
+            .get(operation)
+            .map(|attempt| attempt.capture.clone())
     }
 
     pub async fn start(&self, store: &AuditStore, request: DispatchRequest) -> Observation {
@@ -155,13 +180,36 @@ impl ExternalDispatch {
         );
         #[cfg(test)]
         self.checkpoint("prompt_write_started").await;
+        let capture = CaptureHandle::new(
+            store.clone(),
+            CaptureIdentity {
+                assignment_id: identity.assignment_id.clone(),
+                session_id: identity.execution_id.clone(),
+                owner_generation: identity.owner_generation,
+            },
+            self.wake.get().cloned(),
+        )
+        .await?;
+        capture.bind_external_interrupt(spawned.owned.interrupt());
         owner::write_prompt(spawned.stdin, &prepared.prompt).await?;
+        let collector = stream::Collector {
+            store: store.clone(),
+            capture: capture.clone(),
+            identity: identity.clone(),
+            route: prepared.record.route.clone(),
+            expected_model: input.expected_model().to_owned(),
+            #[cfg(test)]
+            checkpoint: self.checkpoint.clone(),
+        };
+        let collector = tokio::spawn(collector.collect(spawned.stdout, spawned.stderr));
         self.children.lock().expect("client owners").insert(
             request.operation_id.clone(),
             OwnedAttempt {
                 child: spawned.owned,
                 authority: identity,
                 nonce_argument: prepared.record.mcp_config_path,
+                capture,
+                collector,
             },
         );
         #[cfg(test)]
@@ -202,6 +250,54 @@ impl ExternalDispatch {
             ) {
                 self.stop(operation);
             }
+        }
+        let launch = match store.client_launch(operation).await {
+            Ok(Some(launch)) => launch,
+            _ => return Observation::Deferred("external_launch_evidence_unavailable".into()),
+        };
+        let run = match store.run_for_operation(operation).await {
+            Ok(run) => run,
+            Err(_) => return Observation::Deferred("external_attempt_unavailable".into()),
+        };
+        let accepted = |state| Observation::Accepted {
+            operation_id: operation.into(),
+            snapshot_id: run.snapshot_id.clone(),
+            receipt: format!(
+                "client:{}:{}",
+                launch.execution_id,
+                launch.client_session_id.as_deref().unwrap_or("unobserved")
+            ),
+            state,
+        };
+        match store.client_terminal_result(operation).await {
+            Ok(Some(raw)) => return accepted(WorkState::Completed(raw)),
+            Err(
+                super::store::AuditStoreError::Database(_) | super::store::AuditStoreError::Io(_),
+            ) => {
+                // Read unavailability does not establish an evidence contradiction.
+                // Reinspect the same execution through the existing observe-only path.
+                return Observation::Deferred("external_terminal_evidence_unavailable".into());
+            }
+            Err(_) => return Observation::Uncertain("external_terminal_evidence_invalid".into()),
+            Ok(None) => {}
+        }
+        let failure = self
+            .capture(operation)
+            .and_then(|capture| capture.failure().map(str::to_owned));
+        let failure = failure.or(store
+            .client_capture_failure(&run.assignment_id)
+            .await
+            .ok()
+            .flatten());
+        if let Some(failure) = failure {
+            return if run.operation_state == super::store::OperationState::Accepted {
+                accepted(WorkState::Failed(failure))
+            } else {
+                Observation::Uncertain(failure)
+            };
+        }
+        if launch.client_accepted_at_ms.is_some() {
+            return accepted(WorkState::Live);
         }
         match store.submission_boundary(operation).await {
             Ok(SubmissionBoundary::Unsubmitted) => {

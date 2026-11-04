@@ -75,6 +75,10 @@ impl RoutedDispatch {
 
 impl Dispatch for RoutedDispatch {
     fn capture(&self, operation: &str) -> Option<super::capture::CaptureHandle> {
+        #[cfg(target_os = "linux")]
+        if let Some(capture) = self.external.capture(operation) {
+            return Some(capture);
+        }
         self.native.capture(operation)
     }
     fn start(&self, request: DispatchRequest) -> BoxFuture<'_, Observation> {

@@ -1,4 +1,4 @@
-//! Attempt-owned bounded capture, fed by the ordinary native event reader.
+//! Attempt-owned bounded capture, fed by native events or safe external projections.
 //! Buffered data is never exposed as durable output and never parsed as a result.
 use super::store::AuditStore;
 use super::store::activity::{
@@ -25,6 +25,7 @@ struct CaptureInner {
     pending: Mutex<Pending>,
     flushing: AsyncMutex<()>,
     runtime: Mutex<Weak<CodexThread>>,
+    external_interrupt: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     wake: Option<Arc<Notify>>,
     #[cfg(test)]
     interrupt_barrier: Mutex<Option<(Arc<Notify>, Arc<tokio::sync::Semaphore>)>>,
@@ -77,6 +78,7 @@ impl CaptureHandle {
             pending: Mutex::new(Pending::default()),
             flushing: AsyncMutex::new(()),
             runtime: Mutex::new(Weak::new()),
+            external_interrupt: Mutex::new(None),
             wake,
             #[cfg(test)]
             interrupt_barrier: Mutex::new(None),
@@ -147,6 +149,12 @@ impl CaptureHandle {
         }
     }
 
+    pub(super) fn notify_committed(&self) {
+        if let Some(wake) = &self.0.wake {
+            wake.notify_one();
+        }
+    }
+
     pub(super) fn failure(&self) -> Option<&'static str> {
         self.0.pending.lock().expect("capture buffer").failure
     }
@@ -160,7 +168,20 @@ impl CaptureHandle {
         *self.0.interrupt_barrier.lock().expect("interrupt barrier") = Some((entered, release));
     }
 
+    pub(super) fn bind_external_interrupt(&self, interrupt: Arc<dyn Fn() + Send + Sync>) {
+        *self.0.external_interrupt.lock().expect("capture interrupt") = Some(interrupt);
+    }
+
     pub(crate) fn request_interrupt(&self) {
+        if let Some(interrupt) = self
+            .0
+            .external_interrupt
+            .lock()
+            .expect("capture interrupt")
+            .clone()
+        {
+            interrupt();
+        }
         let Some(runtime) = self.0.runtime.lock().expect("capture runtime").upgrade() else {
             return;
         };
@@ -184,7 +205,7 @@ impl CaptureHandle {
         });
     }
 
-    async fn failed(&self, reason: &'static str) {
+    pub(super) async fn failed(&self, reason: &'static str) {
         let reason = {
             let mut pending = self.0.pending.lock().expect("capture buffer");
             let reason = *pending.failure.get_or_insert(reason);
@@ -287,7 +308,7 @@ impl CaptureHandle {
         Ok(())
     }
 
-    async fn offer(&self, input: ActivityInput) -> anyhow::Result<()> {
+    pub(super) async fn offer(&self, input: ActivityInput) -> anyhow::Result<()> {
         if input.turn_id.len() > 512 || input.item_id.len() > 512 || input.producer_key.len() > 1024
         {
             self.failed("activity identity exceeded capture bound")
@@ -368,7 +389,7 @@ impl CaptureHandle {
         .await
     }
 
-    async fn finish(&self) -> anyhow::Result<()> {
+    pub(super) async fn finish(&self) -> anyhow::Result<()> {
         self.0
             .pending
             .lock()

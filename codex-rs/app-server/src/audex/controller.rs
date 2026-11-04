@@ -163,12 +163,14 @@ impl AuditController {
         let controller = Self::new(
             config,
             threads.get_models_manager(),
-            routed,
+            routed.clone(),
             Arc::new(move |progress| {
                 outgoing.try_send_server_notification(ServerNotification::AuditProgress(progress));
             }),
         );
         dispatch.set_wake(controller.wake.clone());
+        #[cfg(target_os = "linux")]
+        routed.external.set_wake(controller.wake.clone());
         Self::spawn(&controller);
         controller
     }
@@ -1206,8 +1208,38 @@ impl AuditController {
             }
         }
         let cleanup = matches!(&observation, Observation::Unsubmitted(_));
-        self.apply(&current, snapshot, snapshot_issue, observation)
-            .await?;
+        #[cfg(test)]
+        self.store()
+            .await?
+            .wait_transition_for_test("external_observation")
+            .await;
+        if let Err(error) = self
+            .apply(&current, snapshot, snapshot_issue, observation)
+            .await
+        {
+            // Client attribution can commit a failure/revision after the read
+            // above. Reobserve that same execution; never repeat its dispatch.
+            if matches!(
+                error.downcast_ref::<super::store::AuditStoreError>(),
+                Some(super::store::AuditStoreError::RevisionConflict { .. })
+            ) && self
+                .store()
+                .await?
+                .client_launch(&current.operation_id)
+                .await?
+                .is_some()
+                && self
+                    .store()
+                    .await?
+                    .client_capture_failure(&current.assignment_id)
+                    .await?
+                    .is_some()
+            {
+                self.wake.notify_one();
+                return Ok(());
+            }
+            return Err(error);
+        }
         drop(_gate);
         if cleanup {
             self.dispatch
@@ -1336,14 +1368,32 @@ impl AuditController {
         };
         let mut revision = run.attempt_revision;
         if run.operation_state == OperationState::Dispatching {
-            store
+            let acceptance = store
                 .record_acceptance(
                     &run.operation_id,
                     revision,
                     &format!("{}:accepted", run.operation_id),
                     &receipt,
                 )
-                .await?;
+                .await;
+            if let Err(error) = acceptance {
+                // An external reader can fail after observation but before this
+                // transaction. Its durable capture fence must not be bypassed.
+                if store.client_launch(&run.operation_id).await?.is_some()
+                    && let Some(failure) = store.client_capture_failure(&run.assignment_id).await?
+                {
+                    let current = store.run_for_operation(&run.operation_id).await?;
+                    self.finish_observed_operation(
+                        &run.operation_id,
+                        current.attempt_revision,
+                        AssignmentState::Failed,
+                        &failure,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                return Err(error.into());
+            }
             revision = store
                 .run_for_operation(&run.operation_id)
                 .await?

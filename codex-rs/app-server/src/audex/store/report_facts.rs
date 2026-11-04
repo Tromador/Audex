@@ -71,7 +71,7 @@ pub(super) async fn collect(
             transport: row.try_get("transport")?, admitted_at_ms: row.try_get("admitted_at_ms")?, send_started_at_ms: row.try_get("send_started_at_ms")?,
             confirmed_at_ms: row.try_get("confirmed_at_ms")?, provider_response_id: row.try_get("provider_response_id")?,
         })).collect::<Result<Vec<_>, AuditStoreError>>()?;
-    let client_terminal = if subscription {
+    let client_terminal = if client {
         let row = sqlx::query("SELECT operation_id,execution_id,terminal_id,successful,verified,result_digest FROM audit_client_terminal_evidence WHERE assignment_id=?")
             .bind(assignment).fetch_optional(&mut *connection).await?;
         Fact::from_option(
@@ -91,6 +91,50 @@ pub(super) async fn collect(
     } else {
         Fact::NotApplicable
     };
+    let launch: Option<(String, Option<String>)> = sqlx::query_as("SELECT client_version,executable_digest FROM audit_client_launches l JOIN operations o ON o.id=l.operation_id WHERE o.assignment_id=?")
+        .bind(assignment).fetch_optional(&mut *connection).await?;
+    let mut client_usage = Vec::new();
+    if client {
+        let mut rows: Vec<(String, String, String)> = sqlx::query_as("SELECT message_id,usage_json,'claude_client_message' FROM audit_client_model_observations WHERE assignment_id=? AND usage_json IS NOT NULL
+            UNION ALL SELECT terminal_id,usage_json,'claude_client_terminal_aggregate_not_generation' FROM audit_client_terminal_evidence WHERE assignment_id=? AND usage_json IS NOT NULL ORDER BY 1,3")
+            .bind(assignment).bind(assignment).fetch_all(&mut *connection).await?;
+        let failures: Vec<String> = sqlx::query_scalar("SELECT a.payload FROM audit_activity a JOIN audit_attempts t ON t.assignment_id=a.assignment_id
+            WHERE a.assignment_id=? AND a.kind='status' AND a.producer_key LIKE 'client-terminal-failed:%'
+            AND a.sequence<=COALESCE(t.output_cutoff,t.output_sequence) ORDER BY a.sequence")
+            .bind(assignment).fetch_all(&mut *connection).await?;
+        for raw in failures {
+            let receipt: serde_json::Value = serde_json::from_str(&raw)?;
+            if let Some(id) = receipt["terminal_id"].as_str() {
+                rows.push((
+                    id.to_owned(),
+                    receipt["usage"].to_string(),
+                    "claude_client_failed_terminal_aggregate_not_generation".into(),
+                ));
+            }
+        }
+        for (request_id, raw, evidence_source) in rows {
+            let usage: super::client_stream::ClientUsage = serde_json::from_str(&raw)?;
+            client_usage.push(GenerationUsage {
+                request_id,
+                evidence_source,
+                input_tokens: Fact::from_option(usage.input_tokens, "not observed"),
+                cached_input_tokens: Fact::from_option(
+                    usage.cache_read_input_tokens,
+                    "not observed",
+                ),
+                output_tokens: Fact::from_option(usage.output_tokens, "not observed"),
+                reasoning_tokens: Fact::unavailable("not observed"),
+                cost: Fact::from_option(
+                    usage.estimated_cost_usd.map(|amount| Cost {
+                        amount,
+                        currency: "USD".into(),
+                        measured: false,
+                    }),
+                    "no cost observation retained",
+                ),
+            });
+        }
+    }
     let admission = retained.map(|input| if subscription {
         "Bound successful client terminal and verified per-message identity; no Audex per-generation admission. Provider-internal corrective requests may occur."
     } else if input.version == 2 || input.require_served_identity {
@@ -123,8 +167,19 @@ pub(super) async fn collect(
             "legacy input has no versioned policy bindings",
         ),
         versions: VersionBindings {
-            client_version: applicable(client),
-            client_executable_digest: applicable(client),
+            client_version: if client {
+                Fact::from_option(
+                    launch.as_ref().map(|l| l.0.clone()),
+                    "no launch version retained",
+                )
+            } else {
+                Fact::NotApplicable
+            },
+            client_executable_digest: if client {
+                Fact::from_option(launch.and_then(|l| l.1), "no executable digest retained")
+            } else {
+                Fact::NotApplicable
+            },
             model_version: Fact::unavailable(
                 "no independent model version retained; see requested, resolved and observed identities",
             ),
@@ -153,9 +208,13 @@ pub(super) async fn collect(
             resource_release: applicable(local),
         },
         native_usage,
-        usage: Fact::unavailable(
-            "per-generation token and cost evidence is not retained by current native capture",
-        ),
+        usage: if client && !client_usage.is_empty() {
+            Fact::known(client_usage)
+        } else {
+            Fact::unavailable(
+                "per-generation token and cost evidence is not retained by current native capture",
+            )
+        },
         receipts,
         client_terminal,
         capture_finished: attempt.try_get("capture_finished")?,

@@ -278,7 +278,7 @@ async fn prepare_files(
             command,
             nonce: identity.execution_id.clone(),
             nonce_argument: mcp_path.display().to_string(),
-            executable_digest,
+            executable_digest: executable_digest.clone(),
         },
         record: LaunchRecord {
             operation_id: identity.operation_id.clone(),
@@ -287,6 +287,9 @@ async fn prepare_files(
             configuration_identity: binding.backend_configuration_identity.clone(),
             launch_configuration_digest: sha256_hex(&serde_json::to_vec(&configuration)?),
             executable: executable.display().to_string(),
+            executable_digest: Some(executable_digest),
+            client_session_id: None,
+            client_accepted_at_ms: None,
             client_version: version.into(),
             mcp_config_path: mcp_path.display().to_string(),
             intent_at_ms: 0,

@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Arc;
 use std::sync::{OnceLock, mpsc};
 use std::time::Duration;
 
@@ -21,6 +22,16 @@ pub(super) struct OwnedChild {
     sender: mpsc::Sender<Message>,
 }
 
+impl OwnedChild {
+    pub(super) fn interrupt(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let sender = self.sender.clone();
+        let nonce = self.nonce.clone();
+        Arc::new(move || {
+            let _ = sender.send(Message::Stop(nonce.clone()));
+        })
+    }
+}
+
 impl Drop for OwnedChild {
     fn drop(&mut self) {
         let _ = self.sender.send(Message::Stop(self.nonce.clone()));
@@ -30,6 +41,8 @@ impl Drop for OwnedChild {
 pub(super) struct Spawned {
     pub owned: OwnedChild,
     pub stdin: ChildStdin,
+    pub stdout: ChildStdout,
+    pub stderr: ChildStderr,
 }
 
 enum Message {
@@ -113,8 +126,8 @@ fn spawn(
     let expected_parent = std::process::id() as libc::pid_t;
     spec.command
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     // SAFETY: only async-signal-safe Linux syscalls execute between fork and exec.
     unsafe {
         spec.command.pre_exec(move || {
@@ -144,9 +157,14 @@ fn spawn(
         }
     };
     let stdin = child.stdin.take().expect("piped stdin");
-    let fd = stdin.as_raw_fd();
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let fds = [stdin.as_raw_fd(), stdout.as_raw_fd(), stderr.as_raw_fd()];
     // SAFETY: fd is this child's live pipe; flags do not change its ownership.
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
+    if fds
+        .into_iter()
+        .any(|fd| unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } == -1)
+    {
         let _ = child.kill();
         let _ = child.wait();
         return Err(std::io::Error::last_os_error().into());
@@ -166,6 +184,8 @@ fn spawn(
             sender: sender.clone(),
         },
         stdin,
+        stdout,
+        stderr,
     })
 }
 

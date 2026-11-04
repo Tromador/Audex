@@ -28,6 +28,7 @@ pub(super) mod activity;
 pub(super) mod admission;
 pub(super) mod attempts;
 mod attribution;
+pub(super) mod client_stream;
 #[cfg(test)]
 mod foundation_tests;
 mod foundations;
@@ -1998,6 +1999,13 @@ impl AuditStore {
         let next_revision = context.attempt_revision + 1;
         let now = now_millis();
         attribution::require_completion(&mut transaction, &context.assignment_id, &digest).await?;
+        client_stream::require_bound_terminal(
+            &mut transaction,
+            self.root.as_path(),
+            &context.assignment_id,
+            &digest,
+        )
+        .await?;
         sqlx::query("UPDATE operations SET state='observed_terminal', updated_at_ms=? WHERE id=?")
             .bind(now)
             .bind(operation_id)
@@ -2018,6 +2026,7 @@ impl AuditStore {
         sqlx::query(
             "UPDATE reviewer_assignments
              SET state='succeeded', result_digest=?, result_path=?,
+                 client_terminal_digest=(SELECT artefact_digest FROM audit_client_terminal_evidence WHERE assignment_id=reviewer_assignments.id),
                  result_schema_version=?, summary=?, updated_at_ms=?
              WHERE id=?",
         )

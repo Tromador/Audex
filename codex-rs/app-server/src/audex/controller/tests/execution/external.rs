@@ -1,5 +1,6 @@
 //! G6: production controller/store/routing with deterministic children and real stdio MCP.
 use super::*;
+mod capture;
 use crate::audex::backends::BackendSettings;
 use crate::audex::retained::RetainedInput;
 use crate::audex::snapshot::manifest::sha256_hex;

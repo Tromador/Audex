@@ -10,6 +10,9 @@ pub(in crate::audex) struct LaunchRecord {
     pub configuration_identity: String,
     pub launch_configuration_digest: String,
     pub executable: String,
+    pub executable_digest: Option<String>,
+    pub client_session_id: Option<String>,
+    pub client_accepted_at_ms: Option<i64>,
     pub client_version: String,
     pub mcp_config_path: String,
     pub intent_at_ms: i64,
@@ -40,6 +43,9 @@ pub(super) async fn read_launch(
         configuration_identity: row.try_get("configuration_identity")?,
         launch_configuration_digest: row.try_get("launch_configuration_digest")?,
         executable: row.try_get("executable")?,
+        executable_digest: row.try_get("executable_digest")?,
+        client_session_id: row.try_get("client_session_id")?,
+        client_accepted_at_ms: row.try_get("client_accepted_at_ms")?,
         client_version: row.try_get("client_version")?,
         mcp_config_path: row.try_get("mcp_config_path")?,
         intent_at_ms: row.try_get("intent_at_ms")?,
@@ -74,12 +80,12 @@ impl AuditStore {
             return Ok(false);
         }
         let changed = sqlx::query("INSERT INTO audit_client_launches
-            (operation_id,execution_id,route,configuration_identity,launch_configuration_digest,executable,client_version,mcp_config_path,intent_at_ms)
-            SELECT id,?,?,?,?,?,?,?,? FROM operations WHERE id=? AND submission_boundary='unsubmitted'
+            (operation_id,execution_id,route,configuration_identity,launch_configuration_digest,executable,client_version,mcp_config_path,intent_at_ms,executable_digest)
+            SELECT id,?,?,?,?,?,?,?,?,? FROM operations WHERE id=? AND submission_boundary='unsubmitted'
             ON CONFLICT(operation_id) DO NOTHING")
             .bind(&record.execution_id).bind(&record.route).bind(&record.configuration_identity)
             .bind(&record.launch_configuration_digest).bind(&record.executable).bind(&record.client_version)
-            .bind(&record.mcp_config_path).bind(now_millis()).bind(&record.operation_id)
+            .bind(&record.mcp_config_path).bind(now_millis()).bind(&record.executable_digest).bind(&record.operation_id)
             .execute(&mut *tx).await?.rows_affected() == 1;
         tx.commit().await?;
         Ok(changed)

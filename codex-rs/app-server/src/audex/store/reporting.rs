@@ -527,7 +527,7 @@ impl AuditStore {
             Some((name.to_owned(), entered.clone(), release.clone()));
         (entered, release)
     }
-    pub(super) async fn wait_transition_for_test(&self, name: &str) {
+    pub(in crate::audex) async fn wait_transition_for_test(&self, name: &str) {
         let barrier = {
             let mut barrier = self.transition_barrier.lock().expect("transition barrier");
             if barrier

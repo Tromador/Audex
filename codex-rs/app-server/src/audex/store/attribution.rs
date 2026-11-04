@@ -108,9 +108,7 @@ async fn subscription_owner(
 }
 
 impl AuditStore {
-    /// Called by the owned collector in its delivery slice; fixtures exercise the
-    /// same durable contract without launching an external client.
-    #[allow(dead_code)]
+    /// Client-owned message observations remain distinct from strict admissions.
     pub(in crate::audex) async fn observe_client_message(
         &self,
         identity: &AdmissionIdentity,
@@ -153,7 +151,8 @@ impl AuditStore {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    /// Legacy attribution-contract fixture. Production uses bound stream artefacts.
+    #[cfg(test)]
     pub(in crate::audex) async fn record_client_terminal(
         &self,
         identity: &AdmissionIdentity,
