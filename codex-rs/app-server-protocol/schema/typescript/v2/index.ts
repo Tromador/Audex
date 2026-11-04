@@ -71,6 +71,7 @@ export type { AuditExecutionAdapter } from "./AuditExecutionAdapter";
 export type { AuditGenerationIdentity } from "./AuditGenerationIdentity";
 export type { AuditListParams } from "./AuditListParams";
 export type { AuditListResponse } from "./AuditListResponse";
+export type { AuditLocalExecution } from "./AuditLocalExecution";
 export type { AuditOperationState } from "./AuditOperationState";
 export type { AuditProgressNotification } from "./AuditProgressNotification";
 export type { AuditReadParams } from "./AuditReadParams";

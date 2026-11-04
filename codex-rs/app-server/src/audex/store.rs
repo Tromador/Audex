@@ -33,6 +33,7 @@ pub(super) mod client_stream;
 mod foundation_tests;
 mod foundations;
 pub(super) mod launch;
+mod launch_lifecycle;
 mod report_facts;
 mod reporting;
 #[cfg(test)]

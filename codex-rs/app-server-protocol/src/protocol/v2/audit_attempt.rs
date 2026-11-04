@@ -82,6 +82,20 @@ pub struct AuditAttemptView {
     pub capture_gap: Option<String>,
     pub capture_failure: Option<String>,
     pub capture_truncated: bool,
+    /// Live local cleanup receipts, independent of the frozen contribution and remote billing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub local_execution: Option<AuditLocalExecution>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AuditLocalExecution {
+    pub status: String,
+    pub stop_requested_at_ms: Option<i64>,
+    pub stop_confirmed_at_ms: Option<i64>,
+    pub cleanup_finished_at_ms: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

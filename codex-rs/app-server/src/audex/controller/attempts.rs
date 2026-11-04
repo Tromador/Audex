@@ -5,7 +5,7 @@ impl AuditController {
     pub(super) async fn revalidate_retained(
         &self,
         record: &AuditRunRecord,
-        for_launch: bool,
+        _for_launch: bool,
     ) -> anyhow::Result<()> {
         let (raw, policy_json, policy_digest, manifest_digest) = self
             .store()
@@ -13,9 +13,9 @@ impl AuditController {
             .attempt_input(&record.operation_id)
             .await?;
         let input = super::super::retained::RetainedInput::decode(&raw)?;
-        // Internal launch can reach the owned adapter. Public Retry keeps its
-        // existing availability guard until external lifecycle qualification.
-        if !for_launch || input.adapter() != AuditExecutionAdapter::ClaudeClient {
+        // Retry retains the original external route; ordinary commissioning still
+        // applies its separate availability guard.
+        if input.adapter() != AuditExecutionAdapter::ClaudeClient {
             input.require_native()?;
         }
         let settings = super::super::backends::BackendSettings::load(self.root.as_path())?;
@@ -28,7 +28,7 @@ impl AuditController {
                 && sha256_hex(&snapshot.manifest().to_pretty_bytes()?) == manifest_digest,
             "retained Retry source or policy digest mismatch"
         );
-        if for_launch && input.adapter() == AuditExecutionAdapter::ClaudeClient {
+        if input.adapter() == AuditExecutionAdapter::ClaudeClient {
             // The adapter checks the complete retained launch policy before any
             // spawn. Do not construct a native reviewer or resolve its catalogue.
             return input.validate_backend_configuration(&settings);
@@ -171,6 +171,7 @@ impl AuditController {
             capture_gap: capture.gap,
             capture_failure: capture.failure,
             capture_truncated: capture.truncated,
+            local_execution: store.local_execution_view(&record.operation_id).await?,
         })
     }
 

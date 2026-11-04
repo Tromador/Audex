@@ -8817,6 +8817,17 @@
               "null"
             ]
           },
+          "localExecution": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AuditLocalExecution"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Live local cleanup receipts, independent of the frozen contribution and remote billing."
+          },
           "model": {
             "description": "Requested selection, retained for compatibility.",
             "type": "string"
@@ -9140,6 +9151,38 @@
           "runs"
         ],
         "title": "AuditListResponse",
+        "type": "object"
+      },
+      "AuditLocalExecution": {
+        "properties": {
+          "cleanupFinishedAtMs": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "stopConfirmedAtMs": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "stopRequestedAtMs": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ],
         "type": "object"
       },
       "AuditOperationState": {

@@ -14,6 +14,7 @@ pub(super) struct SpawnSpec {
     pub nonce: String,
     pub nonce_argument: String,
     pub executable_digest: String,
+    pub binding_argument: String,
 }
 
 pub(super) struct OwnedChild {
@@ -51,12 +52,76 @@ enum Message {
         tokio::sync::oneshot::Sender<anyhow::Result<Spawned>>,
     ),
     Stop(String),
+    Evidence(
+        String,
+        tokio::sync::oneshot::Sender<Option<super::lifecycle::OwnershipEvidence>>,
+    ),
+    Forget(String),
 }
 
 struct Running {
-    child: Child,
+    child: Option<Child>,
     identity: LinuxChildIdentity,
     nonce_argument: String,
+    binding_argument: String,
+    evidence: super::lifecycle::OwnershipEvidence,
+    stopping: bool,
+}
+
+impl Running {
+    fn observe(&mut self) {
+        let directory = std::path::Path::new(&self.nonce_argument)
+            .parent()
+            .expect("private runtime");
+        let observed = super::lifecycle::observe(
+            Some(&self.identity),
+            &self.nonce_argument,
+            &self.binding_argument,
+            directory,
+            &self.evidence,
+        );
+        self.evidence = observed.evidence;
+    }
+
+    fn stop(&mut self) {
+        self.observe();
+        self.stopping = true;
+        if let Some(child) = &mut self.child {
+            // SAFETY: this direct Child has never been reaped. Its PID reserves
+            // the original group number even if the leader is now a zombie.
+            // Cold reconstruction never uses this numeric-group operation.
+            unsafe {
+                libc::kill(-(self.identity.process_group as i32), libc::SIGKILL);
+            }
+            let _ = child.kill();
+        }
+        for member in &self.evidence.processes {
+            let _ = super::lifecycle::signal_verified(&member.identity);
+        }
+    }
+
+    fn poll(&mut self) {
+        if self.child.is_none() {
+            return;
+        }
+        self.observe();
+        if self.stopping
+            || matches!(
+                codex_app_server_daemon::read_linux_process_identity(self.identity.pid),
+                Ok(None)
+            )
+        {
+            // Terminate the group before reaping its leader, including normal exit.
+            self.stop();
+            if self
+                .child
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
+            {
+                self.child = None;
+            }
+        }
+    }
 }
 
 fn sender() -> &'static mpsc::Sender<Message> {
@@ -68,7 +133,7 @@ fn sender() -> &'static mpsc::Sender<Message> {
             .name("audex-client-owner".into())
             .spawn(move || {
                 let mut children: HashMap<String, Running> = HashMap::new();
-                let mut stopping: Vec<Child> = Vec::new();
+                let mut next_poll = std::time::Instant::now();
                 loop {
                     match receiver.recv_timeout(Duration::from_millis(20)) {
                         Ok(Message::Spawn(spec, reply)) => {
@@ -79,31 +144,33 @@ fn sender() -> &'static mpsc::Sender<Message> {
                             let _ = reply.send(result);
                         }
                         Ok(Message::Stop(nonce)) => {
-                            if let Some(mut running) = children.remove(&nonce) {
-                                if read_linux_child_identity(
-                                    running.child.id(),
-                                    &running.nonce_argument,
-                                )
-                                .is_ok_and(|actual| actual == running.identity)
-                                {
-                                    // SAFETY: unreaped, verified owned process-group leader.
-                                    unsafe {
-                                        libc::kill(
-                                            -(running.identity.process_group as i32),
-                                            libc::SIGKILL,
-                                        );
-                                    }
-                                }
-                                if !matches!(running.child.try_wait(), Ok(Some(_))) {
-                                    stopping.push(running.child);
-                                }
+                            if let Some(running) = children.get_mut(&nonce) {
+                                running.stop();
+                            }
+                        }
+                        Ok(Message::Evidence(nonce, reply)) => {
+                            let _ = reply.send(children.get_mut(&nonce).map(|running| {
+                                running.poll();
+                                running.evidence.clone()
+                            }));
+                        }
+                        Ok(Message::Forget(nonce)) => {
+                            if children
+                                .get(&nonce)
+                                .is_some_and(|running| running.child.is_none())
+                            {
+                                children.remove(&nonce);
                             }
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
-                    children.retain(|_, running| !matches!(running.child.try_wait(), Ok(Some(_))));
-                    stopping.retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_))));
+                    if std::time::Instant::now() >= next_poll {
+                        for running in children.values_mut() {
+                            running.poll();
+                        }
+                        next_poll = std::time::Instant::now() + Duration::from_millis(100);
+                    }
                 }
             })
             .expect("start Audex client owner thread");
@@ -172,9 +239,12 @@ fn spawn(
     children.insert(
         spec.nonce.clone(),
         Running {
-            child,
+            child: Some(child),
             identity: identity.clone(),
             nonce_argument: spec.nonce_argument,
+            binding_argument: spec.binding_argument,
+            evidence: super::lifecycle::OwnershipEvidence::default(),
+            stopping: false,
         },
     );
     Ok(Spawned {
@@ -187,6 +257,23 @@ fn spawn(
         stdout,
         stderr,
     })
+}
+
+pub(super) fn stop(nonce: &str) {
+    let _ = sender().send(Message::Stop(nonce.into()));
+}
+
+pub(super) fn forget(nonce: &str) {
+    let _ = sender().send(Message::Forget(nonce.into()));
+}
+
+pub(super) async fn evidence(nonce: &str) -> Option<super::lifecycle::OwnershipEvidence> {
+    let (reply, result) = tokio::sync::oneshot::channel();
+    sender().send(Message::Evidence(nonce.into(), reply)).ok()?;
+    tokio::time::timeout(Duration::from_secs(1), result)
+        .await
+        .ok()?
+        .ok()?
 }
 
 pub(super) async fn launch(spec: SpawnSpec) -> anyhow::Result<Spawned> {

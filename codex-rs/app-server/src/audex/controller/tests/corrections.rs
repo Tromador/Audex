@@ -402,3 +402,14 @@ async fn integrity_failure_does_not_terminate_live_execution_and_cancel_remains_
     assert_eq!(fake.starts.load(Ordering::SeqCst), 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn fresh_controller_finishes_schema_before_resource_reconciliation() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (controller, fake, _) = fixture(&temp).await;
+    fake.check_reconcile_schema.store(true, Ordering::SeqCst);
+    assert!(!controller.root.join("audit-state.sqlite3").exists());
+    controller.tick().await?;
+    assert!(fake.reconcile_schema_ready.load(Ordering::SeqCst));
+    Ok(())
+}

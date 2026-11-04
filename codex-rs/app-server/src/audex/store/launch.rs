@@ -87,6 +87,18 @@ impl AuditStore {
             .bind(&record.launch_configuration_digest).bind(&record.executable).bind(&record.client_version)
             .bind(&record.mcp_config_path).bind(now_millis()).bind(&record.executable_digest).bind(&record.operation_id)
             .execute(&mut *tx).await?.rows_affected() == 1;
+        if changed {
+            #[cfg(target_os = "linux")]
+            let daemon = codex_app_server_daemon::read_linux_process_identity(std::process::id())
+                .map_err(|e| AuditStoreError::InvalidInput(e.to_string()))?
+                .ok_or_else(|| {
+                    AuditStoreError::InvalidInput("daemon identity unavailable".into())
+                })?;
+            #[cfg(target_os = "linux")]
+            sqlx::query("UPDATE audit_client_launches SET daemon_identity_json=?,authority_json=? WHERE operation_id=?")
+                .bind(serde_json::to_string(&daemon)?).bind(serde_json::to_string(identity)?)
+                .bind(&record.operation_id).execute(&mut *tx).await?;
+        }
         tx.commit().await?;
         Ok(changed)
     }

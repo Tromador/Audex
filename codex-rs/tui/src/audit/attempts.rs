@@ -174,7 +174,10 @@ pub(crate) fn attempt_summary(target: &AuditAttemptView) -> String {
         target.capture_gap,
         target.capture_failure,
         target.capture_truncated
-    )
+    ) + &target.local_execution.as_ref().map(|local| format!(
+        "\nLocal execution: {}; stop confirmed={}; cleanup finished={}. Remote billing is unconfirmed.",
+        local.status, local.stop_confirmed_at_ms.is_some(), local.cleanup_finished_at_ms.is_some()
+    )).unwrap_or_default()
 }
 
 /// Presentation hints only. Every explicit/stale request still reaches server validation.

@@ -2,7 +2,9 @@
 
 mod backend;
 #[cfg(target_os = "linux")]
-pub use backend::pid::identity::{LinuxChildIdentity, read_linux_child_identity};
+pub use backend::pid::identity::{
+    LinuxChildIdentity, read_linux_child_identity, read_linux_process_identity,
+};
 mod background_command;
 #[cfg(windows)]
 pub use backend::windows::DetachedLaunchRestricted;

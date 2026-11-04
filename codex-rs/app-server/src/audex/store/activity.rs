@@ -63,6 +63,7 @@ pub(super) async fn capture_allowed(
         JOIN operations o ON o.assignment_id=t.assignment_id JOIN audit_execution e ON e.operation_id=o.id
         WHERE t.assignment_id=? AND t.owner_generation=? AND e.thread_id=?
         AND v.current_assignment_id=t.assignment_id AND t.disposition='active' AND t.output_cutoff IS NULL AND t.capture_failure IS NULL
+        AND NOT EXISTS(SELECT 1 FROM audit_client_launches l WHERE l.operation_id=o.id AND (t.capture_finished=1 OR l.local_stop_requested_at_ms IS NOT NULL))
         AND r.control_intent='active' AND r.phase NOT IN ('completed','completed_with_failures','failed','cancelled'))")
         .bind(&identity.assignment_id).bind(identity.owner_generation).bind(&identity.session_id)
         .fetch_one(connection).await?)
@@ -84,9 +85,27 @@ pub(super) async fn append_batch(
         "SELECT output_sequence,output_bytes,capture_truncated FROM audit_attempts WHERE assignment_id=?")
         .bind(&identity.assignment_id).fetch_one(&mut *connection).await?;
     if !capture_allowed(connection, identity).await? {
+        // External terminal persistence has already closed stream authority.
+        // Completion may acknowledge its exact committed prefix, but cannot add
+        // even one new event after that boundary.
+        let terminal: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_client_terminal_evidence c JOIN audit_attempts t ON t.assignment_id=c.assignment_id JOIN audit_reviewers v ON v.id=t.reviewer_id WHERE t.assignment_id=? AND c.execution_id=? AND t.owner_generation=? AND t.capture_finished=1 AND t.disposition='active' AND t.output_cutoff IS NULL AND v.current_assignment_id=t.assignment_id)")
+            .bind(&identity.assignment_id).bind(&identity.session_id).bind(identity.owner_generation)
+            .fetch_one(&mut *connection).await?;
+        let mut committed = terminal;
+        if terminal {
+            for input in inputs {
+                let digest: Option<String> = sqlx::query_scalar("SELECT source_digest FROM audit_activity WHERE assignment_id=? AND session_id=? AND producer_key=?")
+                    .bind(&identity.assignment_id).bind(&identity.session_id).bind(&input.producer_key)
+                    .fetch_optional(&mut *connection).await?;
+                if digest.as_deref() != Some(sha256_hex(&serde_json::to_vec(input)?).as_str()) {
+                    committed = false;
+                    break;
+                }
+            }
+        }
         return Ok(Appended {
             sequence,
-            fenced: true,
+            fenced: !committed,
             truncated,
         });
     }

@@ -97,12 +97,22 @@ async fn fixture_with_transport(
     hooks: crate::audex::dispatch::DispatchTestHooks,
     websockets: bool,
 ) -> (Arc<AuditController>, Arc<ThreadManager>) {
-    let mut config = Config::load_default_with_cli_overrides_for_codex_home(
-        temp.path().to_path_buf(),
-        Vec::new(),
-    )
-    .await
-    .expect("config");
+    fixture_at_path(temp.path(), url, auth, custom, listen, hooks, websockets).await
+}
+
+async fn fixture_at_path(
+    home: &std::path::Path,
+    url: &str,
+    auth: CodexAuth,
+    custom: bool,
+    listen: crate::audex::dispatch::Listen,
+    hooks: crate::audex::dispatch::DispatchTestHooks,
+    websockets: bool,
+) -> (Arc<AuditController>, Arc<ThreadManager>) {
+    let mut config =
+        Config::load_default_with_cli_overrides_for_codex_home(home.to_path_buf(), Vec::new())
+            .await
+            .expect("config");
     config.model_provider.base_url = Some(format!("{url}/v1"));
     config.model_provider.supports_websockets = websockets;
     if let Some(configure) = &hooks.config {

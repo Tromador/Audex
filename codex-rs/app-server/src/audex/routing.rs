@@ -60,8 +60,8 @@ impl RoutedDispatch {
             }
             #[cfg(target_os = "linux")]
             Ok(true) => {
-                if interrupt {
-                    self.external.stop(&operation);
+                if interrupt && let Ok(store) = self.store().await {
+                    let _ = self.external.stop_owned(store, &operation).await;
                 }
                 match self.store().await {
                     Ok(store) => self.external.inspect(store, &operation).await,
@@ -74,6 +74,13 @@ impl RoutedDispatch {
 }
 
 impl Dispatch for RoutedDispatch {
+    fn reconcile_resources(&self) -> BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async move {
+            #[cfg(target_os = "linux")]
+            self.external.reconcile(self.store().await?).await?;
+            Ok(())
+        })
+    }
     fn capture(&self, operation: &str) -> Option<super::capture::CaptureHandle> {
         #[cfg(target_os = "linux")]
         if let Some(capture) = self.external.capture(operation) {
@@ -102,10 +109,18 @@ impl Dispatch for RoutedDispatch {
     }
     fn request_interrupt(&self, operation: String) -> BoxFuture<'_, ()> {
         Box::pin(async move {
+            // The controller has already committed the exact control. Local
+            // handles can stop immediately even when receipt storage is unavailable.
+            #[cfg(target_os = "linux")]
+            self.external.stop(&operation);
             match self.external(&operation).await {
                 Ok(false) => self.native.request_interrupt(operation).await,
                 #[cfg(target_os = "linux")]
-                Ok(true) => self.external.stop(&operation),
+                Ok(true) => {
+                    if let Ok(store) = self.store().await {
+                        let _ = self.external.stop_owned(store, &operation).await;
+                    }
+                }
                 _ => {}
             }
         })
@@ -115,7 +130,11 @@ impl Dispatch for RoutedDispatch {
             match self.external(&operation).await {
                 Ok(false) => self.native.cleanup_preparation(operation).await,
                 #[cfg(target_os = "linux")]
-                Ok(true) => self.external.stop(&operation),
+                Ok(true) => {
+                    if let Ok(store) = self.store().await {
+                        let _ = self.external.stop_owned(store, &operation).await;
+                    }
+                }
                 _ => {}
             }
         })

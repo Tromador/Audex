@@ -27,6 +27,22 @@ with (root / "stream-launches").open("a") as launches:
 session = scenario.get("session", "session-" + binding["execution_id"])
 model = "claude-haiku-5-5"
 seq = 0
+if scenario.get("lifecycle"):
+    import socket
+    import subprocess
+    local_socket = socket.socket(socket.AF_UNIX)
+    socket_path = Path(scenario.get("socket_path", str(Path(os.environ["TMPDIR"]) / "s")))
+    local_socket.bind(str(socket_path))
+    local_socket.listen()
+    bridge = subprocess.Popen([config["command"], *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, env=dict(os.environ, **config["env"]))
+    bridge.stdin.write((json.dumps({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"c63-lifecycle","version":"1"}}}) + "\n").encode())
+    bridge.stdin.flush()
+    assert json.loads(bridge.stdout.readline())["id"] == 1
+    member = subprocess.Popen(["/usr/bin/sleep", "60"])
+    (root / "lifecycle-ready.json").write_text(json.dumps({"client":os.getpid(), "bridge":bridge.pid,
+        "member":member.pid, "socket":str(socket_path)}))
 secret = "PRIVATE_SENTINEL_MUST_NOT_PERSIST"
 
 
@@ -74,6 +90,24 @@ elif mode == "missing_model":
     model = None
 elif mode == "wrong_model":
     model = "wrong-served-model"
+if mode == "multi_record":
+    partial("message_start", message={"id": "multi-text", "model": model})
+    for index, kind in enumerate(["thinking", "text", "text"]):
+        partial("content_block_start", index=index, content_block={"type": kind, kind: ""})
+        partial("content_block_delta", index=index, delta={"type": kind + "_delta", kind: secret if kind == "thinking" else "Distinct equal block."})
+        assistant("multi-text", [{"type": kind, kind: secret if kind == "thinking" else "Distinct equal block."}], model)
+        partial("content_block_stop", index=index)
+    partial("message_stop")
+    partial("message_start", message={"id": "multi-tool", "model": model})
+    for index, call in enumerate(["multi-call-1", "multi-call-2"]):
+        tool = {"type": "tool_use", "id": call, "name": "mcp__audex_source__list", "input": {}}
+        partial("content_block_start", index=index, content_block=tool)
+        assistant("multi-tool", [tool], model)
+        partial("content_block_stop", index=index)
+        assistant("multi-tool", [tool], model)
+    partial("message_stop")
+    for call in ["multi-call-1", "multi-call-2", "multi-call-1"]:
+        emit("user", message={"role": "user", "content": [{"type": "tool_result", "tool_use_id": call, "content": [{"type": "text", "text": '{"entries":[]}'}]}]})
 partial("message_start", message={"id": "progress", "model": model})
 partial("content_block_start", index=0, content_block={"type": "thinking", "thinking": secret, "signature": secret})
 partial("content_block_delta", index=0, delta={"type": "thinking_delta", "thinking": secret})
@@ -88,6 +122,7 @@ partial("message_stop")
 assistant("progress", [{"type": "thinking", "thinking": secret, "signature": secret}, {"type": "text", "text": "Public progress."}],
           "contradictory-model" if mode == "model_conflict" else model)
 assistant("identical-but-distinct", [{"type": "text", "text": "Public progress."}], model)
+assistant("identical-but-distinct", [{"type": "text", "text": "Public progress."}], model)  # same full message identity
 for i in [1, 2]:
     tool = {"type": "tool_use", "id": f"call-{i}", "name": "mcp__audex_source__list", "input": {"credentials": secret}}
     assistant(f"tool-message-{i}", [tool], model)

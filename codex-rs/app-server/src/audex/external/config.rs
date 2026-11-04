@@ -7,6 +7,7 @@ use codex_app_server_protocol::{AuditAuthenticationRoute, AuditExecutionAdapter}
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -136,6 +137,17 @@ pub(super) async fn prepare(
         "runtime root must be resolved"
     );
     let directory = runtime_root.join(&identity.execution_id);
+    // The pinned client falls back outside TMPDIR above 103 bytes. Reject that
+    // possibility before preparing files or probing/spawning any client process.
+    let pid_max: u32 = std::fs::read_to_string("/proc/sys/kernel/pid_max")?
+        .trim()
+        .parse()?;
+    anyhow::ensure!(pid_max > 1, "system maximum PID unavailable");
+    let maximum_socket = directory.join(format!("tmp/cc-socks/{pid_max}.sock"));
+    anyhow::ensure!(
+        maximum_socket.as_os_str().as_bytes().len() <= 103,
+        "runtime root exceeds the pinned client's 103-byte socket path limit"
+    );
     create_directory(&directory)?;
     let result = prepare_files(
         root,
@@ -263,6 +275,23 @@ async fn prepare_files(
     )?;
     prompt.push(b'\n');
     anyhow::ensure!(prompt.len() <= 256 * 1024, "external prompt exceeds bound");
+    #[cfg(test)]
+    if let Ok(endpoint) = std::fs::read_to_string(root.join("c63-fake-api")) {
+        // This compiled-test-only fixture has no normal route or credential path.
+        let endpoint = url::Url::parse(endpoint.trim())?;
+        anyhow::ensure!(
+            endpoint.scheme() == "http"
+                && endpoint.host_str() == Some("127.0.0.1")
+                && endpoint.port().is_some(),
+            "fixture API must be loopback"
+        );
+        anyhow::ensure!(
+            std::fs::read_to_string("/proc/net/route")?.lines().count() == 1,
+            "official client fixture requires an isolated network namespace"
+        );
+        environment.insert("ANTHROPIC_BASE_URL".into(), endpoint.to_string());
+        environment.insert("ANTHROPIC_API_KEY".into(), "dummy-c63-offline".into());
+    }
     let executable_digest = sha256_hex(&std::fs::read(executable)?);
     let configuration = json!({"version":1,"executable":executable,"clientVersion":version,
         "executableDigest":executable_digest, "args":args,"environment":environment,
@@ -279,6 +308,7 @@ async fn prepare_files(
             nonce: identity.execution_id.clone(),
             nonce_argument: mcp_path.display().to_string(),
             executable_digest: executable_digest.clone(),
+            binding_argument: serde_json::to_string(identity)?,
         },
         record: LaunchRecord {
             operation_id: identity.operation_id.clone(),

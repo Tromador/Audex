@@ -84,6 +84,9 @@ pub(super) trait Dispatch: Send + Sync {
     fn cleanup_preparation(&self, _operation_id: String) -> BoxFuture<'_, ()> {
         Box::pin(async {})
     }
+    fn reconcile_resources(&self) -> BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Keep local recovery from observing a dispatch whose acceptance call has not
@@ -750,7 +753,14 @@ impl AuditController {
     }
 
     async fn recover_runs(self: &Arc<Self>, scheduled: bool) -> anyhow::Result<()> {
-        let candidates = self.store().await?.attempt_candidates().await?;
+        // The controller's OnceCell serialises initial migration with RPC reads.
+        // Finish it before routed cleanup opens its independent store connection.
+        let store = self.store().await?;
+        // Operational obligations survive terminal parent audits and are not work candidates.
+        if let Err(error) = self.dispatch.reconcile_resources().await {
+            tracing::warn!(%error, "Audex local cleanup retained for recovery");
+        }
+        let candidates = store.attempt_candidates().await?;
         if !scheduled {
             let results = futures::stream::iter(candidates)
                 .map(|(id, _, _)| async move { self.drive_operation(&id).await })

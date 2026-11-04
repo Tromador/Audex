@@ -23,6 +23,13 @@ binding = json.loads(args[args.index("--binding") + 1])
 root = Path(args[args.index("--state-root") + 1])
 with (directory / "spawn-count").open("a") as file:
     file.write("spawn\n")
+bridge = None
+if (Path(sys.argv[0]).parent / "early-bridge").exists():
+    bridge = subprocess.Popen([config["command"], *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, env=dict(os.environ, **config["env"]))
+    pending = bridge.stderr.readline().decode().strip()
+    assert pending == "Audex source bridge waiting for committed launch identity", pending
+    (directory / "early-bridge.json").write_text(json.dumps({"bridge_pid": bridge.pid, "identity_pending": True}))
 prompt = sys.stdin.buffer.readline()
 if not prompt:
     sys.exit(0)
@@ -57,7 +64,8 @@ assert sys.argv[sys.argv.index("--tools") + 1] == ""
 assert sys.argv[sys.argv.index("--allowedTools") + 1].split(",") == [f"mcp__audex_source__{n}" for n in ["list", "read", "search"]]
 assert not {"--resume", "--continue", "--fallback-model", "--json-schema"}.intersection(sys.argv)
 bridge_env = dict(os.environ, **config["env"])
-bridge = subprocess.Popen([config["command"], *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=bridge_env)
+if bridge is None:
+    bridge = subprocess.Popen([config["command"], *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=bridge_env)
 transcript = []
 
 

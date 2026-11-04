@@ -248,13 +248,19 @@ pub struct LinuxChildIdentity {
     pub start_ticks: u64,
 }
 
-/// Reuses the daemon's stat parser; checks identity on both sides of argv inspection.
+/// Observe a process without treating an unreadable identity as absence.
 #[cfg(target_os = "linux")]
-pub fn read_linux_child_identity(pid: u32, nonce_argument: &str) -> Result<LinuxChildIdentity> {
+pub fn read_linux_process_identity(pid: u32) -> Result<Option<LinuxChildIdentity>> {
     let path = format!("/proc/{pid}/stat");
-    let stat = std::fs::read(&path)?;
+    let stat = match std::fs::read(&path) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     let (state, start_ticks) = parse_stat(&stat)?;
-    anyhow::ensure!(state != "Z" && state != "X", "child is no longer live");
+    if state == "Z" || state == "X" {
+        return Ok(None);
+    }
     let end = stat
         .iter()
         .rposition(|b| *b == b')')
@@ -264,6 +270,28 @@ pub fn read_linux_child_identity(pid: u32, nonce_argument: &str) -> Result<Linux
         .collect();
     let parent_pid = fields.get(1).context("missing parent")?.parse()?;
     let process_group = fields.get(2).context("missing group")?.parse()?;
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+        .trim()
+        .to_owned();
+    anyhow::ensure!(!boot_id.is_empty(), "empty boot identity");
+    let (state, after) = parse_stat(&std::fs::read(path)?)?;
+    anyhow::ensure!(start_ticks == after, "child identity changed");
+    if state == "Z" || state == "X" {
+        return Ok(None);
+    }
+    Ok(Some(LinuxChildIdentity {
+        pid,
+        parent_pid,
+        process_group,
+        boot_id,
+        start_ticks,
+    }))
+}
+
+/// Reuses the daemon's stat parser; checks identity on both sides of argv inspection.
+#[cfg(target_os = "linux")]
+pub fn read_linux_child_identity(pid: u32, nonce_argument: &str) -> Result<LinuxChildIdentity> {
+    let before = read_linux_process_identity(pid)?.context("child is no longer live")?;
     let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))?;
     anyhow::ensure!(
         !nonce_argument.is_empty()
@@ -272,19 +300,9 @@ pub fn read_linux_child_identity(pid: u32, nonce_argument: &str) -> Result<Linux
                 .any(|arg| arg == nonce_argument.as_bytes()),
         "launch nonce argument mismatch"
     );
-    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
-        .trim()
-        .to_owned();
-    anyhow::ensure!(!boot_id.is_empty(), "empty boot identity");
-    let (_, after) = parse_stat(&std::fs::read(path)?)?;
-    anyhow::ensure!(start_ticks == after, "child identity changed");
-    Ok(LinuxChildIdentity {
-        pid,
-        parent_pid,
-        process_group,
-        boot_id,
-        start_ticks,
-    })
+    let after = read_linux_process_identity(pid)?.context("child is no longer live")?;
+    anyhow::ensure!(before == after, "child identity changed");
+    Ok(after)
 }
 
 #[cfg(test)]

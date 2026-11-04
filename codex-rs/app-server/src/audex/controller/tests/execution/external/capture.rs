@@ -1,7 +1,7 @@
 //! C6.2: real owned pipes -> capture journal -> result validator -> frozen report.
 use super::*;
 
-async fn seed_stream(
+pub(super) async fn seed_stream(
     controller: &AuditController,
     temp: &tempfile::TempDir,
     mode: &str,
@@ -19,7 +19,10 @@ async fn seed_stream(
     Ok(id)
 }
 
-async fn settled(controller: &AuditController, id: &str) -> anyhow::Result<AuditRunRecord> {
+pub(super) async fn settled(
+    controller: &AuditController,
+    id: &str,
+) -> anyhow::Result<AuditRunRecord> {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             controller.drive(id).await?;
@@ -46,7 +49,7 @@ async fn path_ready(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn assert_no_private_files(path: &Path) -> anyhow::Result<()> {
+pub(super) fn assert_no_private_files(path: &Path) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
@@ -600,7 +603,7 @@ fn api_client_terminal_without_strict_admissions_is_refused() -> anyhow::Result<
         let (controller, threads) = real_fixture(&temp, &server.uri()).await;
         let id = seed_stream(&controller, &temp, "valid", false).await?;
         let settings: BackendSettings = serde_json::from_value(json!({"version":1,"claudeApi":{
-            "executable":temp.path().join("fake-client"),"clientVersion":"2.1.314","runtimeRoot":temp.path().join("client-runtime"),
+            "executable":temp.path().join("fake-client"),"clientVersion":"2.1.314","runtimeRoot":temp.path().join("client-runtime").canonicalize()?,
             "credential":{"kind":"environment","reference":"UNSET_C62_FIXTURE_KEY"},"upstream":"https://api.anthropic.com"
         }}))?;
         std::fs::write(

@@ -213,11 +213,15 @@ impl AuditStore {
                                 "invalid retained Retry bindings".to_owned(),
                             )
                         })?;
-                    input.require_native().map_err(|_| {
-                        AuditStoreError::InvalidTransition(
-                            "retained reviewer route is unavailable for Retry".to_owned(),
-                        )
-                    })?;
+                    if input.adapter()
+                        != codex_app_server_protocol::AuditExecutionAdapter::ClaudeClient
+                    {
+                        input.require_native().map_err(|_| {
+                            AuditStoreError::InvalidTransition(
+                                "retained reviewer route is unavailable for Retry".to_owned(),
+                            )
+                        })?;
+                    }
                     let settings =
                         crate::audex::backends::BackendSettings::load(self.root.as_path())
                             .map_err(|_| {

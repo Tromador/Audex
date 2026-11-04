@@ -35,6 +35,8 @@ struct Fake {
     pause_interrupt: AtomicBool,
     interrupt_entered: Notify,
     interrupt_release: Notify,
+    check_reconcile_schema: AtomicBool,
+    reconcile_schema_ready: AtomicBool,
 }
 
 impl Fake {
@@ -48,6 +50,26 @@ impl Fake {
 }
 
 impl Dispatch for Fake {
+    fn reconcile_resources(&self) -> BoxFuture<'_, anyhow::Result<()>> {
+        Box::pin(async move {
+            if self.check_reconcile_schema.load(Ordering::SeqCst) {
+                use sqlx::Connection;
+                let root = self.root.lock().expect("root lock").clone().unwrap();
+                let options = sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(root.join("audit-state.sqlite3"))
+                    .read_only(true);
+                let mut connection = sqlx::SqliteConnection::connect_with(&options).await?;
+                // A read-only observer must see the final schema before resource
+                // reconciliation can open its independent store connection.
+                let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+                    .fetch_one(&mut connection)
+                    .await?;
+                self.reconcile_schema_ready
+                    .store(version == 16, Ordering::SeqCst);
+            }
+            Ok(())
+        })
+    }
     fn capture(&self, operation: &str) -> Option<crate::audex::capture::CaptureHandle> {
         self.captures
             .lock()

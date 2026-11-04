@@ -34,6 +34,8 @@ pub(super) struct Collector {
 struct Message {
     model: String,
     blocks: HashMap<usize, Block>,
+    streamed: bool,
+    active_block: Option<usize>,
 }
 #[derive(Default)]
 struct Block {
@@ -42,6 +44,7 @@ struct Block {
     name: String,
     input: String,
     text_bytes: i64,
+    full_seen: bool,
 }
 #[derive(Default)]
 struct Stream {
@@ -51,6 +54,70 @@ struct Stream {
     calls: HashMap<String, String>,
     seen: HashMap<String, String>,
     final_message: Option<(String, String, String)>,
+}
+
+impl Message {
+    /// Full records can contain one block of a streamed message. Match the wire
+    /// block identity/order, never the text, including private blocks' positions.
+    fn full_indices(&mut self, blocks: &[Value]) -> Result<Vec<usize>> {
+        let whole = self.streamed
+            && blocks.len() == self.blocks.len()
+            && blocks.iter().enumerate().all(|(index, block)| {
+                self.blocks
+                    .get(&index)
+                    .is_some_and(|old| Some(old.kind.as_str()) == block["type"].as_str())
+            });
+        let mut indices = Vec::new();
+        for (position, source) in blocks.iter().enumerate() {
+            let kind = source["type"]
+                .as_str()
+                .ok_or("external_block_type_missing")?;
+            let call = if kind == "tool_use" {
+                Some(identifier(&source["id"])?)
+            } else {
+                None
+            };
+            let known_call = call.and_then(|call| {
+                self.blocks
+                    .iter()
+                    .find(|(_, block)| block.kind == "tool_use" && block.id == call)
+                    .map(|(index, _)| *index)
+            });
+            let index = if let Some(index) = known_call {
+                index
+            } else if whole {
+                position
+            } else if blocks.len() == 1 && self.active_block.is_some() {
+                self.active_block.unwrap()
+            } else if self.streamed {
+                self.blocks
+                    .iter()
+                    .filter(|(_, block)| !block.full_seen && block.kind == kind)
+                    .map(|(index, _)| *index)
+                    .min()
+                    .ok_or("external_full_block_unbound")?
+            } else {
+                // Without partial indices, the full representation's position
+                // is its only established block identity. Repeated full records
+                // cannot silently invent additional blocks for this message.
+                position
+            };
+            if index >= MAX_IDENTITIES {
+                return Err("external_block_index_invalid");
+            }
+            let block = self.blocks.entry(index).or_insert_with(|| Block {
+                kind: kind.into(),
+                id: call.unwrap_or_default().into(),
+                ..Default::default()
+            });
+            if block.kind != kind || call.is_some_and(|call| block.id != call) {
+                return Err("external_block_identity_conflict");
+            }
+            block.full_seen = true;
+            indices.push(index);
+        }
+        Ok(indices)
+    }
 }
 
 fn identifier(v: &Value) -> Result<&str> {
@@ -236,6 +303,11 @@ impl Collector {
         let kind = value["type"]
             .as_str()
             .ok_or("external_record_type_missing")?;
+        // The pinned bare client can emit this UI-only notification before init.
+        // It supplies no review, session acceptance or model evidence.
+        if state.session.is_none() && kind == "system" && value["subtype"] == "ui_invalidate" {
+            return Ok(None);
+        }
         if let Some(previous) = &state.session {
             if previous != session {
                 return Err("external_session_identity_mismatch");
@@ -288,8 +360,11 @@ impl Collector {
                 let message = &value["message"];
                 let id = identifier(&message["id"])?;
                 let model = message["model"].as_str();
-                self.model(session, id, model, Some(&usage(&message["usage"])))
-                    .await?;
+                let mut message_usage = usage(&message["usage"]);
+                // Official per-step output is a placeholder. Only the terminal
+                // aggregate supplies the client's accumulated output observation.
+                message_usage.output_tokens = None;
+                self.model(session, id, model, Some(&message_usage)).await?;
                 let model = model.ok_or("external_model_missing")?;
                 if state.messages.len() >= MAX_IDENTITIES && !state.messages.contains_key(id) {
                     return Err("external_message_bound_exhausted");
@@ -305,7 +380,12 @@ impl Collector {
                     .ok_or("external_assistant_content_invalid")?;
                 let mut text = String::new();
                 let mut tools = false;
-                for (index, block) in blocks.iter().enumerate() {
+                let indices = state
+                    .messages
+                    .get_mut(id)
+                    .expect("bound message")
+                    .full_indices(blocks)?;
+                for (index, block) in indices.into_iter().zip(blocks) {
                     match block["type"].as_str() {
                         Some("text") => {
                             let content = block["text"]
@@ -495,6 +575,7 @@ impl Collector {
                     id.into(),
                     Message {
                         model: model.unwrap().into(),
+                        streamed: true,
                         ..Default::default()
                     },
                 );
@@ -553,6 +634,7 @@ impl Collector {
                             }
                         }
                         message.blocks.insert(index, block);
+                        message.active_block = Some(index);
                     }
                     "content_block_delta" => {
                         let block = message
@@ -599,6 +681,11 @@ impl Collector {
                             let tool = json!({"id":block.id,"name":block.name,"input":input});
                             self.tool(state, session, &id, &tool).await?;
                         }
+                        state
+                            .messages
+                            .get_mut(&id)
+                            .expect("bound message")
+                            .active_block = None;
                     }
                 }
             }

@@ -114,6 +114,12 @@ pub(super) async fn collect(
         }
         for (request_id, raw, evidence_source) in rows {
             let usage: super::client_stream::ClientUsage = serde_json::from_str(&raw)?;
+            let output_tokens = if evidence_source == "claude_client_message" {
+                // Also protects unfrozen observations retained before this qualification.
+                Fact::unavailable("client per-message output_tokens is a placeholder")
+            } else {
+                Fact::from_option(usage.output_tokens, "not observed")
+            };
             client_usage.push(GenerationUsage {
                 request_id,
                 evidence_source,
@@ -122,7 +128,7 @@ pub(super) async fn collect(
                     usage.cache_read_input_tokens,
                     "not observed",
                 ),
-                output_tokens: Fact::from_option(usage.output_tokens, "not observed"),
+                output_tokens,
                 reasoning_tokens: Fact::unavailable("not observed"),
                 cost: Fact::from_option(
                     usage.estimated_cost_usd.map(|amount| Cost {

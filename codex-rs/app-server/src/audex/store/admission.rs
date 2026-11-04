@@ -36,6 +36,7 @@ pub(super) async fn owner_active(
         AND t.owner_generation=? AND r.stop_generation=? AND o.lease_expires_at_ms>?
         AND v.current_assignment_id=t.assignment_id AND t.disposition='active' AND t.output_cutoff IS NULL AND t.capture_failure IS NULL AND t.attribution_failure IS NULL
         AND r.control_intent='active' AND r.phase IN ('snapshot_bound','reviewing')
+        AND NOT EXISTS(SELECT 1 FROM audit_client_launches l WHERE l.operation_id=o.id AND (t.capture_finished=1 OR l.local_stop_requested_at_ms IS NOT NULL))
         AND o.state IN ('dispatching','accepted')
         AND NOT EXISTS(SELECT 1 FROM audit_capacity_releases c WHERE c.operation_id=o.id))")
         .bind(&identity.run_id).bind(&identity.assignment_id).bind(&identity.operation_id).bind(&identity.execution_id).bind(&identity.owner)

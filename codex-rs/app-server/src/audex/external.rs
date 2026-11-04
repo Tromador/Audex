@@ -1,6 +1,9 @@
 //! Owned launch and captured terminal evidence; workflow acceptance stays in the controller.
 mod config;
+mod lifecycle;
 mod owner;
+mod recovery;
+mod socket_identity;
 mod stream;
 use super::capture::CaptureHandle;
 use super::controller::{DispatchRequest, Observation, WorkState};
@@ -150,7 +153,15 @@ impl ExternalDispatch {
             )?) == prepared.mcp_digest,
             "generated MCP configuration changed before spawn"
         );
+        anyhow::ensure!(
+            store
+                .renew_execution_lease(&identity, chrono::Utc::now().timestamp_millis())
+                .await?,
+            "launch authority stopped before spawn"
+        );
         let spawned = owner::launch(prepared.spec).await?;
+        #[cfg(test)]
+        self.checkpoint("child_spawned").await;
         // The local owner guard kills on dropped/cancelled preparation; the
         // process-lifetime spawning thread remains alive throughout.
         anyhow::ensure!(

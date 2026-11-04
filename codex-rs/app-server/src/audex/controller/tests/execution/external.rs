@@ -1,6 +1,16 @@
 //! G6: production controller/store/routing with deterministic children and real stdio MCP.
 use super::*;
 mod capture;
+mod control_boundaries;
+mod launch_qualification;
+mod lifecycle_qualification;
+mod native_peer;
+mod official_client;
+mod publication_races;
+mod restart_qualification;
+mod socket_qualification;
+mod stop_storage;
+mod stream_qualification;
 use crate::audex::backends::BackendSettings;
 use crate::audex::retained::RetainedInput;
 use crate::audex::snapshot::manifest::sha256_hex;
@@ -14,15 +24,37 @@ async fn seed_external(
     key: &str,
 ) -> anyhow::Result<String> {
     let id = start(controller, key).await;
+    retain_external(controller, temp, &id).await?;
+    Ok(id)
+}
+
+async fn retain_external(
+    controller: &AuditController,
+    temp: &tempfile::TempDir,
+    id: &str,
+) -> anyhow::Result<()> {
     let executable = temp.path().join("fake-client");
     std::fs::write(
         &executable,
         include_str!("../../../external/fake_client.py"),
     )?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-    let runtime = temp.path().join("client-runtime");
-    std::fs::create_dir_all(&runtime)?;
-    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))?;
+    // Explicit fixture provisioning: keep the configured root short enough for
+    // the official client's full UUID/tmp/cc-socks/PID.sock suffix. The test runner
+    // owns and removes this root after all crash/reconstruction fixtures finish.
+    let runtime_link = temp.path().join("client-runtime");
+    let runtime = if runtime_link.try_exists()? {
+        runtime_link.canonicalize()?
+    } else {
+        let runtime = tempfile::Builder::new()
+            .prefix("")
+            .rand_bytes(6)
+            .tempdir_in(std::env::var("AUDEX_CLIENT_TEST_RUNTIME_ROOT")?)?
+            .keep();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))?;
+        std::os::unix::fs::symlink(&runtime, &runtime_link)?;
+        runtime
+    };
     let settings: BackendSettings = serde_json::from_value(
         json!({"version":1,"claudeSubscription":{
             "executable":executable,"clientVersion":"2.1.314","profile":temp.path().join("unused-profile"),"runtimeRoot":runtime
@@ -67,7 +99,7 @@ async fn seed_external(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(id)
+    Ok(())
 }
 
 async fn receipt(directory: &Path, name: &str) -> anyhow::Result<Value> {

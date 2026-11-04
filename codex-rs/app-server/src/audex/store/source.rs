@@ -57,27 +57,50 @@ impl ReadOnlySource {
         parent: u32,
         required: bool,
     ) -> anyhow::Result<()> {
-        let Some(launch) =
-            super::launch::read_launch(&self.pool, &self.identity.operation_id).await?
-        else {
-            anyhow::ensure!(!required, "missing launch authority");
-            return Ok(());
-        };
-        anyhow::ensure!(
-            launch.execution_id == self.identity.execution_id,
-            "launch nonce mismatch"
-        );
-        let expected = launch
-            .child_identity()
-            .ok_or_else(|| anyhow::anyhow!("unverified launch parent"))?;
-        anyhow::ensure!(
-            expected.pid == parent && expected.process_group == parent,
-            "bridge has a foreign launch parent"
-        );
-        let actual =
-            codex_app_server_daemon::read_linux_child_identity(parent, &launch.mcp_config_path)?;
-        anyhow::ensure!(actual == expected, "launch parent identity changed");
-        Ok(())
+        let mut initial_parent = None;
+        loop {
+            // This read-only bridge cannot renew its launch lease. Waiting ends
+            // when the original authority expires, is stopped or loses its parent.
+            anyhow::ensure!(
+                self.check().await?,
+                "source authority refused during launch"
+            );
+            let Some(launch) =
+                super::launch::read_launch(&self.pool, &self.identity.operation_id).await?
+            else {
+                anyhow::ensure!(!required, "missing launch authority");
+                return Ok(());
+            };
+            anyhow::ensure!(
+                launch.execution_id == self.identity.execution_id,
+                "launch nonce mismatch"
+            );
+            let actual = codex_app_server_daemon::read_linux_child_identity(
+                parent,
+                &launch.mcp_config_path,
+            )?;
+            anyhow::ensure!(
+                actual.pid == parent && actual.process_group == parent,
+                "bridge has a foreign launch parent"
+            );
+            if let Some(initial) = &initial_parent {
+                anyhow::ensure!(
+                    initial == &actual,
+                    "launch parent identity changed while waiting"
+                );
+            }
+            if let Some(expected) = launch.child_identity() {
+                anyhow::ensure!(actual == expected, "launch parent identity changed");
+                anyhow::ensure!(self.check().await?, "source authority refused after launch");
+                return Ok(());
+            }
+            if initial_parent.is_none() {
+                // One fixed, payload-free operational diagnostic; stdout remains MCP only.
+                eprintln!("Audex source bridge waiting for committed launch identity");
+                initial_parent = Some(actual);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     async fn check(&self) -> Result<bool, AuditStoreError> {
