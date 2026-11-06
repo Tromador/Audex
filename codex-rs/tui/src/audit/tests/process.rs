@@ -1,6 +1,15 @@
 //! S3 main-TUI request/confirmation paths over disposable daemon IPC. Loopback only.
 #[path = "activity_process.rs"]
 mod activity;
+#[cfg(target_os = "linux")]
+#[path = "diagnostic_controls.rs"]
+mod diagnostic_controls;
+#[cfg(target_os = "linux")]
+#[path = "legacy.rs"]
+mod legacy;
+#[cfg(target_os = "linux")]
+#[path = "subscription.rs"]
+mod subscription;
 use super::execution::Result;
 use super::*;
 use crate::app_server_session::{AppServerSession, ThreadParamsMode};

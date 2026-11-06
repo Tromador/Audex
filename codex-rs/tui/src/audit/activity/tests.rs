@@ -85,6 +85,35 @@ fn current_and_historical_activity_remains_attributed_and_untrusted() {
 }
 
 #[test]
+fn completed_unstructured_opinion_is_literal_and_not_duplicated_on_reconnect() {
+    let mut view = viewer();
+    view.target.completed = true;
+    view.target.extraction = Some(codex_app_server_protocol::AuditResultExtraction {
+        version: 1,
+        raw_digest: "retained-opinion-digest".into(),
+        parse_digest: "retained-opinion-digest".into(),
+        status: codex_app_server_protocol::AuditExtractionStatus::UnstructuredOpinion,
+        transformations: vec![],
+        validation_error: Some("result assignment ID does not match the assignment".into()),
+    });
+    let mut response = page(&view.target, vec![]);
+    response.raw_result = Some("ORIGINAL_OPINION <script>not executable</script>\u{1b}[31m".into());
+    view.apply(Ok(response.clone()));
+    view.apply(Ok(response));
+    let rendered = text(&mut view);
+    assert!(rendered.contains("Completed opinion"));
+    assert!(rendered.contains("no validated"));
+    assert!(rendered.contains("result assignment ID does not match"));
+    assert_eq!(rendered.matches("ORIGINAL_OPINION").count(), 1);
+    assert!(rendered.contains("<script>not executable</script>"));
+    assert!(!rendered.contains('\u{1b}'));
+    assert!(
+        view.action_for_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE))
+            .is_none()
+    );
+}
+
+#[test]
 fn tool_only_gap_truncation_quiet_and_disconnection_are_distinct() {
     let mut view = viewer();
     assert!(text(&mut view).contains("No observable committed activity"));

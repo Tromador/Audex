@@ -110,7 +110,7 @@ async fn lines_are_derived_without_discarding_findings_or_changing_raw_response(
         )
         .expect("UTF8");
         assert!(report.contains("verified lines"));
-        assert!(report.contains("Report format: `4`"));
+        assert!(report.contains("Report format: `5`"));
         assert!(!report.contains("verified lines `99..99`"));
         assert!(matches!(
             store

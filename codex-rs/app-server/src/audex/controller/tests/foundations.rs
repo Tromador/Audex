@@ -7,22 +7,19 @@ pub(super) async fn roster(
     key: &str,
     count: usize,
 ) -> anyhow::Result<String> {
-    let params: AuditStartParams = serde_json::from_value(json!({
-        "requestKey":key,"source":{"type":"snippet","name":"example.rs","content":"fn main() {}\n"},
-        "brief":"Static correctness audit", "provider":controller.config.model_provider_id,"model":"audit-test"
-    }))?;
-    let selections = (0..count)
-        .map(|ordinal| ReviewerSelection {
-            provider: controller.config.model_provider_id.clone(),
-            model: format!("audit-reviewer-{ordinal}"),
-            reasoning_effort: None,
-            expected_served_model: None,
+    let reviewers = (0..count)
+        .map(|ordinal| {
+            json!({
+                "provider":controller.config.model_provider_id,
+                "model":format!("audit-reviewer-{ordinal}"),
+            })
         })
-        .collect();
-    Ok(controller
-        .commission_roster(params, selections, &mut None)
-        .await?
-        .run_id)
+        .collect::<Vec<_>>();
+    let response = api(controller, "audit/start", json!({
+        "requestKey":key,"source":{"type":"snippet","name":"example.rs","content":"fn main() {}\n"},
+        "brief":"Static correctness audit", "reviewers":reviewers,
+    })).await.map_err(|error| anyhow::anyhow!("{error:?}"))?;
+    Ok(response["run"]["runId"].as_str().unwrap().to_owned())
 }
 
 fn concurrent_controller(original: &AuditController, fake: &Arc<Fake>) -> Arc<AuditController> {

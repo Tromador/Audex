@@ -502,9 +502,28 @@ class AuditCapabilitiesResponse(BaseModel):
     protocol_version: Annotated[int, Field(alias="protocolVersion", ge=0)]
 
 
+class AuditClaudeBinding(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    client_version: Annotated[str, Field(alias="clientVersion")]
+    executable: str
+    executable_digest: Annotated[str, Field(alias="executableDigest")]
+    policy_digest: Annotated[str, Field(alias="policyDigest")]
+    profile: str
+    runtime_root: Annotated[str, Field(alias="runtimeRoot")]
+
+
 class AuditExecutionAdapter(Enum):
     native = "native"
     claude_client = "claude_client"
+
+
+class AuditExtractionStatus(Enum):
+    validated_structured = "validated_structured"
+    deterministically_normalised = "deterministically_normalised"
+    unstructured_opinion = "unstructured_opinion"
 
 
 class AuditGenerationIdentity(BaseModel):
@@ -575,6 +594,11 @@ class AuditReleaseSlotParams(BaseModel):
     run_id: Annotated[str, Field(alias="runId")]
 
 
+class AuditResultTransformation(Enum):
+    utf8_bom = "utf8_bom"
+    markdown_json_fence = "markdown_json_fence"
+
+
 class AuditReviewerSelection(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -637,35 +661,6 @@ class FileAuditSource(BaseModel):
 
 class AuditSource(RootModel[SnippetAuditSource | FileAuditSource]):
     root: SnippetAuditSource | FileAuditSource
-
-
-class AuditStartParams(BaseModel):
-    model_config = ConfigDict(
-        extra="forbid",
-        populate_by_name=True,
-    )
-    agents_evidence: Annotated[str | None, Field(alias="agentsEvidence")] = None
-    audex_guidance: Annotated[str | None, Field(alias="audexGuidance")] = None
-    brief: str
-    expected_served_model: Annotated[
-        str | None,
-        Field(
-            alias="expectedServedModel",
-            description="Explicitly qualified served-model alias for the singular selection.",
-        ),
-    ] = None
-    model: str | None = None
-    provider: str | None = None
-    reasoning_effort: Annotated[str | None, Field(alias="reasoningEffort")] = None
-    request_key: Annotated[str, Field(alias="requestKey")]
-    reviewers: Annotated[
-        list[AuditReviewerSelection] | None,
-        Field(
-            description="Ordered reviewer roster. Mutually exclusive with the singular native selection."
-        ),
-    ] = None
-    scheduling: AuditScheduling | None = "automatic"
-    source: AuditSource
 
 
 class AuthMode(Enum):
@@ -7622,75 +7617,6 @@ class AppsReadResponse(BaseModel):
     missing_app_ids: Annotated[list[str], Field(alias="missingAppIds")]
 
 
-class AuditAttemptView(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    assignment_id: Annotated[str, Field(alias="assignmentId")]
-    assignment_state: Annotated[str, Field(alias="assignmentState")]
-    attempt_ordinal: Annotated[int, Field(alias="attemptOrdinal")]
-    authentication_route: Annotated[
-        str,
-        Field(
-            alias="authenticationRoute",
-            description="Uses the retained native route; this does not claim an API/subscription billing amount.",
-        ),
-    ]
-    capture_failure: Annotated[str | None, Field(alias="captureFailure")] = None
-    capture_gap: Annotated[str | None, Field(alias="captureGap")] = None
-    capture_truncated: Annotated[bool, Field(alias="captureTruncated")]
-    completed: Annotated[
-        bool,
-        Field(
-            description="True only for a canonical validated result, never inferred from activity."
-        ),
-    ]
-    current: bool
-    disposition: Annotated[
-        str, Field(description="Contribution disposition is independent of execution certainty.")
-    ]
-    execution_adapter: Annotated[AuditExecutionAdapter, Field(alias="executionAdapter")]
-    expected_served_model: Annotated[str | None, Field(alias="expectedServedModel")] = None
-    local_execution: Annotated[
-        AuditLocalExecution | None,
-        Field(
-            alias="localExecution",
-            description="Live local cleanup receipts, independent of the frozen contribution and remote billing.",
-        ),
-    ] = None
-    model: Annotated[str, Field(description="Requested selection, retained for compatibility.")]
-    model_evidence: Annotated[
-        list[AuditGenerationIdentity],
-        Field(
-            alias="modelEvidence",
-            description="Retained per-generation evidence, including failures; reads never refresh configuration.",
-        ),
-    ]
-    operation_id: Annotated[str, Field(alias="operationId")]
-    operation_state: Annotated[str, Field(alias="operationState")]
-    output_cutoff: Annotated[int | None, Field(alias="outputCutoff")] = None
-    output_sequence: Annotated[int, Field(alias="outputSequence")]
-    owner_generation: Annotated[int, Field(alias="ownerGeneration")]
-    possible_overlap: Annotated[bool, Field(alias="possibleOverlap")]
-    provider: str
-    reasoning_effort: Annotated[str | None, Field(alias="reasoningEffort")] = None
-    requested_model: Annotated[str, Field(alias="requestedModel")]
-    resolved_model: Annotated[str, Field(alias="resolvedModel")]
-    retry_eligible: Annotated[bool, Field(alias="retryEligible")]
-    reviewer_id: Annotated[str, Field(alias="reviewerId")]
-    reviewer_ordinal: Annotated[int, Field(alias="reviewerOrdinal")]
-    revision: int
-    run_id: Annotated[str, Field(alias="runId")]
-    snapshot_id: Annotated[str, Field(alias="snapshotId")]
-
-
-class AuditAttemptsResponse(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    attempts: list[AuditAttemptView]
-
-
 class AuditCollectionView(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -7713,62 +7639,90 @@ class AuditProgressNotification(BaseModel):
     run_id: Annotated[str, Field(alias="runId")]
 
 
-class AuditRunView(BaseModel):
+class AuditResultExtraction(BaseModel):
     model_config = ConfigDict(
+        extra="forbid",
         populate_by_name=True,
     )
-    assignment_id: Annotated[str, Field(alias="assignmentId")]
-    cancellation_requested: Annotated[bool, Field(alias="cancellationRequested")]
-    capacity_released: Annotated[
-        bool,
-        Field(
-            alias="capacityReleased",
-            description="The operator explicitly released capacity. This is not terminal evidence.",
-        ),
-    ]
-    collection: Annotated[AuditCollectionView | None, Field(validate_default=True)] = {
-        "completedCount": 0,
-        "excludedCount": 0,
-        "outstandingCount": 0,
-        "ready": False,
-        "reviewerCount": 0,
-        "scheduling": "automatic",
-    }
-    observation_pending: Annotated[
-        bool,
-        Field(
-            alias="observationPending",
-            description="A retained observation issue remains unresolved. This is non-terminal: the daemon continues observing the original operation, without resampling.",
-        ),
-    ]
-    operation_state: Annotated[AuditOperationState, Field(alias="operationState")]
-    outcome: str | None = None
-    phase: AuditRunPhase
-    raw_result: Annotated[
+    parse_digest: Annotated[str, Field(alias="parseDigest")]
+    raw_digest: Annotated[str, Field(alias="rawDigest")]
+    status: AuditExtractionStatus
+    transformations: list[AuditResultTransformation]
+    validation_error: Annotated[str | None, Field(alias="validationError")] = None
+    version: Annotated[int, Field(ge=0)]
+
+
+class AuditReviewerBinding(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    backend_configuration_identity: Annotated[str, Field(alias="backendConfigurationIdentity")]
+    client: AuditClaudeBinding | None = None
+    expected_served_model: Annotated[str, Field(alias="expectedServedModel")]
+    model_metadata_digest: Annotated[str | None, Field(alias="modelMetadataDigest")] = None
+    native_configuration_identity: Annotated[
+        str | None, Field(alias="nativeConfigurationIdentity")
+    ] = None
+    reasoning_effort: Annotated[str | None, Field(alias="reasoningEffort")] = None
+    resolved_model: Annotated[str, Field(alias="resolvedModel")]
+    selection: AuditReviewerSelection
+
+
+class Preflight(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    brief_digest: Annotated[str, Field(alias="briefDigest")]
+    context_digest: Annotated[str, Field(alias="contextDigest")]
+    existing_run_id: Annotated[
         str | None,
         Field(
-            alias="rawResult",
-            description="Exact retained response, including invalid JSON, when a bounded result was received.",
+            alias="existingRunId",
+            description="Identical request already commissioned; Start only retrieves that approval.",
         ),
     ] = None
-    report: str | None = None
-    reviewers: Annotated[
-        list[AuditAttemptView] | None,
-        Field(
-            description="Current attempts in logical reviewer order; history uses audit/attempts.",
-            validate_default=True,
-        ),
-    ] = []
-    revision: int
-    run_id: Annotated[str, Field(alias="runId")]
+    identity: str
+    manifest_digest: Annotated[str, Field(alias="manifestDigest")]
+    protocol_version: Annotated[int, Field(alias="protocolVersion", ge=0)]
+    reviewers: list[AuditReviewerBinding]
     snapshot_id: Annotated[str, Field(alias="snapshotId")]
 
 
-class AuditStartResponse(BaseModel):
+class AuditStartParams(BaseModel):
     model_config = ConfigDict(
+        extra="forbid",
         populate_by_name=True,
     )
-    run: AuditRunView
+    agents_evidence: Annotated[str | None, Field(alias="agentsEvidence")] = None
+    audex_guidance: Annotated[str | None, Field(alias="audexGuidance")] = None
+    brief: str
+    expected_served_model: Annotated[
+        str | None,
+        Field(
+            alias="expectedServedModel",
+            description="Explicitly qualified served-model alias for the singular selection.",
+        ),
+    ] = None
+    model: str | None = None
+    preflight: Annotated[
+        Preflight | None,
+        Field(
+            description="Read-only disclosure approved by the operator; required for subscription rosters."
+        ),
+    ] = None
+    provider: str | None = None
+    reasoning_effort: Annotated[str | None, Field(alias="reasoningEffort")] = None
+    request_key: Annotated[str, Field(alias="requestKey")]
+    reviewers: Annotated[
+        list[AuditReviewerSelection] | None,
+        Field(
+            description="Ordered reviewer roster. Mutually exclusive with the singular native selection."
+        ),
+    ] = None
+    scheduling: AuditScheduling | None = "automatic"
+    source: AuditSource
 
 
 class BrowserUseConfig(BaseModel):
@@ -11942,62 +11896,210 @@ class AppsListResponse(BaseModel):
     ] = None
 
 
-class AuditAttemptReadResponse(BaseModel):
+class AuditAttemptView(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
-    attempt: AuditAttemptView
-    entries: list[AuditActivityEntry]
-    next_sequence: Annotated[int, Field(alias="nextSequence")]
+    assignment_id: Annotated[str, Field(alias="assignmentId")]
+    assignment_state: Annotated[str, Field(alias="assignmentState")]
+    attempt_ordinal: Annotated[int, Field(alias="attemptOrdinal")]
+    authentication_route: Annotated[
+        str,
+        Field(
+            alias="authenticationRoute",
+            description="Uses the retained native route; this does not claim an API/subscription billing amount.",
+        ),
+    ]
+    capture_failure: Annotated[str | None, Field(alias="captureFailure")] = None
+    capture_gap: Annotated[str | None, Field(alias="captureGap")] = None
+    capture_truncated: Annotated[bool, Field(alias="captureTruncated")]
+    completed: Annotated[
+        bool,
+        Field(
+            description="An authoritative completed opinion, independent of structured extraction. Never inferred from activity, process exit alone or reviewer identity claims."
+        ),
+    ]
+    current: bool
+    disposition: Annotated[
+        str, Field(description="Contribution disposition is independent of execution certainty.")
+    ]
+    execution_adapter: Annotated[AuditExecutionAdapter, Field(alias="executionAdapter")]
+    expected_served_model: Annotated[str | None, Field(alias="expectedServedModel")] = None
+    extraction: Annotated[
+        AuditResultExtraction | None,
+        Field(
+            description="Absent for historical results predating the shared extraction contract."
+        ),
+    ] = None
+    local_execution: Annotated[
+        AuditLocalExecution | None,
+        Field(
+            alias="localExecution",
+            description="Live local cleanup receipts, independent of the frozen contribution and remote billing.",
+        ),
+    ] = None
+    model: Annotated[str, Field(description="Requested selection, retained for compatibility.")]
+    model_evidence: Annotated[
+        list[AuditGenerationIdentity],
+        Field(
+            alias="modelEvidence",
+            description="Retained per-generation evidence, including failures; reads never refresh configuration.",
+        ),
+    ]
+    operation_id: Annotated[str, Field(alias="operationId")]
+    operation_state: Annotated[str, Field(alias="operationState")]
+    output_cutoff: Annotated[int | None, Field(alias="outputCutoff")] = None
+    output_sequence: Annotated[int, Field(alias="outputSequence")]
+    owner_generation: Annotated[int, Field(alias="ownerGeneration")]
+    possible_overlap: Annotated[bool, Field(alias="possibleOverlap")]
+    provider: str
+    reasoning_effort: Annotated[str | None, Field(alias="reasoningEffort")] = None
+    requested_model: Annotated[str, Field(alias="requestedModel")]
+    resolved_model: Annotated[str, Field(alias="resolvedModel")]
+    retry_eligible: Annotated[bool, Field(alias="retryEligible")]
+    reviewer_id: Annotated[str, Field(alias="reviewerId")]
+    reviewer_ordinal: Annotated[int, Field(alias="reviewerOrdinal")]
+    revision: int
+    run_id: Annotated[str, Field(alias="runId")]
+    snapshot_id: Annotated[str, Field(alias="snapshotId")]
+
+
+class AuditAttemptsResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    attempts: list[AuditAttemptView]
+
+
+class Request(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    agents_evidence: Annotated[str | None, Field(alias="agentsEvidence")] = None
+    audex_guidance: Annotated[str | None, Field(alias="audexGuidance")] = None
+    brief: str
+    expected_served_model: Annotated[
+        str | None,
+        Field(
+            alias="expectedServedModel",
+            description="Explicitly qualified served-model alias for the singular selection.",
+        ),
+    ] = None
+    model: str | None = None
+    preflight: Annotated[
+        Preflight | None,
+        Field(
+            description="Read-only disclosure approved by the operator; required for subscription rosters."
+        ),
+    ] = None
+    provider: str | None = None
+    reasoning_effort: Annotated[str | None, Field(alias="reasoningEffort")] = None
+    request_key: Annotated[str, Field(alias="requestKey")]
+    reviewers: Annotated[
+        list[AuditReviewerSelection] | None,
+        Field(
+            description="Ordered reviewer roster. Mutually exclusive with the singular native selection."
+        ),
+    ] = None
+    scheduling: AuditScheduling | None = "automatic"
+    source: AuditSource
+
+
+class AuditPreflightParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    request: Request
+
+
+class AuditPreflightResponse(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    brief_digest: Annotated[str, Field(alias="briefDigest")]
+    context_digest: Annotated[str, Field(alias="contextDigest")]
+    existing_run_id: Annotated[
+        str | None,
+        Field(
+            alias="existingRunId",
+            description="Identical request already commissioned; Start only retrieves that approval.",
+        ),
+    ] = None
+    identity: str
+    manifest_digest: Annotated[str, Field(alias="manifestDigest")]
+    protocol_version: Annotated[int, Field(alias="protocolVersion", ge=0)]
+    reviewers: list[AuditReviewerBinding]
+    snapshot_id: Annotated[str, Field(alias="snapshotId")]
+
+
+class AuditRunView(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    assignment_id: Annotated[str, Field(alias="assignmentId")]
+    cancellation_requested: Annotated[bool, Field(alias="cancellationRequested")]
+    capacity_released: Annotated[
+        bool,
+        Field(
+            alias="capacityReleased",
+            description="The operator explicitly released capacity. This is not terminal evidence.",
+        ),
+    ]
+    collection: Annotated[AuditCollectionView | None, Field(validate_default=True)] = {
+        "completedCount": 0,
+        "excludedCount": 0,
+        "outstandingCount": 0,
+        "ready": False,
+        "reviewerCount": 0,
+        "scheduling": "automatic",
+    }
+    observation_pending: Annotated[
+        bool,
+        Field(
+            alias="observationPending",
+            description="A retained observation issue remains unresolved. This is non-terminal: the daemon continues observing the original operation, without resampling.",
+        ),
+    ]
+    operation_state: Annotated[AuditOperationState, Field(alias="operationState")]
+    outcome: str | None = None
+    phase: AuditRunPhase
     raw_result: Annotated[
         str | None,
         Field(
             alias="rawResult",
-            description="The original terminal response, if retained; invalid JSON stays invalid.",
+            description="Exact retained response, including invalid JSON, when a bounded result was received.",
         ),
     ] = None
-
-
-class AuditCancelResponse(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    run: AuditRunView
-
-
-class AuditListResponse(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    next_cursor: Annotated[str | None, Field(alias="nextCursor")] = None
-    protocol_version: Annotated[
-        int,
+    report: str | None = None
+    reviewers: Annotated[
+        list[AuditAttemptView] | None,
         Field(
-            alias="protocolVersion",
-            description="Required even for an empty list, so clients can check before submitting work.",
-            ge=0,
+            description="Current attempts in logical reviewer order; history uses audit/attempts.",
+            validate_default=True,
         ),
-    ]
-    runs: Annotated[
-        list[AuditRunView],
-        Field(
-            description="Newest-first metadata summaries. Results and reports are absent; audit/read retrieves those artefacts with strict integrity verification."
-        ),
-    ]
+    ] = []
+    revision: int
+    run_id: Annotated[str, Field(alias="runId")]
+    snapshot_id: Annotated[str, Field(alias="snapshotId")]
 
 
-class AuditReadResponse(BaseModel):
+class AuditStartResponse(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     run: AuditRunView
 
 
-class AuditReleaseSlotResponse(BaseModel):
+class AuditPreflightRequest(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
-    run: AuditRunView
+    id: RequestId
+    method: Annotated[Literal["audit/preflight"], Field(title="Audit/preflightRequestMethod")]
+    params: AuditPreflightParams
 
 
 class ThreadStartRequest(BaseModel):
@@ -13205,6 +13307,64 @@ class AdditionalFileSystemPermissions(BaseModel):
     ] = None
 
 
+class AuditAttemptReadResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    attempt: AuditAttemptView
+    entries: list[AuditActivityEntry]
+    next_sequence: Annotated[int, Field(alias="nextSequence")]
+    raw_result: Annotated[
+        str | None,
+        Field(
+            alias="rawResult",
+            description="The original terminal response, if retained; invalid JSON stays invalid.",
+        ),
+    ] = None
+
+
+class AuditCancelResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    run: AuditRunView
+
+
+class AuditListResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    next_cursor: Annotated[str | None, Field(alias="nextCursor")] = None
+    protocol_version: Annotated[
+        int,
+        Field(
+            alias="protocolVersion",
+            description="Required even for an empty list, so clients can check before submitting work.",
+            ge=0,
+        ),
+    ]
+    runs: Annotated[
+        list[AuditRunView],
+        Field(
+            description="Newest-first metadata summaries. Results and reports are absent; audit/read retrieves those artefacts with strict integrity verification."
+        ),
+    ]
+
+
+class AuditReadResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    run: AuditRunView
+
+
+class AuditReleaseSlotResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    run: AuditRunView
+
+
 class PluginShareSaveRequest(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -14126,6 +14286,7 @@ class ExternalAgentConfigImportRecordHistoryRequest(BaseModel):
 class ClientRequest(
     RootModel[
         AuditCapabilitiesRequest
+        | AuditPreflightRequest
         | AuditStartRequest
         | AuditReadRequest
         | AuditListRequest
@@ -14246,6 +14407,7 @@ class ClientRequest(
 ):
     root: Annotated[
         AuditCapabilitiesRequest
+        | AuditPreflightRequest
         | AuditStartRequest
         | AuditReadRequest
         | AuditListRequest

@@ -28,6 +28,49 @@ fn historical_format_three_golden_inputs_keep_exact_identity_and_bytes() -> anyh
 }
 
 #[test]
+fn historical_format_four_keeps_the_aborted_live_report_unchanged() -> anyhow::Result<()> {
+    let raw = include_str!("fixtures/format-4-aborted.json");
+    let input = collection::decode(raw)?;
+    assert_eq!(serde_json::to_string(&input)?, raw);
+    let report = collection::render(&input)?;
+    assert_eq!(report.bytes, include_bytes!("fixtures/format-4-aborted.md"));
+    assert_eq!(
+        report.input_digest,
+        "a32d45e8b6b06ebab6d4f488dc6c5b6baeaaf9c43ab553e8571896d210439f6d"
+    );
+    assert_eq!(
+        report.content_digest,
+        "43b627020c84162ff096ce272ffaf1cc5d52199268be6b8cab53c2aeb3f3c02f"
+    );
+    assert!(input.reviewers[0].opinion.is_none());
+    assert!(input.reviewers[0].completed.is_none());
+    Ok(())
+}
+
+#[test]
+fn historical_format_five_keeps_completed_reports_without_tool_facts_unchanged()
+-> anyhow::Result<()> {
+    let raw = include_str!("fixtures/format-5-completed.json");
+    let input = collection::decode(raw)?;
+    assert_eq!(serde_json::to_string(&input)?, raw);
+    assert!(input.reviewers.iter().all(|r| r.source_tools.is_none()));
+    let report = collection::render(&input)?;
+    assert_eq!(
+        report.bytes,
+        include_bytes!("fixtures/format-5-completed.md")
+    );
+    assert_eq!(
+        report.input_digest,
+        "f5e30e1ec7960ba7cd91fb1b30afbbacaf89ca826b9956421e201f6c2a611b28"
+    );
+    assert_eq!(
+        report.content_digest,
+        "a15362c26b91214cb9e1cbd3215d40ece68cbb252ae14f2ee001bfeaa0130407"
+    );
+    Ok(())
+}
+
+#[test]
 fn historical_format_two_keeps_its_separate_digest_and_renderer() -> anyhow::Result<()> {
     let raw = r#"{"run_id":"old-run","snapshot_id":"old-source","assignment_id":"old-attempt","summary":"Historical summary","findings":[]}"#;
     let input: ReportInput = serde_json::from_str(raw)?;

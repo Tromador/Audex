@@ -52,27 +52,11 @@ pub(super) struct PreparedReviewer {
     pub policy_digest: String,
 }
 
-/// Construction only: the host supplies its provider-scoped model catalogue; this method
-/// uses get_model_info (in-memory lookup) and never starts a thread or refreshes the catalogue.
-pub(super) async fn prepare(
+pub(super) fn validate_selection_requirements(
     host: &Config,
-    models: &dyn ModelsManager,
-    snapshot: &SnapshotHandle,
-    request: ReviewerRequest,
-    observe: Arc<dyn Fn(ReviewerObservation) + Send + Sync>,
-) -> anyhow::Result<PreparedReviewer> {
-    anyhow::ensure!(
-        !request.run_id.trim().is_empty() && !request.assignment_id.trim().is_empty(),
-        "audit identifiers must not be empty"
-    );
-    anyhow::ensure!(
-        !request.model.trim().is_empty(),
-        "reviewer model must be explicit"
-    );
-    anyhow::ensure!(
-        request.brief.len() <= 64 * 1024,
-        "audit brief exceeds 64 KiB"
-    );
+    provider: &str,
+    model: &str,
+) -> anyhow::Result<()> {
     let requirements = host.config_layer_stack.requirements();
     // These mandatory contributions cannot be proven compatible by text inspection.
     // Reject rather than silently strip them or let them widen reviewer capabilities.
@@ -99,15 +83,41 @@ pub(super) async fn prepare(
         "managed plugin requirements are incompatible with Audex reviewers"
     );
     anyhow::ensure!(
-        !requirements.auto_review_required_for_model(&request.model),
+        !requirements.auto_review_required_for_model(model),
         "managed automatic review conflicts with Audex approval policy Never"
     );
-    if let Some(provider) = &requirements.model_provider {
+    if let Some(required) = &requirements.model_provider {
         anyhow::ensure!(
-            provider.value == request.provider,
+            required.value == provider,
             "reviewer provider conflicts with managed provider requirement"
         );
     }
+    Ok(())
+}
+
+/// Construction only: the host supplies its provider-scoped model catalogue; this method
+/// uses get_model_info (in-memory lookup) and never starts a thread or refreshes the catalogue.
+pub(super) async fn prepare(
+    host: &Config,
+    models: &dyn ModelsManager,
+    snapshot: &SnapshotHandle,
+    request: ReviewerRequest,
+    observe: Arc<dyn Fn(ReviewerObservation) + Send + Sync>,
+) -> anyhow::Result<PreparedReviewer> {
+    anyhow::ensure!(
+        !request.run_id.trim().is_empty() && !request.assignment_id.trim().is_empty(),
+        "audit identifiers must not be empty"
+    );
+    anyhow::ensure!(
+        !request.model.trim().is_empty(),
+        "reviewer model must be explicit"
+    );
+    anyhow::ensure!(
+        request.brief.len() <= 64 * 1024,
+        "audit brief exceeds 64 KiB"
+    );
+    validate_selection_requirements(host, &request.provider, &request.model)?;
+    let requirements = host.config_layer_stack.requirements();
     let mut provider = host
         .model_providers
         .get(&request.provider)

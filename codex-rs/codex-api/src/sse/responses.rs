@@ -211,6 +211,19 @@ impl ResponsesStreamEvent {
         }
     }
 
+    /// The provider's response object in a lifecycle event, never generated output.
+    /// Callers must bind its ID to their current generation before using its model.
+    pub(crate) fn lifecycle_response(&self) -> Option<&Value> {
+        match self.kind() {
+            "response.created"
+            | "response.in_progress"
+            | "response.completed"
+            | "response.failed"
+            | "response.incomplete" => self.response.as_ref(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn turn_state(&self) -> Option<String> {
         if self.kind() != "response.metadata" {
             return None;

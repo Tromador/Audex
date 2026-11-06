@@ -64,6 +64,16 @@ pub(crate) async fn handle_response_stream_error(
     step_context: &StepContext,
     request: ResponsesStreamRequest,
 ) -> Result<(), CodexErr> {
+    // Isolated generations have one-use admission. Preserve the typed failure
+    // while refusing retry guidance, resubmission and transport fallback.
+    if sess
+        .services
+        .thread_extension_data
+        .get::<codex_api::GenerationAdmissionControl>()
+        .is_some()
+    {
+        return Err(err);
+    }
     let turn_context = &step_context.turn;
     if matches!(request, ResponsesStreamRequest::Sampling)
         && matches!(err.details(), CodexErrorDetails::ContentFilter)

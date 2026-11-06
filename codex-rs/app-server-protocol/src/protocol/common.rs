@@ -505,6 +505,11 @@ client_request_definitions! {
         serialization: None,
         response: v2::AuditCapabilitiesResponse,
     },
+    AuditPreflight => "audit/preflight" {
+        params: v2::AuditPreflightParams,
+        serialization: None,
+        response: v2::AuditPreflightResponse,
+    },
     AuditStart => "audit/start" {
         params: v2::AuditStartParams,
         serialization: None,

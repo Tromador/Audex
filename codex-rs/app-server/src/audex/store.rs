@@ -29,11 +29,13 @@ pub(super) mod admission;
 pub(super) mod attempts;
 mod attribution;
 pub(super) mod client_stream;
+mod extraction;
 #[cfg(test)]
 mod foundation_tests;
 mod foundations;
 pub(super) mod launch;
 mod launch_lifecycle;
+mod preflight;
 mod report_facts;
 mod reporting;
 #[cfg(test)]
@@ -1917,16 +1919,9 @@ impl AuditStore {
         } else {
             None
         };
-        let validation =
-            match result::parse_and_validate(raw_result, &initial.assignment_id, manifest) {
-                Ok(mut validated) => {
-                    result::derive_source_lines(&mut validated.response, snapshot).await?;
-                    Ok(validated)
-                }
-                Err(error) => Err(error),
-            };
-        let validated = match validation {
-            Ok(validated) => validated,
+        let extraction = result::extract(raw_result, &initial.assignment_id, manifest);
+        let mut opinion = match extraction {
+            Ok(opinion) => opinion,
             Err(error) => {
                 let revision = self
                     .reject_result(
@@ -1941,6 +1936,10 @@ impl AuditStore {
                 return Ok(ResultCommitOutcome::Rejected { revision, error });
             }
         };
+        if let Some(validated) = &mut opinion.structured {
+            result::derive_source_lines(&mut validated.response, snapshot).await?;
+        }
+        let extraction_json = serde_json::to_string(&opinion.metadata)?;
 
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         #[cfg(test)]
@@ -2012,7 +2011,9 @@ impl AuditStore {
             .bind(operation_id)
             .execute(&mut *transaction)
             .await?;
-        insert_findings(&mut transaction, &context.assignment_id, &validated).await?;
+        if let Some(validated) = &opinion.structured {
+            insert_findings(&mut transaction, &context.assignment_id, validated).await?;
+        }
         sqlx::query("UPDATE audit_attempts SET output_cutoff=output_sequence,capture_finished=1 WHERE assignment_id=?")
             .bind(&context.assignment_id).execute(&mut *transaction).await?;
         sqlx::query(
@@ -2028,13 +2029,15 @@ impl AuditStore {
             "UPDATE reviewer_assignments
              SET state='succeeded', result_digest=?, result_path=?,
                  client_terminal_digest=(SELECT artefact_digest FROM audit_client_terminal_evidence WHERE assignment_id=reviewer_assignments.id),
-                 result_schema_version=?, summary=?, updated_at_ms=?
+                 result_schema_version=?, summary=?, result_extraction_json=?, result_extraction_digest=?, updated_at_ms=?
              WHERE id=?",
         )
         .bind(&digest)
         .bind(&relative_path)
-        .bind(i64::from(result::RESULT_SCHEMA_VERSION))
-        .bind(&validated.response.summary)
+        .bind(opinion.structured.as_ref().map(|_| i64::from(result::RESULT_SCHEMA_VERSION)))
+        .bind(opinion.structured.as_ref().map(|v| &v.response.summary))
+        .bind(&extraction_json)
+        .bind(sha256_hex(extraction_json.as_bytes()))
         .bind(now)
         .bind(&context.assignment_id)
         .execute(&mut *transaction)

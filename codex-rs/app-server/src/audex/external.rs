@@ -1,4 +1,5 @@
 //! Owned launch and captured terminal evidence; workflow acceptance stays in the controller.
+pub(super) mod commissioning;
 mod config;
 mod handshake;
 mod lifecycle;
@@ -181,7 +182,7 @@ impl ExternalDispatch {
             handshake::qualify(
                 spawned,
                 policy,
-                input.expected_model(),
+                input.resolved_model.as_deref().expect("decoded model"),
                 prepared.billing_source,
                 store,
                 &identity,
@@ -236,6 +237,7 @@ impl ExternalDispatch {
             route: prepared.record.route.clone(),
             billing_source: prepared.billing_source,
             expected_model: input.expected_model().to_owned(),
+            manifest: snapshot.manifest().clone(),
             #[cfg(test)]
             checkpoint: self.checkpoint.clone(),
         };
@@ -266,6 +268,8 @@ impl ExternalDispatch {
     }
 
     pub async fn inspect(&self, store: &AuditStore, operation: &str) -> Observation {
+        #[cfg(test)]
+        self.checkpoint("before_inspect").await;
         let authority = self
             .children
             .lock()
@@ -289,14 +293,26 @@ impl ExternalDispatch {
                 self.stop(operation);
             }
         }
-        let launch = match store.client_launch(operation).await {
-            Ok(Some(launch)) => launch,
-            _ => return Observation::Deferred("external_launch_evidence_unavailable".into()),
-        };
         let run = match store.run_for_operation(operation).await {
             Ok(run) => run,
             Err(_) => return Observation::Deferred("external_attempt_unavailable".into()),
         };
+        // Observe failure before loading acceptance: the collector can bind the
+        // client and fail between reads, before the controller records acceptance.
+        let failure = self
+            .capture(operation)
+            .and_then(|capture| capture.failure().map(str::to_owned));
+        let failure = failure.or(store
+            .client_capture_failure(&run.assignment_id)
+            .await
+            .ok()
+            .flatten());
+        let launch = match store.client_launch(operation).await {
+            Ok(Some(launch)) => launch,
+            _ => return Observation::Deferred("external_launch_evidence_unavailable".into()),
+        };
+        #[cfg(test)]
+        self.checkpoint("client_launch_observed").await;
         let accepted = |state| Observation::Accepted {
             operation_id: operation.into(),
             snapshot_id: run.snapshot_id.clone(),
@@ -319,16 +335,10 @@ impl ExternalDispatch {
             Err(_) => return Observation::Uncertain("external_terminal_evidence_invalid".into()),
             Ok(None) => {}
         }
-        let failure = self
-            .capture(operation)
-            .and_then(|capture| capture.failure().map(str::to_owned));
-        let failure = failure.or(store
-            .client_capture_failure(&run.assignment_id)
-            .await
-            .ok()
-            .flatten());
         if let Some(failure) = failure {
-            return if run.operation_state == super::store::OperationState::Accepted {
+            return if run.operation_state == super::store::OperationState::Accepted
+                || launch.client_accepted_at_ms.is_some()
+            {
                 accepted(WorkState::Failed(failure))
             } else {
                 Observation::Uncertain(failure)

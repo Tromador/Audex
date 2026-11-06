@@ -1978,18 +1978,6 @@ impl ResponsesHttpExecutor<'_> {
             .with_generation_admission(generation.clone());
             let stream_result = client.stream_request(request, options).await;
 
-            let stream_result = stream_result.map_err(|error| {
-                if generation
-                    .as_ref()
-                    .is_some_and(|request| request.attempted())
-                {
-                    ApiError::InvalidRequest {
-                        message: format!("generation ended without a reusable permit: {error}"),
-                    }
-                } else {
-                    error
-                }
-            });
             match stream_result {
                 Ok(stream) => {
                     return Ok(map_response_stream(
@@ -2007,7 +1995,10 @@ impl ResponsesHttpExecutor<'_> {
                         .client
                         .state
                         .provider
-                        .is_recoverable_auth_error(&unauthorized_transport) =>
+                        .is_recoverable_auth_error(&unauthorized_transport)
+                        && !generation
+                            .as_ref()
+                            .is_some_and(|request| request.attempted()) =>
                 {
                     let response_debug_context =
                         extract_response_debug_context(&unauthorized_transport);
@@ -2706,7 +2697,10 @@ where
             if let Some(generation) = &generation {
                 let attribution = match &event {
                     Ok(ResponseEvent::ServerModel(model)) => generation.observe_model(model).await,
-                    Ok(ResponseEvent::Completed { .. }) | Err(_) => {
+                    // Completion and local identity rejection finalise attribution.
+                    // Provider failures may have no identity; preserve their original cause.
+                    Ok(ResponseEvent::Completed { .. })
+                    | Err(ApiError::Transport(TransportError::GenerationDenied(_))) => {
                         generation.finish_generation().await
                     }
                     _ => Ok(()),
@@ -2840,13 +2834,6 @@ where
                             }
                         }
                     }
-                    let mapped = if generation.is_some() {
-                        CodexErr::InvalidRequest(format!(
-                            "generation failed; automatic resubmission refused: {mapped}"
-                        ))
-                    } else {
-                        mapped
-                    };
                     inference_trace_attempt.record_failed(
                         &mapped,
                         upstream_request_id,
@@ -2857,7 +2844,7 @@ where
                         session_telemetry.see_event_completed_failed(&mapped);
                         logged_error = true;
                     }
-                    if tx_event.send(Err(mapped)).await.is_err() {
+                    if tx_event.send(Err(mapped)).await.is_err() || generation.is_some() {
                         return;
                     }
                 }

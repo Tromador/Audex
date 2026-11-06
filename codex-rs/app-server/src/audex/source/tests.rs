@@ -1,4 +1,6 @@
 use super::*;
+
+mod fidelity;
 use crate::audex::snapshot::{
     CaptureLimits, CaptureRequest, CaptureSource, ContextDocuments, SnapshotStore,
     manifest::sha256_hex,
@@ -32,6 +34,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new(bytes: &[u8]) -> anyhow::Result<Self> {
+        Self::with_path("example.rs", bytes).await
+    }
+
+    async fn with_path(path: &str, bytes: &[u8]) -> anyhow::Result<Self> {
         let temp = tempfile::tempdir()?;
         let root = AbsolutePathBuf::from_absolute_path(temp.path())?;
         let snapshot = SnapshotStore::new(
@@ -41,7 +47,7 @@ impl Fixture {
         )
         .capture(CaptureRequest {
             source: CaptureSource::Snippet {
-                logical_path: SnapshotPath::new("example.rs")?,
+                logical_path: SnapshotPath::new(path)?,
                 bytes: bytes.to_vec(),
             },
             context_documents: ContextDocuments::default(),
@@ -152,6 +158,55 @@ impl Drop for Fixture {
     }
 }
 
+fn assert_advertised_argument_limits(name: &str, schema: &Value) {
+    let properties = &schema["properties"];
+    match name {
+        "read" => {
+            assert_eq!(
+                properties["offset"]["description"],
+                "Zero-based byte offset; must be nonnegative and no greater than the file size."
+            );
+            assert_eq!(
+                properties["max_bytes"]["description"],
+                "Upper bound: 1–65536 bytes per call (inclusive). Fewer bytes at EOF are normal; check the returned eof."
+            );
+        }
+        "search" => {
+            assert_eq!(
+                properties["query"]["description"],
+                "Literal search query: 1–1024 UTF-8 bytes (inclusive), measured in bytes rather than characters."
+            );
+            assert_eq!(
+                properties["max_results"]["description"],
+                "Maximum number of search results: 1–100 (inclusive)."
+            );
+        }
+        "list" => assert_eq!(properties, &json!({})),
+        _ => panic!("unexpected source tool {name}"),
+    }
+}
+
+#[tokio::test]
+async fn native_tool_definitions_advertise_limits_after_conversion() -> anyhow::Result<()> {
+    let f = Fixture::new(b"sealed").await?;
+    for plain in [false, true] {
+        let contributor = SourceTools::with_plain_functions(&f.snapshot, plain)?;
+        let scope = ExtensionData::new("source-schema");
+        let tools = contributor.tools(&scope, &scope);
+        assert_eq!(tools.len(), TOOL_NAMES.len());
+        for (name, tool) in TOOL_NAMES.into_iter().zip(tools) {
+            let advertised = serde_json::to_value(tool.spec())?;
+            let function = if plain {
+                &advertised
+            } else {
+                &advertised["tools"][0]
+            };
+            assert_advertised_argument_limits(name, &function["parameters"]);
+        }
+    }
+    Ok(())
+}
+
 async fn wrapper(
     snapshot: &SnapshotHandle,
     plain: bool,
@@ -231,6 +286,10 @@ async fn actual_native_plain_and_mcp_payloads_and_errors_match() -> anyhow::Resu
                 .collect::<Vec<_>>(),
             TOOL_NAMES
         );
+        for tool in &inventory {
+            let advertised = serde_json::to_value(tool)?;
+            assert_advertised_argument_limits(&tool.name, &advertised["inputSchema"]);
+        }
         for (name, args) in [
             ("list", "{}"),
             (
@@ -248,6 +307,10 @@ async fn actual_native_plain_and_mcp_payloads_and_errors_match() -> anyhow::Resu
             (
                 "read",
                 r#"{"path":"example.rs","offset":0,"max_bytes":65537}"#,
+            ),
+            (
+                "read",
+                r#"{"path":"example.rs","offset":0,"max_bytes":200000}"#,
             ),
             ("search", r#"{"query":"hello","path":null,"max_results":2}"#),
             ("search", r#"{"query":"","path":null,"max_results":1}"#),
@@ -289,6 +352,82 @@ async fn actual_native_plain_and_mcp_payloads_and_errors_match() -> anyhow::Resu
         );
         client.cancel().await?;
         server.await??;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn limit_errors_give_safe_argument_guidance() -> anyhow::Result<()> {
+    let f = Fixture::new(b"sealed").await?;
+    let service = SourceService::new(&f.snapshot);
+    for max_bytes in [0, 65537, 200000] {
+        let args = json!({"path":"example.rs","offset":0,"max_bytes":max_bytes});
+        assert_eq!(
+            service
+                .execute("read", &args.to_string())
+                .await
+                .unwrap_err()
+                .to_string(),
+            "read size must be between 1 and 65536 bytes"
+        );
+    }
+    assert_eq!(
+        service
+            .execute("read", r#"{"path":"example.rs","offset":7,"max_bytes":1}"#)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "read offset 7 exceeds the entry size 6"
+    );
+    for query in [String::new(), "x".repeat(1025), "é".repeat(513)] {
+        let args = json!({"query":query,"path":null,"max_results":1});
+        assert_eq!(
+            service
+                .execute("search", &args.to_string())
+                .await
+                .unwrap_err()
+                .to_string(),
+            "literal query must be between 1 and 1024 bytes"
+        );
+    }
+    for max_results in [0, 101] {
+        let args = json!({"query":"s","path":null,"max_results":max_results});
+        assert_eq!(
+            service
+                .execute("search", &args.to_string())
+                .await
+                .unwrap_err()
+                .to_string(),
+            "search result limit must be between 1 and 100"
+        );
+    }
+    // Multibyte text at the byte ceiling and both result-count endpoints remain valid.
+    for max_results in [1, 100] {
+        let args = json!({"query":"é".repeat(512),"path":null,"max_results":max_results});
+        assert_eq!(
+            service.execute("search", &args.to_string()).await?["hits"],
+            json!([])
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_size_is_an_upper_bound_and_eof_is_explicit() -> anyhow::Result<()> {
+    let f = Fixture::new(b"sealed").await?;
+    let service = SourceService::new(&f.snapshot);
+    for (offset, max_bytes, content, eof) in [
+        (0, 1, "s", false),
+        (1, 2, "ea", false),
+        (0, 65536, "sealed", true),
+        (6, 1, "", true),
+    ] {
+        let args = json!({"path":"example.rs","offset":offset,"max_bytes":max_bytes});
+        let result = service.execute("read", &args.to_string()).await?;
+        assert_eq!(result["content"], content);
+        assert_eq!(result["offset"], offset);
+        assert_eq!(result["end_offset"], offset as usize + content.len());
+        assert_eq!(result["eof"], eof);
     }
     Ok(())
 }

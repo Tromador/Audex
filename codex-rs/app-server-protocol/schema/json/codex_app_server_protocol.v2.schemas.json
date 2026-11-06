@@ -1714,7 +1714,7 @@
           "type": "boolean"
         },
         "completed": {
-          "description": "True only for a canonical validated result, never inferred from activity.",
+          "description": "An authoritative completed opinion, independent of structured extraction. Never inferred from activity, process exit alone or reviewer identity claims.",
           "type": "boolean"
         },
         "current": {
@@ -1732,6 +1732,17 @@
             "string",
             "null"
           ]
+        },
+        "extraction": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AuditResultExtraction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent for historical results predating the shared extraction contract."
         },
         "localExecution": {
           "anyOf": [
@@ -1875,7 +1886,7 @@
       "type": "object"
     },
     "AuditAuthenticationRoute": {
-      "description": "Authentication selection is independent of provider and model. Only the daemon-configured native route is currently available for commissioning.",
+      "description": "Authentication selection is independent of provider and model. Only the daemon-configured native and qualified subscription routes are available for commissioning.",
       "enum": [
         "daemon_configured_native",
         "claude_subscription",
@@ -1932,6 +1943,39 @@
       "title": "AuditCapabilitiesResponse",
       "type": "object"
     },
+    "AuditClaudeBinding": {
+      "additionalProperties": false,
+      "description": "Non-secret local bindings; account eligibility is checked by the owned client before prompting.",
+      "properties": {
+        "clientVersion": {
+          "type": "string"
+        },
+        "executable": {
+          "type": "string"
+        },
+        "executableDigest": {
+          "type": "string"
+        },
+        "policyDigest": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "runtimeRoot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "clientVersion",
+        "executable",
+        "executableDigest",
+        "policyDigest",
+        "profile",
+        "runtimeRoot"
+      ],
+      "type": "object"
+    },
     "AuditCollectionView": {
       "properties": {
         "completedCount": {
@@ -1976,6 +2020,14 @@
       "enum": [
         "native",
         "claude_client"
+      ],
+      "type": "string"
+    },
+    "AuditExtractionStatus": {
+      "enum": [
+        "validated_structured",
+        "deterministically_normalised",
+        "unstructured_opinion"
       ],
       "type": "string"
     },
@@ -2114,6 +2166,200 @@
       ],
       "type": "string"
     },
+    "AuditPreflightParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Construction and local inspection only: no persistence, client launch or inference.",
+      "properties": {
+        "request": {
+          "additionalProperties": false,
+          "properties": {
+            "agentsEvidence": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "audexGuidance": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "brief": {
+              "type": "string"
+            },
+            "expectedServedModel": {
+              "description": "Explicitly qualified served-model alias for the singular selection.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "preflight": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "briefDigest": {
+                      "type": "string"
+                    },
+                    "contextDigest": {
+                      "type": "string"
+                    },
+                    "existingRunId": {
+                      "description": "Identical request already commissioned; Start only retrieves that approval.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "identity": {
+                      "type": "string"
+                    },
+                    "manifestDigest": {
+                      "type": "string"
+                    },
+                    "protocolVersion": {
+                      "format": "uint32",
+                      "minimum": 0.0,
+                      "type": "integer"
+                    },
+                    "reviewers": {
+                      "items": {
+                        "$ref": "#/definitions/AuditReviewerBinding"
+                      },
+                      "type": "array"
+                    },
+                    "snapshotId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "briefDigest",
+                    "contextDigest",
+                    "identity",
+                    "manifestDigest",
+                    "protocolVersion",
+                    "reviewers",
+                    "snapshotId"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Read-only disclosure approved by the operator; required for subscription rosters."
+            },
+            "provider": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reasoningEffort": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "requestKey": {
+              "type": "string"
+            },
+            "reviewers": {
+              "description": "Ordered reviewer roster. Mutually exclusive with the singular native selection.",
+              "items": {
+                "$ref": "#/definitions/AuditReviewerSelection"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "scheduling": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/AuditScheduling"
+                }
+              ],
+              "default": "automatic"
+            },
+            "source": {
+              "$ref": "#/definitions/AuditSource"
+            }
+          },
+          "required": [
+            "brief",
+            "requestKey",
+            "source"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "request"
+      ],
+      "title": "AuditPreflightParams",
+      "type": "object"
+    },
+    "AuditPreflightResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "briefDigest": {
+          "type": "string"
+        },
+        "contextDigest": {
+          "type": "string"
+        },
+        "existingRunId": {
+          "description": "Identical request already commissioned; Start only retrieves that approval.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "identity": {
+          "type": "string"
+        },
+        "manifestDigest": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "reviewers": {
+          "items": {
+            "$ref": "#/definitions/AuditReviewerBinding"
+          },
+          "type": "array"
+        },
+        "snapshotId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "briefDigest",
+        "contextDigest",
+        "identity",
+        "manifestDigest",
+        "protocolVersion",
+        "reviewers",
+        "snapshotId"
+      ],
+      "title": "AuditPreflightResponse",
+      "type": "object"
+    },
     "AuditProgressNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -2208,6 +2454,105 @@
         "run"
       ],
       "title": "AuditReleaseSlotResponse",
+      "type": "object"
+    },
+    "AuditResultExtraction": {
+      "additionalProperties": false,
+      "description": "Versioned deterministic extraction facts; completion provenance stays on the attempt.",
+      "properties": {
+        "parseDigest": {
+          "type": "string"
+        },
+        "rawDigest": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/AuditExtractionStatus"
+        },
+        "transformations": {
+          "items": {
+            "$ref": "#/definitions/AuditResultTransformation"
+          },
+          "type": "array"
+        },
+        "validationError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "parseDigest",
+        "rawDigest",
+        "status",
+        "transformations",
+        "version"
+      ],
+      "type": "object"
+    },
+    "AuditResultTransformation": {
+      "enum": [
+        "utf8_bom",
+        "markdown_json_fence"
+      ],
+      "type": "string"
+    },
+    "AuditReviewerBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "backendConfigurationIdentity": {
+          "type": "string"
+        },
+        "client": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AuditClaudeBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expectedServedModel": {
+          "type": "string"
+        },
+        "modelMetadataDigest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeConfigurationIdentity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolvedModel": {
+          "type": "string"
+        },
+        "selection": {
+          "$ref": "#/definitions/AuditReviewerSelection"
+        }
+      },
+      "required": [
+        "backendConfigurationIdentity",
+        "expectedServedModel",
+        "resolvedModel",
+        "selection"
+      ],
       "type": "object"
     },
     "AuditReviewerSelection": {
@@ -2449,6 +2794,63 @@
             "string",
             "null"
           ]
+        },
+        "preflight": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "briefDigest": {
+                  "type": "string"
+                },
+                "contextDigest": {
+                  "type": "string"
+                },
+                "existingRunId": {
+                  "description": "Identical request already commissioned; Start only retrieves that approval.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "identity": {
+                  "type": "string"
+                },
+                "manifestDigest": {
+                  "type": "string"
+                },
+                "protocolVersion": {
+                  "format": "uint32",
+                  "minimum": 0.0,
+                  "type": "integer"
+                },
+                "reviewers": {
+                  "items": {
+                    "$ref": "#/definitions/AuditReviewerBinding"
+                  },
+                  "type": "array"
+                },
+                "snapshotId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "briefDigest",
+                "contextDigest",
+                "identity",
+                "manifestDigest",
+                "protocolVersion",
+                "reviewers",
+                "snapshotId"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Read-only disclosure approved by the operator; required for subscription rosters."
         },
         "provider": {
           "type": [
@@ -3014,6 +3416,30 @@
             "params"
           ],
           "title": "Audit/capabilitiesRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "audit/preflight"
+              ],
+              "title": "Audit/preflightRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AuditPreflightParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Audit/preflightRequest",
           "type": "object"
         },
         {

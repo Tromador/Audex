@@ -52,3 +52,34 @@ fn code_mode_text_preserves_message_content() {
         )
     );
 }
+
+#[test]
+fn complete_json_output_preserves_encoded_bytes_and_default_output_policy() {
+    use crate::{JsonToolOutput, ToolOutput, ToolPayload};
+    use codex_utils_output_truncation::{TruncationPolicy, truncate_function_output_payload};
+    let value = serde_json::json!({"content":"\0😀\"\\".repeat(16384)});
+    let payload = ToolPayload::Function {
+        arguments: "{}".into(),
+    };
+    let ordinary = JsonToolOutput::new(value.clone()).with_external_context();
+    assert_eq!(ordinary.fallback_token_limit_override(), None);
+    let complete = ordinary.clone().with_full_output();
+    assert_eq!(complete.log_output(), ordinary.log_output());
+    assert_eq!(complete.code_mode_result(&payload), value);
+    assert!(complete.contains_external_context());
+    let ResponseInputItem::FunctionCallOutput { mut output, .. } =
+        complete.to_response_item("call", &payload)
+    else {
+        panic!("function result")
+    };
+    truncate_function_output_payload(
+        &mut output,
+        TruncationPolicy::Tokens(complete.fallback_token_limit_override().unwrap()),
+        |_| 0,
+    );
+    assert_eq!(output.body.to_text().unwrap(), value.to_string());
+    assert_eq!(
+        complete.post_tool_use_response("call", &payload),
+        Some(value)
+    );
+}

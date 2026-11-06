@@ -7,7 +7,23 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+pub(super) mod diagnostics;
+
 pub(super) const TOOL_NAMES: [&str; 3] = ["list", "read", "search"];
+// The pinned client accepts this MCP override. UTF-8 bytes conservatively bound
+// its UTF-16 character count, including JSON escaping and base64 expansion.
+pub(super) const MAX_RESULT_BYTES: usize = 500_000;
+pub(super) const RESULT_LIMIT_MESSAGE: &str =
+    "source result exceeds 500000 encoded bytes; request fewer bytes or search results";
+
+fn bound_result(value: Value) -> Result<Value, FunctionCallError> {
+    if value.to_string().len() > MAX_RESULT_BYTES {
+        return Err(FunctionCallError::RespondToModel(
+            RESULT_LIMIT_MESSAGE.into(),
+        ));
+    }
+    Ok(value)
+}
 
 pub(super) trait SourceAuthority: Send + Sync {
     fn allowed(&self) -> BoxFuture<'_, bool>;
@@ -41,7 +57,10 @@ impl SourceService {
         arguments: &str,
     ) -> Result<Value, FunctionCallError> {
         self.check().await?;
-        let result = self.execute_unchecked(name, arguments).await;
+        let result = self
+            .execute_unchecked(name, arguments)
+            .await
+            .and_then(bound_result);
         #[cfg(test)]
         if let Some(hook) = &self.after_access {
             hook().await;
@@ -65,13 +84,35 @@ impl SourceService {
 
 pub(super) fn function(name: &str) -> anyhow::Result<ResponsesApiTool> {
     anyhow::ensure!(TOOL_NAMES.contains(&name), "unknown source tool");
+    let limits = AccessLimits::default();
+    // Numeric and length bounds are dropped by JsonSchema conversion; descriptions survive.
     let properties = match name {
         "list" => json!({}),
         "read" => {
-            json!({"path":{"type":"string"}, "offset":{"type":"integer","minimum":0}, "max_bytes":{"type":"integer","minimum":1,"maximum":65536}})
+            json!({
+                "path":{"type":"string"},
+                "offset":{
+                    "type":"integer","minimum":0,
+                    "description":"Zero-based byte offset; must be nonnegative and no greater than the file size."
+                },
+                "max_bytes":{
+                    "type":"integer","minimum":1,"maximum":65536,
+                    "description":format!("Upper bound: 1–{} bytes per call (inclusive). Fewer bytes at EOF are normal; check the returned eof.", limits.max_read_bytes)
+                }
+            })
         }
         _ => {
-            json!({"query":{"type":"string","minLength":1,"maxLength":1024}, "path":{"type":["string","null"]}, "max_results":{"type":"integer","minimum":1,"maximum":100}})
+            json!({
+                "query":{
+                    "type":"string","minLength":1,"maxLength":1024,
+                    "description":format!("Literal search query: 1–{} UTF-8 bytes (inclusive), measured in bytes rather than characters.", limits.max_search_query_bytes)
+                },
+                "path":{"type":["string","null"]},
+                "max_results":{
+                    "type":"integer","minimum":1,"maximum":100,
+                    "description":format!("Maximum number of search results: 1–{} (inclusive).", limits.max_search_results)
+                }
+            })
         }
     };
     let required = match name {
@@ -133,7 +174,11 @@ impl SourceService {
                 super::snapshot::SnapshotError::EntryNotFound(_) => {
                     "path is not in the snapshot manifest"
                 }
-                super::snapshot::SnapshotError::AccessLimit(_) => "source access limit exceeded",
+                // All five constructors in snapshot/access.rs contain only fixed guidance,
+                // numeric bounds, offsets or entry sizes, never paths or source content.
+                super::snapshot::SnapshotError::AccessLimit(message) => {
+                    return FunctionCallError::RespondToModel(message);
+                }
                 _ => "snapshot integrity or access verification failed",
             };
             FunctionCallError::RespondToModel(message.to_string())

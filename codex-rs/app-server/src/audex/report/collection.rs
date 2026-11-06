@@ -2,7 +2,7 @@
 use super::*;
 use crate::audex::store::activity::ActivityRecord;
 
-pub(in crate::audex) const FORMAT_VERSION: u32 = 4;
+pub(in crate::audex) const FORMAT_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize)]
 pub(in crate::audex) struct CollectionInput {
@@ -40,6 +40,9 @@ pub(in crate::audex) struct ReviewerInput {
     pub result_digest: Option<String>,
     pub result_path: Option<String>,
     pub completed: Option<ReportInput>,
+    /// Added only to new frozen selections; never reconstructed for old reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opinion: Option<OpinionInput>,
     pub cutoff: i64,
     pub activity_digest: String,
     pub activity: Vec<ActivityRecord>,
@@ -49,6 +52,16 @@ pub(in crate::audex) struct ReviewerInput {
     /// Absent only in the independent historical format-3 carrier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_facts: Option<super::facts::ProviderFacts>,
+    /// Only new selections freeze tool facts. Absence preserves historical bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_tools: Option<super::source_tools::SourceToolFacts>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(in crate::audex) struct OpinionInput {
+    pub extraction: codex_app_server_protocol::AuditResultExtraction,
+    /// Full original text only when no structured findings were extracted.
+    pub text: Option<String>,
 }
 
 pub(in crate::audex) fn render(
@@ -58,6 +71,10 @@ pub(in crate::audex) fn render(
     if input.format_version == 3 {
         let historical = serde_json::from_slice(&serde_json::to_vec(input)?)?;
         return super::collection_v3::render(&historical);
+    }
+    if input.format_version == 4 {
+        let historical = serde_json::from_slice(&serde_json::to_vec(input)?)?;
+        return super::collection_v4::render(&historical);
     }
     let input_digest = sha256_hex(&serde_json::to_vec(&(FORMAT_VERSION, input))?);
     let id = format!("audex-report-v{FORMAT_VERSION}:sha256:{input_digest}");
@@ -104,14 +121,64 @@ pub(in crate::audex) fn render(
         if let Some(facts) = &reviewer.provider_facts {
             super::facts::render(&mut output, facts)?;
         }
+        if let Some(tools) = &reviewer.source_tools {
+            super::source_tools::render(&mut output, tools)?;
+            for (label, value) in [
+                ("Source-tool capture gap", &reviewer.capture_gap),
+                ("Source-tool capture failure", &reviewer.capture_failure),
+            ] {
+                if let Some(value) = value {
+                    write_literal(&mut output, label, value);
+                }
+            }
+            if reviewer.capture_truncated {
+                push_line(
+                    &mut output,
+                    "- Source-tool capture truncated: yes; outcomes may be missing",
+                );
+            }
+        }
         for caveat in &reviewer.provider_caveats {
-            write_section(&mut output, "Provider caveat", caveat);
+            write_literal(&mut output, "Provider caveat", caveat);
+        }
+        if let Some(opinion) = &reviewer.opinion {
+            use codex_app_server_protocol::AuditExtractionStatus;
+            let label = match opinion.extraction.status {
+                AuditExtractionStatus::ValidatedStructured => "validated_structured",
+                AuditExtractionStatus::DeterministicallyNormalised => {
+                    "deterministically_normalised"
+                }
+                AuditExtractionStatus::UnstructuredOpinion => "unstructured_opinion",
+            };
+            push_line(&mut output, &format!("- Extraction: {label}"));
+            push_line(
+                &mut output,
+                &format!("- Raw output SHA-256: `{}`", opinion.extraction.raw_digest),
+            );
+            push_line(
+                &mut output,
+                &format!(
+                    "- Parse input SHA-256: `{}`",
+                    opinion.extraction.parse_digest
+                ),
+            );
+            push_line(
+                &mut output,
+                &format!(
+                    "- Deterministic transformations: {}",
+                    serde_json::to_string(&opinion.extraction.transformations)?
+                ),
+            );
+            push_line(
+                &mut output,
+                "- Completion and validated structure do not establish opinion correctness; assessment belongs to the operator.",
+            );
         }
         if let Some(completed) = &reviewer.completed {
             push_line(
                 &mut output,
                 &format!(
-                    "- Completeness: completed\n- Canonical result digest: `{}`\n",
+                    "- Completeness: completed opinion; validated structured extraction\n- Raw result digest: `{}`\n",
                     reviewer.result_digest.as_deref().unwrap_or("")
                 ),
             );
@@ -123,18 +190,37 @@ pub(in crate::audex) fn render(
                 if line.starts_with("##") {
                     output.push('#');
                 }
-                push_line(&mut output, line);
+                // Format 5 displays model prose literally. Historical renderers
+                // keep their original quoting and byte identities.
+                if let Some(body) = line.strip_prefix("> ") {
+                    push_line(&mut output, &format!("    {}", visible_controls(body)));
+                } else {
+                    push_line(&mut output, &visible_controls(line));
+                }
             }
+        } else if let Some(opinion) = &reviewer.opinion {
+            push_line(
+                &mut output,
+                "- Completeness: completed opinion; structured findings unavailable",
+            );
+            if let Some(reason) = &opinion.extraction.validation_error {
+                write_literal(&mut output, "Structured extraction discrepancy", reason);
+            }
+            write_literal(
+                &mut output,
+                "Original reviewer opinion (unvalidated text; not structured findings)",
+                opinion.text.as_deref().unwrap_or(""),
+            );
         } else {
             push_line(
                 &mut output,
                 "- Completeness: incomplete / excluded; no accepted completed opinion",
             );
             if let Some(reason) = &reviewer.stop_reason {
-                write_section(&mut output, "Exclusion / stop reason", reason);
+                write_literal(&mut output, "Exclusion / stop reason", reason);
             }
             if let Some(reason) = &reviewer.failure_code {
-                write_section(&mut output, "Execution failure reason", reason);
+                write_literal(&mut output, "Execution failure reason", reason);
             }
             push_line(
                 &mut output,
@@ -148,13 +234,13 @@ pub(in crate::audex) fn render(
                 ("Capture failure", &reviewer.capture_failure),
             ] {
                 if let Some(value) = value {
-                    write_section(&mut output, label, value);
+                    write_literal(&mut output, label, value);
                 }
             }
             if reviewer.capture_truncated {
                 push_line(&mut output, "- Capture truncated: yes");
             }
-            write_section(
+            write_literal(
                 &mut output,
                 "Incomplete assistant output (unvalidated; not findings)",
                 &reviewer
@@ -172,7 +258,7 @@ pub(in crate::audex) fn render(
             );
             for entry in &reviewer.activity {
                 if !matches!(entry.kind.as_str(), "assistant_delta" | "assistant_message") {
-                    write_section(&mut output, &entry.kind, &entry.payload);
+                    write_literal(&mut output, &entry.kind, &entry.payload);
                 }
             }
         }
@@ -200,6 +286,10 @@ pub(in crate::audex) fn decode(json: &str) -> Result<CollectionInput, serde_json
             let historical: super::collection_v3::CollectionInput = serde_json::from_str(json)?;
             serde_json::from_slice(&serde_json::to_vec(&historical)?)?
         }
+        4 => {
+            let historical: super::collection_v4::CollectionInput = serde_json::from_str(json)?;
+            serde_json::from_slice(&serde_json::to_vec(&historical)?)?
+        }
         FORMAT_VERSION => serde_json::from_str(json)?,
         _ => return Err(invalid("unsupported frozen report format")),
     };
@@ -212,13 +302,62 @@ fn invalid(message: &str) -> serde_json::Error {
 }
 
 fn validate(input: &CollectionInput) -> Result<(), serde_json::Error> {
-    if !matches!(input.format_version, 3 | FORMAT_VERSION)
-        || input
-            .reviewers
-            .iter()
-            .any(|r| r.provider_facts.is_some() != (input.format_version == FORMAT_VERSION))
+    if !matches!(input.format_version, 3 | 4 | FORMAT_VERSION)
+        || input.reviewers.iter().any(|r| {
+            r.provider_facts.is_some() != (input.format_version >= 4)
+                || (input.format_version < FORMAT_VERSION
+                    && (r.opinion.is_some() || r.source_tools.is_some()))
+        })
     {
         return Err(invalid("frozen report version and provider facts disagree"));
     }
+    for reviewer in &input.reviewers {
+        if let Some(tools) = &reviewer.source_tools
+            && *tools != super::source_tools::collect(&reviewer.activity)
+        {
+            return Err(invalid(
+                "frozen source-tool facts differ from selected activity",
+            ));
+        }
+        if let Some(opinion) = &reviewer.opinion {
+            let unstructured = opinion.extraction.status
+                == codex_app_server_protocol::AuditExtractionStatus::UnstructuredOpinion;
+            if opinion.extraction.version != 1
+                || reviewer.assignment_state != "succeeded"
+                || reviewer.result_digest.as_deref() != Some(&opinion.extraction.raw_digest)
+                || unstructured != opinion.text.is_some()
+                || unstructured == reviewer.completed.is_some()
+                || unstructured != opinion.extraction.validation_error.is_some()
+                || opinion.text.as_ref().is_some_and(|text| {
+                    text.trim().is_empty()
+                        || text.len() > crate::audex::result::MAX_RAW_RESULT_BYTES
+                        || sha256_hex(text.as_bytes()) != opinion.extraction.raw_digest
+                })
+            {
+                return Err(invalid("invalid frozen opinion extraction binding"));
+            }
+        }
+    }
     Ok(())
+}
+
+/// Indented literal text cannot create Markdown links, HTML, headings or fences.
+/// Control characters are displayed visibly; the immutable raw artefact is exact.
+pub(super) fn write_literal(output: &mut String, heading: &str, text: &str) {
+    push_line(output, &format!("\n**{heading}**\n"));
+    for line in text.split('\n') {
+        push_line(output, &format!("    {}", visible_controls(line)));
+    }
+}
+
+fn visible_controls(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+                c.escape_unicode().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
 }

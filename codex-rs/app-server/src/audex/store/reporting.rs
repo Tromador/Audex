@@ -1,7 +1,7 @@
 //! Run-level readiness, immutable selections and publication share the store's
 //! existing immediate-transaction authority with attempt controls and results.
 use super::*;
-use crate::audex::report::collection::{self, CollectionInput, ReviewerInput};
+use crate::audex::report::collection::{self, CollectionInput, OpinionInput, ReviewerInput};
 
 pub(super) async fn settle_collection(
     connection: &mut sqlx::SqliteConnection,
@@ -164,30 +164,50 @@ impl AuditStore {
             })?;
             let result_path: Option<String> = row.try_get("result_path")?;
             let result_digest: Option<String> = row.try_get("result_digest")?;
+            let extraction = super::extraction::read(connection, &assignment).await?;
+            let unstructured = extraction.as_ref().is_some_and(|e| {
+                e.status == codex_app_server_protocol::AuditExtractionStatus::UnstructuredOpinion
+            });
+            let opinion = if let Some(extraction) = extraction {
+                let text = if unstructured {
+                    let path = result_path.as_deref().ok_or_else(|| {
+                        AuditStoreError::InvalidPersistedState("opinion has no raw path".into())
+                    })?;
+                    let bytes =
+                        verify_immutable(self.root.as_path(), path, &extraction.raw_digest)?;
+                    Some(String::from_utf8(bytes).map_err(|_| {
+                        AuditStoreError::InvalidPersistedState("opinion is not UTF-8".into())
+                    })?)
+                } else {
+                    None
+                };
+                Some(OpinionInput { extraction, text })
+            } else {
+                None
+            };
+            // Tool outcomes are independent of opinion acceptance. Freeze the
+            // same bounded prefix for completed and incomplete attempts. Integrity
+            // is checked in load_selection, preserving Abort's durable decision.
             let mut activity = Vec::new();
-            if !completed {
-                let mut after = 0;
-                loop {
-                    let entries = activity::read_selected_activity(
-                        connection,
-                        &assignment,
-                        after,
-                        256,
-                        cutoff,
-                        false,
-                    )
-                    .await?;
-                    let Some(last) = entries.last() else {
-                        break;
-                    };
-                    after = last.sequence;
-                    activity.extend(entries);
-                    if after >= cutoff {
-                        break;
-                    }
-                }
+            let mut after = 0;
+            while after < cutoff {
+                let entries = activity::read_selected_activity(
+                    connection,
+                    &assignment,
+                    after,
+                    256,
+                    cutoff,
+                    false,
+                )
+                .await?;
+                let Some(last) = entries.last() else {
+                    break;
+                };
+                after = last.sequence;
+                activity.extend(entries);
             }
-            let body = if completed {
+            let source_tools = crate::audex::report::source_tools::collect(&activity);
+            let body = if completed && !unstructured {
                 Some(content(
                     run,
                     &snapshot,
@@ -282,6 +302,7 @@ impl AuditStore {
                 result_path,
                 result_digest,
                 completed: body,
+                opinion,
                 cutoff,
                 activity_digest: sha256_hex(&serde_json::to_vec(&activity)?),
                 activity,
@@ -289,11 +310,15 @@ impl AuditStore {
                 capture_failure: row.try_get("capture_failure")?,
                 capture_truncated: row.try_get("capture_truncated")?,
                 provider_facts: Some(provider_facts),
+                source_tools: Some(source_tools),
             });
         }
         let outcome = if row.try_get::<String, _>("control_intent")? == "cancel_requested" {
             "aborted_by_operator"
-        } else if reviewers.iter().any(|r| r.completed.is_some()) {
+        } else if reviewers
+            .iter()
+            .any(|r| r.completed.is_some() || r.opinion.is_some())
+        {
             "success"
         } else {
             "no_completed_review"
@@ -346,7 +371,7 @@ impl AuditStore {
             ));
         }
         for reviewer in &input.reviewers {
-            if reviewer.completed.is_some()
+            if (reviewer.completed.is_some() || reviewer.opinion.is_some())
                 && (reviewer.result_path.is_none() || reviewer.result_digest.is_none())
             {
                 return Err(AuditStoreError::InvalidPersistedState(
@@ -356,7 +381,9 @@ impl AuditStore {
             if let (Some(path), Some(digest)) = (&reviewer.result_path, &reviewer.result_digest) {
                 verify_immutable(self.root.as_path(), path, digest)?;
             }
-            if reviewer.completed.is_none() {
+            if reviewer.source_tools.is_some()
+                || (reviewer.completed.is_none() && reviewer.opinion.is_none())
+            {
                 let mut entries = Vec::new();
                 while entries.len() < reviewer.cutoff as usize {
                     entries.extend(

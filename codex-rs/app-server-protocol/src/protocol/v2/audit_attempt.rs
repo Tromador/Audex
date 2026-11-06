@@ -10,6 +10,36 @@ pub enum AuditAttemptAction {
     Retry,
 }
 
+/// Versioned deterministic extraction facts; completion provenance stays on the attempt.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct AuditResultExtraction {
+    pub version: u32,
+    pub raw_digest: String,
+    pub status: AuditExtractionStatus,
+    pub parse_digest: String,
+    pub transformations: Vec<AuditResultTransformation>,
+    pub validation_error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "v2/")]
+pub enum AuditExtractionStatus {
+    ValidatedStructured,
+    DeterministicallyNormalised,
+    UnstructuredOpinion,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "v2/")]
+pub enum AuditResultTransformation {
+    Utf8Bom,
+    MarkdownJsonFence,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export_to = "v2/")]
@@ -74,8 +104,13 @@ pub struct AuditAttemptView {
     pub disposition: String,
     pub assignment_state: String,
     pub operation_state: String,
-    /// True only for a canonical validated result, never inferred from activity.
+    /// An authoritative completed opinion, independent of structured extraction.
+    /// Never inferred from activity, process exit alone or reviewer identity claims.
     pub completed: bool,
+    /// Absent for historical results predating the shared extraction contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub extraction: Option<AuditResultExtraction>,
     pub possible_overlap: bool,
     pub output_sequence: i64,
     pub output_cutoff: Option<i64>,

@@ -4,6 +4,6 @@
 
 /**
  * Authentication selection is independent of provider and model. Only the
- * daemon-configured native route is currently available for commissioning.
+ * daemon-configured native and qualified subscription routes are available for commissioning.
  */
 export type AuditAuthenticationRoute = "daemon_configured_native" | "claude_subscription" | "claude_api" | "ollama_local";

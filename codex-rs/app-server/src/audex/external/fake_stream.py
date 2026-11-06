@@ -120,6 +120,12 @@ sys.stdout.write(json.dumps(delta) + "\n")  # same stable event identity: no sec
 sys.stdout.flush()
 partial("content_block_stop", index=1)
 tool1 = {"type": "tool_use", "id": "call-1", "name": "mcp__audex_source__list", "input": {}}
+if "source_error" in scenario:
+    tool1["name"] = "mcp__audex_source__read"
+    tool1["input"] = {"path": "example.rs", "offset": 0, "max_bytes": 200000}
+if "source_receipt" in scenario:
+    tool1["name"] = "mcp__audex_source__" + scenario["source_operation"]
+    tool1["input"] = scenario["source_arguments"]
 partial("content_block_start", index=2, content_block=tool1)
 assistant("progress", [{"type": "thinking", "thinking": secret, "signature": secret}, {"type": "text", "text": "Public progress."}, tool1],
           "contradictory-model" if mode == "model_conflict" else model)
@@ -130,6 +136,11 @@ partial("message_stop")
 
 def tool_result(call):
     result = {"type": "tool_result", "tool_use_id": call, "content": [{"type": "text", "text": json.dumps({"entries": [], "api_key": secret})}, {"type": "thinking", "thinking": secret}]}
+    if call == "call-1" and "source_error" in scenario:
+        result["is_error"] = True
+        result["content"] = scenario["source_error"]
+    if call == "call-1" and "source_receipt" in scenario:
+        result = {**scenario["source_receipt"], "tool_use_id": call}
     emit("user", message={"role": "user", "content": [result]}, tool_use_result={"secret": secret})
     emit("user", message={"role": "user", "content": [result]})
 

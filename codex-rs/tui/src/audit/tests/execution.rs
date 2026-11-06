@@ -621,6 +621,7 @@ fn pending_observer_recovers_and_delivers_report_once_without_another_inference(
         let audits = AuditClient::new(session.request_handle());
         let mut initial = audits
             .start(AuditStartParams {
+                preflight: None,
                 reviewers: None,
                 scheduling: Default::default(),
                 expected_served_model: None,

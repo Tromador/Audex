@@ -31,7 +31,16 @@ impl AuditController {
         if input.adapter() == AuditExecutionAdapter::ClaudeClient {
             // The adapter checks the complete retained launch policy before any
             // spawn. Do not construct a native reviewer or resolve its catalogue.
-            return input.validate_backend_configuration(&settings);
+            input.validate_backend_configuration(&settings)?;
+            #[cfg(target_os = "linux")]
+            if input.route() == AuditAuthenticationRoute::ClaudeSubscription {
+                super::super::external::commissioning::revalidate(
+                    self.root.as_path(),
+                    &settings,
+                    &policy_json,
+                )?;
+            }
+            return Ok(());
         }
         let prepared = Box::pin(reviewer::prepare(
             &self.config,
@@ -165,6 +174,7 @@ impl AuditController {
             }
             .to_owned(),
             completed: record.assignment_state == AssignmentState::Succeeded,
+            extraction: store.result_extraction(&record.assignment_id).await?,
             possible_overlap: store.possible_overlap(&record.operation_id).await?,
             output_sequence: capture.sequence,
             output_cutoff: capture.cutoff,

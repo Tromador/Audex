@@ -92,7 +92,7 @@ fn native_roster_uses_three_distinct_durable_sessions_without_sibling_input() ->
         let report = published["report"]
             .as_str()
             .expect("published native report");
-        assert!(report.contains("Report format: `4`"));
+        assert!(report.contains("Report format: `5`"));
         let mut previous = 0;
         for (ordinal, attempt) in complete.iter().enumerate() {
             let position = report

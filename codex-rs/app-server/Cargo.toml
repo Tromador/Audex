@@ -139,6 +139,8 @@ libc = { workspace = true }
 codex-windows-sandbox = { workspace = true }
 
 [dev-dependencies]
+# Match the CLI/TUI feature set when checking frozen production report bytes.
+serde_json = { workspace = true, features = ["preserve_order"] }
 codex-attachment-store = { workspace = true }
 zip = { workspace = true }
 codex-uds = { workspace = true }

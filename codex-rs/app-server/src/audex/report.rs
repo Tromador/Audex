@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 
 pub(super) mod collection;
 mod collection_v3;
+mod collection_v4;
 pub(super) mod facts;
+pub(super) mod source_tools;
 
 pub(super) const REPORT_FORMAT_VERSION: u32 = 2;
 

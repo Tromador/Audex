@@ -193,7 +193,20 @@ async fn guarded_http_failure_sends_once_while_ordinary_http_keeps_its_retry_beh
                 None,
             )
             .await;
-        assert_eq!(result.is_err(), guarded);
+        if guarded {
+            assert!(
+                matches!(
+                    result,
+                    Err(ApiError::Transport(TransportError::Http {
+                        status: StatusCode::SERVICE_UNAVAILABLE,
+                        ..
+                    }))
+                ),
+                "the provider failure must not become a second-admission denial"
+            );
+        } else {
+            assert!(result.is_ok());
+        }
         assert_eq!(seen.load(Ordering::SeqCst), if guarded { 1 } else { 2 });
         assert_eq!(
             authority.admissions.load(Ordering::SeqCst),

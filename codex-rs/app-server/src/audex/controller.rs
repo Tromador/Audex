@@ -1,5 +1,6 @@
 //! Process-owned workflow. Codex execution uses the same durable boundary as deterministic tests.
 mod attempts;
+mod preflight;
 use super::reviewer;
 use super::snapshot::manifest::sha256_hex;
 use super::snapshot::{
@@ -112,6 +113,10 @@ pub(super) struct ReviewerSelection {
     pub reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_served_model: Option<String>,
+    #[serde(skip_serializing_if = "preflight::native_adapter")]
+    pub execution_adapter: AuditExecutionAdapter,
+    #[serde(skip_serializing_if = "preflight::native_route")]
+    pub authentication_route: AuditAuthenticationRoute,
 }
 
 type ProgressVersion = (i64, Vec<(String, i64, i64, i64)>);
@@ -296,6 +301,9 @@ impl AuditController {
                     );
                 } else if let (Some(key), Some(identity)) = (key, start_identity) {
                     match async {
+                        if !AuditStore::request_key_exists_read_only(&self.root, &key).await? {
+                            return Ok(None);
+                        }
                         self.store()
                             .await?
                             .find_idempotent_request(&key, &identity)
@@ -346,63 +354,27 @@ impl AuditController {
                 protocol_version: AUDIT_PROTOCOL_VERSION,
             }
             .into()),
+            ClientRequest::AuditPreflight { params, .. } => {
+                Ok(self.preflight(&params.request).await?.into())
+            }
             ClientRequest::AuditStart { params, .. } => {
-                let selections = if let Some(roster) = &params.reviewers {
-                    anyhow::ensure!(
-                        params.provider.is_none()
-                            && params.model.is_none()
-                            && params.reasoning_effort.is_none()
-                            && params.expected_served_model.is_none(),
-                        "roster and singular reviewer selection are mutually exclusive"
-                    );
-                    for selection in roster {
-                        selection.validate().map_err(anyhow::Error::msg)?;
+                let selections = preflight::selections(&params)?;
+                if selections.iter().any(|selection| {
+                    matches!(
+                        selection.authentication_route,
+                        AuditAuthenticationRoute::ClaudeApi | AuditAuthenticationRoute::OllamaLocal
+                    )
+                }) {
+                    if AuditStore::request_key_exists_read_only(&self.root, &params.request_key)
+                        .await?
+                    {
+                        return Err(super::store::AuditStoreError::IdempotencyConflict(
+                            params.request_key.clone(),
+                        )
+                        .into());
                     }
-                    if roster.iter().any(|selection| {
-                        selection.authentication_route
-                            != AuditAuthenticationRoute::DaemonConfiguredNative
-                    }) {
-                        if AuditStore::request_key_exists_read_only(&self.root, &params.request_key)
-                            .await?
-                        {
-                            return Err(super::store::AuditStoreError::IdempotencyConflict(
-                                params.request_key.clone(),
-                            )
-                            .into());
-                        }
-                        anyhow::bail!("reviewer route is unavailable for commissioning");
-                    }
-                    roster
-                        .iter()
-                        .map(|r| {
-                            r.validate().map_err(anyhow::Error::msg)?;
-                            anyhow::ensure!(
-                                r.authentication_route == AuditAuthenticationRoute::DaemonConfiguredNative,
-                                "reviewer route {:?} with executor {:?} is unavailable for commissioning",
-                                r.authentication_route, r.execution_adapter
-                            );
-                            Ok(ReviewerSelection {
-                                provider: r.provider.clone(),
-                                model: r.model.clone(),
-                                reasoning_effort: r.reasoning_effort.clone(),
-                                expected_served_model: r.expected_served_model.clone(),
-                            })
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()?
-                } else {
-                    vec![ReviewerSelection {
-                        provider: params
-                            .provider
-                            .clone()
-                            .ok_or_else(|| anyhow::anyhow!("reviewer provider is required"))?,
-                        model: params
-                            .model
-                            .clone()
-                            .ok_or_else(|| anyhow::anyhow!("reviewer model is required"))?,
-                        reasoning_effort: params.reasoning_effort.clone(),
-                        expected_served_model: params.expected_served_model.clone(),
-                    }]
-                };
+                    anyhow::bail!("reviewer route is unavailable for commissioning");
+                }
                 Ok(AuditStartResponse {
                     run: self
                         .commission_roster(params, selections, start_identity)
@@ -514,53 +486,26 @@ impl AuditController {
             }
         }
         let _gate = self.gate.lock().await;
-        let capture = CaptureRequest {
-            source: match &params.source {
-                AuditSource::Snippet { name, content } => CaptureSource::Snippet {
-                    logical_path: SnapshotPath::new(name.clone())?,
-                    bytes: content.as_bytes().to_vec(),
-                },
-                AuditSource::File { name, path } => CaptureSource::File {
-                    logical_path: SnapshotPath::new(name.clone())?,
-                    source_path: AbsolutePathBuf::from_absolute_path(path)?,
-                },
-            },
-            context_documents: ContextDocuments {
-                audex_guidance: params
-                    .audex_guidance
-                    .as_ref()
-                    .map(|text| text.as_bytes().to_vec()),
-                agents_evidence: params
-                    .agents_evidence
-                    .as_ref()
-                    .map(|text| text.as_bytes().to_vec()),
-            },
-        };
         let snapshots = self.snapshots();
-        let captured = snapshots.capture(capture).await?;
-        let snapshot = snapshots.open(captured.snapshot_id()).await?;
-        let mut identity = sha256_hex(&serde_json::to_vec(&serde_json::json!({
-            "version":1,"snapshotId":snapshot.snapshot_id(),"brief":params.brief,
-            "provider":reviewers[0].provider,"model":reviewers[0].model,"reasoningEffort":reviewers[0].reasoning_effort,
-        }))?);
-        if reviewers.len() != 1 {
-            identity = sha256_hex(&serde_json::to_vec(&serde_json::json!({
-                "snapshotId": snapshot.snapshot_id(), "brief": params.brief, "reviewers": reviewers,
-            }))?);
-        }
-        if params.scheduling != AuditScheduling::Automatic
-            || reviewers.iter().any(|r| r.expected_served_model.is_some())
-        {
-            identity = sha256_hex(&serde_json::to_vec(
-                &serde_json::json!({"base":identity,"scheduling":params.scheduling,"reviewers":reviewers}),
-            )?);
-        }
+        let preview = snapshots
+            .preview(preflight::capture_request(&params)?)
+            .await?;
+        let subscription = reviewers
+            .iter()
+            .any(|r| r.authentication_route == AuditAuthenticationRoute::ClaudeSubscription);
+        let identity = preflight::request_identity(
+            &params,
+            &reviewers,
+            &preview.snapshot_id,
+            params.preflight.as_ref(),
+        )?;
         *start_identity = Some(identity.clone());
-        if let Some(existing) = self
-            .store()
-            .await?
-            .find_idempotent_request(&params.request_key, &identity)
-            .await?
+        if AuditStore::request_key_exists_read_only(&self.root, &params.request_key).await?
+            && let Some(existing) = self
+                .store()
+                .await?
+                .find_idempotent_request(&params.request_key, &identity)
+                .await?
         {
             // A replay retrieves the original approval; it authorises no fresh execution.
             return self.view(&existing.run_id).await;
@@ -570,9 +515,38 @@ impl AuditController {
             self.dispatch.available(),
             "reviewer execution is unavailable"
         );
+        let checked = self.preflight(&params).await?;
+        anyhow::ensure!(
+            !subscription || params.preflight.is_some(),
+            "subscription commissioning requires an approved preflight"
+        );
+        if let Some(approved) = &params.preflight {
+            anyhow::ensure!(
+                *approved == checked,
+                "preflight bindings changed since approval; no reviewers commissioned"
+            );
+        }
+        anyhow::ensure!(
+            preview.snapshot_id.to_string() == checked.snapshot_id,
+            "source changed during preflight"
+        );
+        let captured = snapshots
+            .capture(preflight::capture_request(&params)?)
+            .await?;
+        let snapshot = snapshots.open(captured.snapshot_id()).await?;
+        anyhow::ensure!(
+            sha256_hex(&snapshot.manifest().to_pretty_bytes()?) == checked.manifest_digest,
+            "source changed after preflight; no reviewers commissioned"
+        );
         let settings = super::backends::BackendSettings::load(self.root.as_path())?;
         let mut commissions = Vec::with_capacity(reviewers.len());
-        for selection in reviewers {
+        for (selection, approved) in reviewers.into_iter().zip(&checked.reviewers) {
+            if selection.authentication_route == AuditAuthenticationRoute::ClaudeSubscription {
+                commissions.push(preflight::subscription_commission(
+                    &params, &snapshot, approved,
+                )?);
+                continue;
+            }
             // Preflight never starts a thread; all attempts are commissioned together.
             let prepared = Box::pin(reviewer::prepare(
                 &self.config,
@@ -604,6 +578,15 @@ impl AuditController {
                 &settings,
                 params.scheduling.clone(),
             )?;
+            anyhow::ensure!(
+                prepared.policy["model_metadata"]["slug"].as_str()
+                    == Some(approved.resolved_model.as_str())
+                    && prepared.policy["model_metadata_digest"].as_str()
+                        == approved.model_metadata_digest.as_deref()
+                    && bindings.native_configuration_identity
+                        == approved.native_configuration_identity,
+                "native model or configuration changed since preflight"
+            );
             let request_json = serde_json::to_string(&super::retained::RetainedInput {
                 version: 2,
                 brief: params.brief.clone(),
@@ -648,6 +631,10 @@ impl AuditController {
                 input: Some((request_json, policy_json)),
             });
         }
+        anyhow::ensure!(
+            self.preflight(&params).await? == checked,
+            "preflight bindings changed during preparation; no reviewers commissioned"
+        );
         let created = self
             .store()
             .await?

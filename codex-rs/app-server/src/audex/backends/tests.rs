@@ -3,6 +3,7 @@ use serde_json::json;
 
 #[test]
 fn route_identity_binds_schema_version_and_validates_unrelated_sections() -> anyhow::Result<()> {
+    // The app-server test build uses the same JSON object ordering as the CLI.
     let settings = BackendSettings::default();
     for (route, canonical) in [
         (
@@ -11,15 +12,15 @@ fn route_identity_binds_schema_version_and_validates_unrelated_sections() -> any
         ),
         (
             AuditAuthenticationRoute::ClaudeSubscription,
-            r#"{"claudeSubscription":null,"version":1}"#,
+            r#"{"version":1,"claudeSubscription":null}"#,
         ),
         (
             AuditAuthenticationRoute::ClaudeApi,
-            r#"{"claudeApi":null,"version":1}"#,
+            r#"{"version":1,"claudeApi":null}"#,
         ),
         (
             AuditAuthenticationRoute::OllamaLocal,
-            r#"{"ollamaLocal":null,"version":1}"#,
+            r#"{"version":1,"ollamaLocal":null}"#,
         ),
     ] {
         assert_eq!(settings.identity(&route)?, sha256_hex(canonical.as_bytes()));

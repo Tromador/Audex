@@ -3,6 +3,8 @@ use super::capture::{assert_no_private_files, settled};
 use super::*;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
+#[path = "../../../../../../../cli/tests/audit/subscription_fixture.rs"]
+mod public_fixture;
 
 #[test]
 #[ignore = "requires pinned Claude 2.1.314 and the isolated G6 network namespace"]
@@ -20,46 +22,32 @@ fn pinned_client_fake_api_and_real_bridge_complete_the_production_path() -> anyh
         let temp = tempfile::tempdir()?;
         let native_server = responses::start_mock_server().await;
         let (controller, threads) = real_fixture(&temp, &native_server.uri()).await;
-        let id = seed_external(&controller, &temp, "pinned-official").await?;
-        // F2: this integration must exercise the corrected no-machine-lock path.
-        std::fs::remove_file(
-            controller
-                .root
-                .join("c71-system-policy/managed-settings.json"),
-        )?;
+        let child = public_fixture::configure(temp.path(), "valid")?;
+        std::fs::create_dir(controller.root.join("c71-system-policy"))?;
+        let settings_path = controller.root.join("reviewer-backends.json");
+        let mut settings: Value = serde_json::from_slice(&std::fs::read(&settings_path)?)?;
+        settings["claudeSubscription"]["executable"] = json!(binary);
+        let runtime = PathBuf::from(
+            settings["claudeSubscription"]["runtimeRoot"]
+                .as_str()
+                .unwrap(),
+        );
+        std::fs::write(settings_path, settings.to_string())?;
+        let mut params = json!({"requestKey":"pinned-public-subscription",
+            "source":{"type":"snippet","name":"example.rs","content":"fn main() {}\n"},
+            "brief":"Review only the sealed source for concrete defects",
+            "reviewers":[public_fixture::selection()]});
+        params["preflight"] = api(&controller, "audit/preflight", json!({"request":params}))
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        assert!(!controller.root.join("snapshots").exists());
+        assert_eq!(public_fixture::prompts(&child), 0);
+        let started = api(&controller, "audit/start", params)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        let id = started["run"]["runId"].as_str().unwrap().to_owned();
         let store = controller.store().await?;
         let run = store.load_run(&id).await?;
-        let runtime = temp.path().join("client-runtime").canonicalize()?;
-        let settings: BackendSettings = serde_json::from_value(
-            json!({"version":1,"claudeSubscription":{
-                "executable":binary,"clientVersion":"2.1.314","profile":temp.path().join("subscription-profile"),"runtimeRoot":runtime
-            }}),
-        )?;
-        std::fs::write(
-            controller.root.join("reviewer-backends.json"),
-            serde_json::to_vec(&settings)?,
-        )?;
-        let mut input = RetainedInput::decode(&store.attempt_input(&run.operation_id).await?.0)?;
-        input
-            .bindings
-            .as_mut()
-            .unwrap()
-            .backend_configuration_identity = settings.identity(&input.route())?;
-        let raw = serde_json::to_string(&input)?;
-        let digest = sha256_hex(raw.as_bytes());
-        sqlx::query(
-            "UPDATE audit_attempt_inputs SET request_json=?,input_digest=? WHERE assignment_id=?",
-        )
-        .bind(raw)
-        .bind(&digest)
-        .bind(&run.assignment_id)
-        .execute(&store.pool_for_tests())
-        .await?;
-        sqlx::query("UPDATE operations SET input_digest=? WHERE id=?")
-            .bind(digest)
-            .bind(&run.operation_id)
-            .execute(&store.pool_for_tests())
-            .await?;
         std::fs::write(
             temp.path().join("fake-api.py"),
             include_str!("../../../../external/fake_api.py"),
@@ -135,7 +123,34 @@ fn pinned_client_fake_api_and_real_bridge_complete_the_production_path() -> anyh
         std::fs::write(temp.path().join("socket-observed"), "go")?;
         let terminal = settled(&controller, &id).await?;
         assert_eq!(terminal.assignment_state, AssignmentState::Succeeded);
-        assert_eq!(finished(&controller, &id).await["phase"], "completed");
+        let completed = finished(&controller, &id).await;
+        assert_eq!(completed["phase"], "completed");
+        let extraction = store.result_extraction(&run.assignment_id).await?.unwrap();
+        assert_eq!(
+            extraction.status,
+            codex_app_server_protocol::AuditExtractionStatus::ValidatedStructured
+        );
+        assert_eq!(
+            extraction.raw_digest,
+            sha256_hex(&store.raw_result(&terminal)?.unwrap())
+        );
+        let frozen = store.freeze_report(&id).await?;
+        assert_eq!(frozen.format_version, 5);
+        assert!(
+            frozen.reviewers[0]
+                .completed
+                .as_ref()
+                .unwrap()
+                .findings
+                .is_empty()
+        );
+        assert_eq!(
+            frozen.reviewers[0].opinion.as_ref().unwrap().extraction,
+            extraction
+        );
+        let rendered = crate::audex::report::collection::render(&frozen)?;
+        let published = store.load_run(&id).await?.report.unwrap();
+        assert_eq!(store.read_report(&published)?, rendered.bytes);
         let requests = receipt(temp.path(), "api-receipts.json").await?;
         assert_eq!(requests.as_array().unwrap().len(), 2);
         assert_eq!(requests[1]["tool_results"].as_array().unwrap().len(), 3);
@@ -233,7 +248,7 @@ fn pinned_client_fake_api_and_real_bridge_complete_the_production_path() -> anyh
             .shutdown_all_threads_bounded(Duration::from_secs(5))
             .await;
         println!(
-            "C63 pinned official 2.1.314: actual MCP inventory/list/read/search; thinking + multi-record public text; 2 API responses; 2 execution-bound message observations; placeholder output unavailable; aggregate output=78; immutable validated terminal accepted; bridge/group/socket stopped; no external route or genuine credentials"
+            "C73 public preflight/start; pinned official 2.1.314: actual MCP inventory/list/read/search; thinking + multi-record public text; 2 API responses; 2 execution-bound message observations; placeholder output unavailable; aggregate output=78; immutable validated terminal accepted; bridge/group/socket stopped; no external route or genuine credentials"
         );
         Ok(())
     })

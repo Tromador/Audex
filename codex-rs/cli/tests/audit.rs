@@ -17,6 +17,10 @@ mod roster;
 mod typed_selections;
 
 #[cfg(target_os = "linux")]
+#[path = "audit/subscription.rs"]
+mod subscription;
+
+#[cfg(target_os = "linux")]
 #[path = "audit/process_integration.rs"]
 mod process_integration;
 
@@ -126,13 +130,14 @@ async fn provider(server: &MockServer, mode: &'static str) {
             .filter_map(|part|part["text"].as_str()).filter_map(|text|serde_json::from_str::<Value>(text).ok())
             .find(|value|value.get("assignment_id").is_some()).expect("assignment");
         let output=if mode=="bad" {
-            responses::sse(vec![responses::ev_assistant_message("answer","not valid audit JSON"),responses::ev_completed("bad")])
+            responses::sse(vec![responses::ev_assistant_message("answer",""),responses::ev_completed("bad")])
         } else if mode=="blocked" {
             responses::sse(vec![responses::ev_completed("blocked")])
         } else if input.iter().any(|item|item["type"]=="function_call_output") {
             assert!(text.contains("fn main()"));
             let result=json!({"schema_version":1,"snapshot_id":assignment["snapshot_id"],"assignment_id":assignment["assignment_id"],"summary":"CLI fixture audit","findings":[]});
-            responses::sse(vec![responses::ev_assistant_message("answer",&result.to_string()),responses::ev_completed("final")])
+            let raw = if mode=="plain" { "CLI fixture audit in plain English.".to_owned() } else { result.to_string() };
+            responses::sse(vec![responses::ev_assistant_message("answer",&raw),responses::ev_completed("final")])
         } else {
             assert!(!text.contains("fn main()"));
             responses::sse(vec![responses::ev_function_call_with_namespace("read","audex_source","read",r#"{"path":"example.rs","offset":0,"max_bytes":64}"#),responses::ev_completed("read")])
@@ -285,7 +290,7 @@ async fn stdin_disconnect_cancellation_and_failure_have_distinct_statuses() -> R
                 }
             })
             .await??;
-            // Invalid output is wanted failed work, awaiting an operator decision.
+            // Empty completed output is wanted failed work, awaiting an operator decision.
             assert!(child.try_wait()?.is_none());
             signal(child.id(), libc::SIGINT)?;
             check(&child.wait_with_output()?, 130)?;
@@ -546,7 +551,19 @@ async fn incompatible_protocol_and_missing_selection_fail_before_submission() ->
             Some(5),
             json!({}),
             vec!["--model", "audit-test", "--provider", "audit_fixture"],
-            "incompatible Audex daemon protocol 5; this client requires 6",
+            "incompatible Audex daemon protocol 5; this client requires 8",
+        ),
+        (
+            Some(6),
+            json!({}),
+            vec!["--model", "audit-test", "--provider", "audit_fixture"],
+            "incompatible Audex daemon protocol 6; this client requires 8",
+        ),
+        (
+            Some(7),
+            json!({}),
+            vec!["--model", "audit-test", "--provider", "audit_fixture"],
+            "incompatible Audex daemon protocol 7; this client requires 8",
         ),
         (
             Some(AUDIT_PROTOCOL_VERSION + 1),
@@ -699,6 +716,11 @@ async fn attached_clients_follow_pending_recovery_while_nonfollowing_reads_retur
                     "initialize" => json!({"userAgent":"codex/0.0.0"}),
                     "audit/capabilities" => {
                         json!({"protocolVersion":codex_app_server_protocol::AUDIT_PROTOCOL_VERSION})
+                    }
+                    "audit/preflight" => {
+                        json!({"protocolVersion":codex_app_server_protocol::AUDIT_PROTOCOL_VERSION,
+                        "existingRunId":null,"identity":"fixture","snapshotId":"snapshot","manifestDigest":"manifest",
+                        "briefDigest":"brief","contextDigest":"context","reviewers":[]})
                     }
                     "audit/start" | "audit/read" | "audit/cancel" => {
                         if method == "audit/start" {

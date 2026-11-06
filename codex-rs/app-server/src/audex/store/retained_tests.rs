@@ -44,7 +44,7 @@ async fn c51_database_upgrade_preserves_native_retained_bytes_and_reopens() -> a
     let upgraded = AuditStore::open(root.clone()).await?;
     assert_eq!(
         upgraded.applied_migrations().await?,
-        (1..=16).collect::<Vec<_>>()
+        (1..=17).collect::<Vec<_>>()
     );
     for (request, identity, run, raw, policy) in &fixtures {
         let input = upgraded.attempt_input(&run.operation_id).await?;

@@ -1,0 +1,355 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AuditAuthenticationRoute": {
+      "description": "Authentication selection is independent of provider and model. Only the daemon-configured native and qualified subscription routes are available for commissioning.",
+      "enum": [
+        "daemon_configured_native",
+        "claude_subscription",
+        "claude_api",
+        "ollama_local"
+      ],
+      "type": "string"
+    },
+    "AuditClaudeBinding": {
+      "additionalProperties": false,
+      "description": "Non-secret local bindings; account eligibility is checked by the owned client before prompting.",
+      "properties": {
+        "clientVersion": {
+          "type": "string"
+        },
+        "executable": {
+          "type": "string"
+        },
+        "executableDigest": {
+          "type": "string"
+        },
+        "policyDigest": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "runtimeRoot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "clientVersion",
+        "executable",
+        "executableDigest",
+        "policyDigest",
+        "profile",
+        "runtimeRoot"
+      ],
+      "type": "object"
+    },
+    "AuditExecutionAdapter": {
+      "description": "Execution mechanism is distinct from the configured provider and authentication route.",
+      "enum": [
+        "native",
+        "claude_client"
+      ],
+      "type": "string"
+    },
+    "AuditReviewerBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "backendConfigurationIdentity": {
+          "type": "string"
+        },
+        "client": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AuditClaudeBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expectedServedModel": {
+          "type": "string"
+        },
+        "modelMetadataDigest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeConfigurationIdentity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolvedModel": {
+          "type": "string"
+        },
+        "selection": {
+          "$ref": "#/definitions/AuditReviewerSelection"
+        }
+      },
+      "required": [
+        "backendConfigurationIdentity",
+        "expectedServedModel",
+        "resolvedModel",
+        "selection"
+      ],
+      "type": "object"
+    },
+    "AuditReviewerSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "authenticationRoute": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuditAuthenticationRoute"
+            }
+          ],
+          "default": "daemon_configured_native"
+        },
+        "executionAdapter": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuditExecutionAdapter"
+            }
+          ],
+          "default": "native"
+        },
+        "expectedServedModel": {
+          "description": "Expected authoritative identity; omission requires exact resolved-model matching.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "model",
+        "provider"
+      ],
+      "type": "object"
+    },
+    "AuditScheduling": {
+      "enum": [
+        "automatic",
+        "sequential"
+      ],
+      "type": "string"
+    },
+    "AuditSource": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "snippet"
+              ],
+              "title": "SnippetAuditSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "content",
+            "name",
+            "type"
+          ],
+          "title": "SnippetAuditSource",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "file"
+              ],
+              "title": "FileAuditSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "path",
+            "type"
+          ],
+          "title": "FileAuditSource",
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "description": "Construction and local inspection only: no persistence, client launch or inference.",
+  "properties": {
+    "request": {
+      "additionalProperties": false,
+      "properties": {
+        "agentsEvidence": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "audexGuidance": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "brief": {
+          "type": "string"
+        },
+        "expectedServedModel": {
+          "description": "Explicitly qualified served-model alias for the singular selection.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preflight": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "briefDigest": {
+                  "type": "string"
+                },
+                "contextDigest": {
+                  "type": "string"
+                },
+                "existingRunId": {
+                  "description": "Identical request already commissioned; Start only retrieves that approval.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "identity": {
+                  "type": "string"
+                },
+                "manifestDigest": {
+                  "type": "string"
+                },
+                "protocolVersion": {
+                  "format": "uint32",
+                  "minimum": 0.0,
+                  "type": "integer"
+                },
+                "reviewers": {
+                  "items": {
+                    "$ref": "#/definitions/AuditReviewerBinding"
+                  },
+                  "type": "array"
+                },
+                "snapshotId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "briefDigest",
+                "contextDigest",
+                "identity",
+                "manifestDigest",
+                "protocolVersion",
+                "reviewers",
+                "snapshotId"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Read-only disclosure approved by the operator; required for subscription rosters."
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestKey": {
+          "type": "string"
+        },
+        "reviewers": {
+          "description": "Ordered reviewer roster. Mutually exclusive with the singular native selection.",
+          "items": {
+            "$ref": "#/definitions/AuditReviewerSelection"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "scheduling": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuditScheduling"
+            }
+          ],
+          "default": "automatic"
+        },
+        "source": {
+          "$ref": "#/definitions/AuditSource"
+        }
+      },
+      "required": [
+        "brief",
+        "requestKey",
+        "source"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "request"
+  ],
+  "title": "AuditPreflightParams",
+  "type": "object"
+}

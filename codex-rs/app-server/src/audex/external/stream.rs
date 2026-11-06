@@ -29,6 +29,7 @@ pub(super) struct Collector {
     pub route: String,
     pub billing_source: &'static str,
     pub expected_model: String,
+    pub manifest: super::super::snapshot::manifest::SnapshotManifestV1,
     #[cfg(test)]
     pub checkpoint: Option<super::super::dispatch::Checkpoint>,
 }
@@ -521,6 +522,39 @@ impl Collector {
                 if value["result"].as_str() != Some(text.as_str()) {
                     return Err("external_terminal_public_text_mismatch");
                 }
+                if self.route == "claude_subscription" {
+                    // A cut-off repair may return only its last generation.
+                    // Reuse the shared semantic validator; never concatenate
+                    // captured fragments or turn an unstructured tail into an opinion.
+                    let finished = state
+                        .repairs
+                        .require_finished(message, &value["stop_reason"])
+                        .and_then(|()| {
+                            if state.repairs.has_cutoff_continuation()
+                                && !super::super::result::extract(
+                                    text.as_bytes(),
+                                    &self.identity.assignment_id,
+                                    &self.manifest,
+                                )
+                                .is_ok_and(|opinion| opinion.structured.is_some())
+                            {
+                                Err("external_incomplete_continuation")
+                            } else {
+                                Ok(())
+                            }
+                        });
+                    if let Err(reason) = finished {
+                        self.offer(session, uuid, format!("client-terminal-failed:{uuid}"), "status",
+                            json!({"client_terminal":"failed","terminal_id":uuid,"usage":terminal_usage}).to_string(), None).await?;
+                        // Closing failed capture fences later writes. Retain the
+                        // eligible original prefix first, as for error terminals.
+                        self.capture
+                            .flush()
+                            .await
+                            .map_err(|_| "external_capture_write_failed")?;
+                        return Err(reason);
+                    }
+                }
                 self.offer(
                     session,
                     uuid,
@@ -603,7 +637,7 @@ impl Collector {
             call,
             format!("client-tool-start:{call}"),
             "tool_start",
-            json!({"tool":name,"arguments":safe}).to_string(),
+            json!({"tool":name,"arguments":crate::audex::source::diagnostics::arguments(name, &safe)}).to_string(),
             None,
         )
         .await
@@ -770,7 +804,16 @@ fn project(value: &Value, keys: &[&str]) -> Value {
 
 fn safe_tool_result(block: &Value) -> Result<Value> {
     if block["is_error"] == true {
-        return Ok(json!({"error":"source_tool_error"}));
+        // Only complete, allow-listed source messages cross this privacy boundary.
+        // Unknown envelopes or redacted errors still retain the failure fact.
+        let content = &block["content"];
+        let text = content.as_str().or_else(|| {
+            let blocks = content.as_array()?;
+            let mut texts = blocks.iter().filter(|b| b["type"] == "text");
+            let text = texts.next()?["text"].as_str()?;
+            texts.next().is_none().then_some(text)
+        });
+        return Ok(crate::audex::source::diagnostics::failure(text));
     }
     let content = &block["content"];
     let text = if let Some(text) = content.as_str() {

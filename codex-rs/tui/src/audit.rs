@@ -488,7 +488,8 @@ pub(crate) async fn execute(
                 .ok_or("source path must be UTF-8")?
                 .to_owned();
             }
-            let params = AuditStartParams {
+            let mut params = AuditStartParams {
+                preflight: None,
                 reviewers: args.reviewers.clone(),
                 scheduling: args.scheduling,
                 expected_served_model: args.expected_served_model,
@@ -522,6 +523,12 @@ pub(crate) async fn execute(
                 audex_guidance: args.audex_guidance,
                 agents_evidence: args.agents_evidence,
             };
+            params.preflight = Some(
+                audits
+                    .preflight(params.clone())
+                    .await
+                    .map_err(|e| e.to_string())?,
+            );
             let (decision, receiver) = oneshot::channel();
             events.send(AppEvent::AuditConfirm {
                 thread_id,

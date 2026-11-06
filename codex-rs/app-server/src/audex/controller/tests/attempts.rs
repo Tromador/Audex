@@ -803,7 +803,7 @@ async fn turn_end_during_uncommitted_control_does_not_claim_the_buffer_is_durabl
 }
 
 #[tokio::test]
-async fn invalid_or_failed_terminal_evidence_keeps_the_available_prefix_without_success()
+async fn unstructured_completion_and_failed_terminal_keep_distinct_contributions()
 -> anyhow::Result<()> {
     for invalid_result in [true, false] {
         let (_temp, controller, fake, id, attempts) = setup().await?;
@@ -825,7 +825,21 @@ async fn invalid_or_failed_terminal_evidence_keeps_the_available_prefix_without_
         let failed = store
             .attempt_by_assignment(&id, &attempts[0].assignment_id)
             .await?;
-        assert_eq!(failed.assignment_state, AssignmentState::Failed);
+        assert_eq!(
+            failed.assignment_state,
+            if invalid_result {
+                AssignmentState::Succeeded
+            } else {
+                AssignmentState::Failed
+            }
+        );
+        assert_eq!(
+            store
+                .result_extraction(&failed.assignment_id)
+                .await?
+                .is_some(),
+            invalid_result
+        );
         assert_eq!(
             store.capture_state(&failed.assignment_id).await?.cutoff,
             Some(1)

@@ -106,14 +106,14 @@ impl<'call> ToolExecutor<ToolCall<'call>> for SourceTool {
                         &call.turn_id,
                         &call.call_id,
                         "tool_start",
-                        json!({"tool":self.name}).to_string(),
+                        json!({"tool":self.name,"arguments":super::source::diagnostics::arguments_json(self.name, arguments)}).to_string(),
                     )
                     .await
                     .map_err(|_| {
                         FunctionCallError::RespondToModel("activity capture unavailable".to_owned())
                     })?;
             }
-            let value = self.service.execute(self.name, arguments).await?;
+            let result = self.service.execute(self.name, arguments).await;
             if let Some(capture) = self.capture.get() {
                 if !capture.allowed().await {
                     return Err(FunctionCallError::RespondToModel(
@@ -125,14 +125,25 @@ impl<'call> ToolExecutor<ToolCall<'call>> for SourceTool {
                         &call.turn_id,
                         &call.call_id,
                         "tool_result",
-                        value.to_string(),
+                        match &result {
+                            Ok(value) => value.clone(),
+                            Err(error) => {
+                                super::source::diagnostics::failure(Some(&error.to_string()))
+                            }
+                        }
+                        .to_string(),
                     )
                     .await
                     .map_err(|_| {
                         FunctionCallError::RespondToModel("activity capture unavailable".to_owned())
                     })?;
             }
-            Ok(Box::new(JsonToolOutput::new(value).with_external_context()) as Box<dyn ToolOutput>)
+            let value = result?;
+            Ok(Box::new(
+                JsonToolOutput::new(value)
+                    .with_full_output()
+                    .with_external_context(),
+            ) as Box<dyn ToolOutput>)
         })
     }
 }

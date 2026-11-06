@@ -99,6 +99,7 @@ stream_max_retries=0
     let audits = AuditClient::new(session.request_handle());
     let run = audits
         .start(AuditStartParams {
+            preflight: None,
             request_key: "s4-owned-activity".into(),
             source: AuditSource::Snippet {
                 name: "source.rs".into(),

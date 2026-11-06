@@ -44,26 +44,15 @@ async fn rejection_scenario() -> Result<()> {
                 action,
                 AppEventSender::new(tx),
             ));
-            let event = tokio::time::timeout(Duration::from_secs(10), receive.recv())
-                .await?
-                .unwrap();
-            let AppEvent::AuditConfirm {
-                params, decision, ..
-            } = event
-            else {
-                panic!("confirmation before submission")
-            };
-            let text = codex_app_server_client::audit::reviewer_selection_disclosure(&params);
-            assert!(text.contains(&format!(
-                "{}. audit-test / mock_provider; executor={executor}; authentication route={route}",
-                position + 1
-            )));
-            assert!(text.contains("including queued reviewers"));
-            assert!(text.contains("unavailable for commissioning"));
-            assert!(provider.received_requests().await.unwrap().is_empty());
-            decision.send(true).unwrap();
-            let error = task.await?.unwrap_err();
+            let error = tokio::time::timeout(Duration::from_secs(10), task)
+                .await??
+                .unwrap_err();
             assert!(error.contains("unavailable"), "{error}");
+            assert!(
+                receive.recv().await.is_none(),
+                "unavailable roster must not reach confirmation"
+            );
+            assert!(provider.received_requests().await.unwrap().is_empty());
             assert!(
                 audits
                     .list(AuditListParams {

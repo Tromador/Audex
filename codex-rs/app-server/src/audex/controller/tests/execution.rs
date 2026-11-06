@@ -22,6 +22,7 @@ mod external;
 mod foundations;
 mod preparation;
 mod recovery;
+mod source_fidelity;
 
 // These native fixtures explicitly attest the model they serve. Missing/mismatch
 // policies are exercised separately through the public S2 transport fixtures.
@@ -398,7 +399,7 @@ fn real_codex_tools_context_result_and_independence() -> anyhow::Result<()> {
 }
 
 #[test]
-fn invalid_results_and_provider_failure_do_not_redispatch() -> anyhow::Result<()> {
+fn unstructured_opinions_and_provider_failure_do_not_redispatch() -> anyhow::Result<()> {
     run_test_with_large_stack("audex-invalid-execution", || async {
         for case in [
             "malformed",
@@ -446,7 +447,10 @@ fn invalid_results_and_provider_failure_do_not_redispatch() -> anyhow::Result<()
                 loop {
                     controller.drive(&id).await?;
                     let current = controller.store().await?.load_run(&id).await?;
-                    if current.assignment_state == AssignmentState::Failed {
+                    if matches!(
+                        current.assignment_state,
+                        AssignmentState::Failed | AssignmentState::Succeeded
+                    ) {
                         return anyhow::Ok(current);
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -454,21 +458,29 @@ fn invalid_results_and_provider_failure_do_not_redispatch() -> anyhow::Result<()
             })
             .await
             .expect("failed attempt")?;
-            assert_eq!(failed.operation_state, OperationState::Failed, "{case}");
-            assert_eq!(failed.phase, RunPhase::Reviewing, "{case}");
-            assert!(!failed.collection_ready && failed.report.is_none());
-            assert!(failed.outcome.is_none() && failed.findings.is_empty());
+            assert!(failed.findings.is_empty());
             let (error, retry) = recovery::issue(&controller, &run.operation_id).await?;
-            assert!(!error.expect("failure diagnostic").is_empty());
-            assert_eq!(
-                retry.as_deref(),
-                Some(if case == "provider_failure" {
-                    "never_automatically_retry"
-                } else {
-                    "non_retryable_invalid_result"
-                }),
-                "{case}"
-            );
+            if case == "provider_failure" {
+                assert_eq!(failed.operation_state, OperationState::Failed);
+                assert_eq!(failed.phase, RunPhase::Reviewing);
+                assert!(!failed.collection_ready && failed.report.is_none());
+                assert!(!error.expect("failure diagnostic").is_empty());
+                assert_eq!(retry.as_deref(), Some("never_automatically_retry"));
+            } else {
+                assert_eq!(failed.assignment_state, AssignmentState::Succeeded);
+                assert!(failed.collection_ready);
+                assert!(error.is_none() && retry.is_none());
+                let extraction = controller
+                    .store()
+                    .await?
+                    .result_extraction(&run.assignment_id)
+                    .await?
+                    .unwrap();
+                assert_eq!(
+                    extraction.status,
+                    codex_app_server_protocol::AuditExtractionStatus::UnstructuredOpinion
+                );
+            }
             for _ in 0..3 {
                 controller.tick().await?;
             }

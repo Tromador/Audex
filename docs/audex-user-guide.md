@@ -94,7 +94,45 @@ For source submissions, paths are resolved relative to the **conversation's work
 
 By default, TUI audits use the **current operator conversation's model and provider**. Change the operator model using the normal TUI controls before proposing an audit, or override it explicitly with `--model` and `--provider`. Always inspect the values on the confirmation screen before approving, especially when different models have different costs.
 
-The reviewer's reasoning effort is taken from the conversation's current selection.
+For singular native selections, the reviewer's reasoning effort is taken from the conversation's current selection. Repeated `--reviewer` selections preserve their explicit order and keep duplicate reviewers independent. Native shorthand remains `PROVIDER:MODEL`; JSON provides the typed route and optional served-model binding.
+
+### Claude subscription reviewers
+
+Audex supports `claude_subscription` through the official Claude client. `claude_api` and `ollama_local` remain unavailable.
+
+Select the subscription route explicitly. The same selection works in `/audit` and the CLI:
+
+```bash
+audex audit --file ./example.rs \
+    --reviewer 'openai:YOUR_NATIVE_MODEL' \
+    --reviewer '{"provider":"anthropic","model":"claude-haiku-5-5","executionAdapter":"claude_client","authenticationRoute":"claude_subscription"}'
+```
+
+Omit the native entry for a subscription-only run. `--provider anthropic` alone does not select a subscription. A qualified served-model alias can be supplied as `expectedServedModel`; the client is still invoked with the requested model. No route, model or executable substitution is permitted.
+
+The daemon reads `$CODEX_HOME/audex/reviewer-backends.json`. Provisioning this configuration, its dedicated profile and its runtime directory is an explicit operator action. The subscription section is:
+
+```json
+{
+  "version": 1,
+  "claudeSubscription": {
+    "executable": "/absolute/resolved/path/to/claude-2.1.314",
+    "clientVersion": "2.1.314",
+    "profile": "/absolute/resolved/path/to/dedicated-profile",
+    "runtimeRoot": "/var/tmp/audex"
+  }
+}
+```
+
+A dedicated subscription profile and the official Claude Code executable version 2.1.314 are required. Do not put credentials in this file. The profile must pass the existing isolation policy, including disabled hooks, connectors, synchronised plugins/skills, memory and cross-session messaging. The runtime must be an owned private directory outside the daemon's `HOME`, separate from the profile and short enough for the client's 103-byte Unix-socket path limit. Preflight refuses missing or incompatible setup; it does not create directories, modify a profile, refresh credentials or launch a client.
+
+Before TUI confirmation, the daemon checks the entire ordered roster, including queued reviewers. Disclosure identifies source, brief and context hashes, execution/authentication routes, requested/resolved/expected served models, executable/version/hash, profile, runtime and backend/policy bindings. Start checks them again. Drift refuses commissioning without creating runnable attempts. Account eligibility and effective billing are checked by the owned client before Audex writes the prompt. The CLI prints the disclosure during submission and does not pause for confirmation.
+
+An identical request key retrieves the existing audit even after configuration becomes unavailable; it starts no new work. Older audits without configuration bindings remain retrievable when their retained request identity matches. Changed request content under that key is refused.
+
+This route consumes subscription quota. The official client can initiate corrective requests: up to three continuations after truncated output, two retries for a missing tool call and one empty-output nudge **per occurrence**. These are not a total request ceiling. Observed corrections and anomalies are retained in activity and reports, including interrupted attempts.
+
+Cancel, Ignore, Retry and whole-audit Abort retain their existing exact-target behaviour. Stopping the owned client is best effort; already initiated requests or remote quota charges may continue. Retry creates fresh execution from the retained source and policy, and refuses configuration drift. Reconnect, viewing and history navigation do not replay or resume a subscription request.
 
 ### Natural-language requests
 
@@ -185,7 +223,9 @@ Retry creates a fresh attempt using the retained source and original brief, with
 
 Control commands print their action key before sending. If an acknowledgement is lost, repeat the same command with that key and identical arguments. The server returns the original decision without commissioning another attempt. A zero exit status acknowledges the control decision, not a successful review.
 
-`attempt read` returns committed activity as JSON, with the next sequence cursor and any output cutoff, capture gap, truncation or failure. Assistant fragments remain unvalidated material, including incomplete or invalid JSON. Source-tool readbacks and status entries are labelled separately. Only the canonical validated terminal result establishes a completed review. Capture runs without an open reader and retained entries survive daemon restart.
+`attempt read` returns committed activity as JSON, with the next sequence cursor and any output cutoff, capture gap, truncation or failure. Assistant fragments remain unvalidated material. Source-tool readbacks and status entries are labelled separately. A completed opinion requires verified successful execution and non-empty final output; a partial message or disconnected client is insufficient. Capture runs without an open reader and retained entries survive daemon restart.
+
+For completed opinions, the attempt includes extraction status and the exact original text in `rawResult`. The TUI history and frozen report also show the full original opinion when structured extraction fails. An unstructured opinion is completed work, so malformed JSON alone does not require Ignore or Retry.
 
 ### CLI exit codes
 
@@ -295,7 +335,7 @@ If a start request loses its acknowledgement, **do not automatically submit anot
 
 If the server retained a matching request before its response failed, the error includes its run ID and request key. Reusing a key for different input returns an explicit idempotency conflict without a recovery run ID. Recover that run with `audit read RUN --follow` or `/audit read RUN`. An identical retry compares the captured source, explicit brief and requested reviewer settings, not today's resolved model catalogue or policy. Changed source contents or explicit inputs conflict with the original key. Older runs created before stable requested-input identities were recorded retain their conservative legacy comparison; recover using a known run ID or inspect the listing; the server does not claim that a legacy request key alone proves matching input.
 
-Compatibility is checked using `audit/capabilities`, independently of historical runs and artefact integrity. Both daemon and client must support this endpoint and audit protocol version **2**.
+Compatibility is checked using `audit/capabilities`, independently of historical runs and artefact integrity. Both daemon and client must support this endpoint and audit protocol version **7**. Older daemons are refused before submission; the audit workflow does not upgrade them or fall back automatically.
 
 Preparation leases are renewed while their owner remains active and unexpired. Cancellation, explicit slot release and lease expiry fence submission; an expired owner cannot revive its lease. Known unsubmitted failures and abandoned preparation are cleaned up without creating replacement inference. Potentially submitted work remains observation-only.
 
@@ -315,7 +355,17 @@ If `audit cancel RUN` remains attached because the outcome is unresolved, wait f
 
 The TUI equivalent, `/audit release-slot RUN`, defaults to **No** and requires explicit confirmation. Release permanently fences resubmission of the original operation. It does not mark the audit complete or cancelled, prevent observation, or discard late valid results.
 
-A report can identify findings with severity and confidence, but those values are reviewer assessments. Treat references to source lines and byte offsets as evidence **to verify**, not automatic authorisation to modify code.
+A completed review is an independent model opinion for you to assess. Completion means the authorised reviewer successfully finished and produced non-empty output. It does not establish that the opinion is correct or useful.
+
+Structured extraction has three possible statuses:
+
+- **Validated structured:** the original JSON passed schema, identity and source-reference checks.
+- **Deterministically normalised:** those checks passed after removing a leading UTF-8 byte-order mark, a whole-response Markdown `json` fence, or both. LF and CRLF fence delimiters and outer ASCII whitespace are accepted. Each transformation and its parse-input digest are recorded.
+- **Unstructured opinion:** extraction failed. The full original text is retained with the discrepancy; Audex does not invent a summary or findings. Plain English, malformed JSON and nonsensical text receive the same treatment. Incorrect claimed assignment IDs or source references cannot override Audex's verified provenance.
+
+Raw output is immutable and bounded to 1 MiB. Empty, invalid UTF-8 or oversized output cannot establish a completed opinion. Failed, interrupted or unattributed execution remains incomplete even when some text was captured. Audex never repeats inference to repair output formatting.
+
+A report can identify structured findings with severity and confidence, but those values are reviewer assessments. Treat references to source lines and byte offsets as evidence **to verify**, not automatic authorisation to modify code.
 
 New result commits derive authoritative line numbers from captured source bytes and strictly validated byte ranges. Incorrect, partial or absent numeric reviewer line claims do not discard valid findings. The exact raw reviewer response is preserved, including its original claims; finding identities remain bound to that response. Lines are 1-based and LF-delimited; CRLF is one delimiter. Byte ranges remain half-open, and the end line contains the last included byte. Report format 2 distinguishes verified line ranges from migrated, unverified reviewer claims. Existing format-1 reports remain immutable; their line numbers were not checked against source and must be treated as reviewer claims.
 
@@ -360,8 +410,8 @@ Stopping the daemon is optional after using the TUI or CLI. Leave it running whe
 
 ## 9. Current boundaries
 
-The implemented auditing workflow accepts **one source file or snippet and one reviewer per run**. It produces durable, evidence-oriented results and integrates those results with the normal Codex operator conversation.
+The implemented auditing workflow accepts **one source file or snippet and an ordered roster of independent reviewers per run**. Native reviewers and explicitly configured Claude subscription reviewers share the sealed snapshot and common brief. Report format 5 preserves each reviewer's attribution and extraction status, including full unstructured opinions and completed peers alongside failed or interrupted attempts. Historical reports, including formats 2, 3 and 4, retain their original identities and bytes. Clients use audit protocol 8; incompatible daemons must be updated explicitly before submitting new work.
 
-Automatic whole-repository source selection, simultaneous multi-model review, finding deduplication, cross-reviewer reconciliation, and automated build/test verification are **not yet user-facing audit features**. Use separate runs and operator-led verification for those tasks.
+Automatic whole-repository source selection, finding deduplication, cross-reviewer reconciliation and automated build/test verification remain outside the current public workflow.
 
 The native Codex conversation remains available for other work. An Audex reviewer is a distinct, restricted execution context, not an unrestricted second operator.

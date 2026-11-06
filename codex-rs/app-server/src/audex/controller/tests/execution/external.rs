@@ -10,6 +10,7 @@ mod publication_races;
 mod repairs;
 mod restart_qualification;
 mod socket_qualification;
+mod source_tools;
 mod stop_storage;
 mod stream_qualification;
 mod subscription_policy;

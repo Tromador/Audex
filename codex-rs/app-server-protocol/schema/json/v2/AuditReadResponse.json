@@ -33,7 +33,7 @@
           "type": "boolean"
         },
         "completed": {
-          "description": "True only for a canonical validated result, never inferred from activity.",
+          "description": "An authoritative completed opinion, independent of structured extraction. Never inferred from activity, process exit alone or reviewer identity claims.",
           "type": "boolean"
         },
         "current": {
@@ -51,6 +51,17 @@
             "string",
             "null"
           ]
+        },
+        "extraction": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AuditResultExtraction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent for historical results predating the shared extraction contract."
         },
         "localExecution": {
           "anyOf": [
@@ -210,6 +221,14 @@
       ],
       "type": "string"
     },
+    "AuditExtractionStatus": {
+      "enum": [
+        "validated_structured",
+        "deterministically_normalised",
+        "unstructured_opinion"
+      ],
+      "type": "string"
+    },
     "AuditGenerationIdentity": {
       "properties": {
         "evidenceScope": {
@@ -290,6 +309,53 @@
         "committed",
         "failed",
         "unknown"
+      ],
+      "type": "string"
+    },
+    "AuditResultExtraction": {
+      "additionalProperties": false,
+      "description": "Versioned deterministic extraction facts; completion provenance stays on the attempt.",
+      "properties": {
+        "parseDigest": {
+          "type": "string"
+        },
+        "rawDigest": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/AuditExtractionStatus"
+        },
+        "transformations": {
+          "items": {
+            "$ref": "#/definitions/AuditResultTransformation"
+          },
+          "type": "array"
+        },
+        "validationError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "parseDigest",
+        "rawDigest",
+        "status",
+        "transformations",
+        "version"
+      ],
+      "type": "object"
+    },
+    "AuditResultTransformation": {
+      "enum": [
+        "utf8_bom",
+        "markdown_json_fence"
       ],
       "type": "string"
     },

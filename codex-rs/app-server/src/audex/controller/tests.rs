@@ -5,6 +5,8 @@ mod attempts;
 mod corrections;
 mod execution;
 mod foundations;
+#[cfg(target_os = "linux")]
+mod preflight;
 mod remaining;
 mod reporting;
 mod residual;
@@ -65,7 +67,7 @@ impl Dispatch for Fake {
                     .fetch_one(&mut connection)
                     .await?;
                 self.reconcile_schema_ready
-                    .store(version == 16, Ordering::SeqCst);
+                    .store(version == 17, Ordering::SeqCst);
             }
             Ok(())
         })
@@ -562,7 +564,7 @@ async fn crash_windows_use_evidence_without_replaying_dispatch() {
 }
 
 #[tokio::test]
-async fn malformed_results_no_redispatch_and_quiesce_blocks_new_work() {
+async fn unstructured_results_do_not_redispatch_and_quiesce_blocks_new_work() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (controller, fake, _) = fixture(&temp).await;
     let id = start(&controller, "invalid-result").await;
@@ -578,9 +580,24 @@ async fn malformed_results_no_redispatch_and_quiesce_blocks_new_work() {
         &run.operation_id,
         WorkState::Completed(b"not JSON".to_vec()),
     );
-    controller.tick().await.expect("reject");
+    controller
+        .tick()
+        .await
+        .expect("complete unstructured opinion");
     controller.tick().await.expect("no retry");
-    assert_eq!(read(&controller, &id).await["phase"], "reviewing");
+    assert_eq!(read(&controller, &id).await["phase"], "completed");
+    let extraction = controller
+        .store()
+        .await
+        .unwrap()
+        .result_extraction(&run.assignment_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        extraction.status,
+        codex_app_server_protocol::AuditExtractionStatus::UnstructuredOpinion
+    );
     assert_eq!(fake.starts.load(Ordering::SeqCst), 1);
     let invalid_id = start(&controller, "invalid-identities").await;
     controller.tick().await.expect("dispatch semantic case");
@@ -597,8 +614,28 @@ async fn malformed_results_no_redispatch_and_quiesce_blocks_new_work() {
     }))
     .expect("result");
     fake.replace(&invalid_run.operation_id, WorkState::Completed(raw));
-    controller.tick().await.expect("semantic rejection");
-    assert_eq!(read(&controller, &invalid_id).await["phase"], "reviewing");
+    controller
+        .tick()
+        .await
+        .expect("unstructured identity discrepancy");
+    controller
+        .tick()
+        .await
+        .expect("publish opinion without findings");
+    assert_eq!(read(&controller, &invalid_id).await["phase"], "completed");
+    let extraction = controller
+        .store()
+        .await
+        .unwrap()
+        .result_extraction(&invalid_run.assignment_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        extraction.status,
+        codex_app_server_protocol::AuditExtractionStatus::UnstructuredOpinion
+    );
+    assert!(extraction.validation_error.unwrap().contains("snapshot"));
     assert_eq!(fake.starts.load(Ordering::SeqCst), 2);
     controller.quiesce().await;
     assert!(

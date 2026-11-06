@@ -4,7 +4,7 @@ use crate::audex::snapshot::manifest::sha256_hex;
 use crate::audex::store::admission::AdmissionIdentity;
 
 #[tokio::test]
-async fn native_format_four_freezes_policy_models_usage_and_late_receipts_separately()
+async fn current_report_freezes_policy_models_usage_and_late_receipts_separately()
 -> anyhow::Result<()> {
     let (_temp, controller, fake, id, attempts) = super::super::attempts::setup().await?;
     let store = controller.store().await?;
@@ -47,7 +47,7 @@ async fn native_format_four_freezes_policy_models_usage_and_late_receipts_separa
     }
     let frozen = store.freeze_report(&id).await?;
     let before = serde_json::to_vec(&frozen)?;
-    assert_eq!(frozen.format_version, 4);
+    assert_eq!(frozen.format_version, 5);
     let value = serde_json::to_value(&frozen)?;
     let facts = &value["reviewers"][0]["provider_facts"];
     assert_eq!(facts["executor"]["value"], "native");
@@ -102,9 +102,9 @@ async fn native_format_four_freezes_policy_models_usage_and_late_receipts_separa
 }
 
 #[tokio::test]
-async fn frozen_format_three_recovers_before_render_and_after_candidate_without_upgrade()
+async fn frozen_formats_three_and_four_recover_before_render_and_after_candidate_without_upgrade()
 -> anyhow::Result<()> {
-    for candidate_exists in [false, true] {
+    for (version, candidate_exists) in [(3, false), (3, true), (4, false), (4, true)] {
         let (_temp, controller, fake, id, attempts) = super::super::attempts::setup().await?;
         let store = controller.store().await?;
         for attempt in &attempts {
@@ -113,9 +113,13 @@ async fn frozen_format_three_recovers_before_render_and_after_candidate_without_
         let mut input = store.freeze_report(&id).await?;
         // Reconstruct the pre-upgrade writer in this isolated fixture. The real
         // pre-upgrade golden inputs independently pin the old bytes and digest.
-        input.format_version = 3;
+        input.format_version = version;
         for reviewer in &mut input.reviewers {
-            reviewer.provider_facts = None;
+            if version == 3 {
+                reviewer.provider_facts = None;
+            }
+            reviewer.opinion = None;
+            reviewer.source_tools = None;
         }
         let raw = serde_json::to_string(&input)?;
         let expected = collection::render(&input)?;
@@ -141,11 +145,12 @@ async fn frozen_format_three_recovers_before_render_and_after_candidate_without_
         let report = record(reopened.publish_report(&id, 0).await?);
         assert_eq!(report.id, expected.id);
         assert_eq!(reopened.read_report(&report)?, expected.bytes);
-        let version: i64 = sqlx::query_scalar("SELECT format_version FROM reports WHERE id=?")
-            .bind(&report.id)
-            .fetch_one(&store.pool_for_tests())
-            .await?;
-        assert_eq!(version, 3);
+        let stored_version: i64 =
+            sqlx::query_scalar("SELECT format_version FROM reports WHERE id=?")
+                .bind(&report.id)
+                .fetch_one(&store.pool_for_tests())
+                .await?;
+        assert_eq!(stored_version, i64::from(version));
         assert_eq!(record(reopened.publish_report(&id, 0).await?), report);
         assert_eq!(fake.starts.load(Ordering::SeqCst), 3);
     }

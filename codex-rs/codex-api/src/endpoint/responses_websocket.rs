@@ -60,6 +60,7 @@ struct WsStream {
     tx_command: mpsc::Sender<WsCommand>,
     rx_message: mpsc::UnboundedReceiver<Result<Message, WsError>>,
     pump_task: tokio::task::JoinHandle<()>,
+    response_ids: std::collections::HashSet<String>,
 }
 
 enum WsCommand {
@@ -133,6 +134,7 @@ impl WsStream {
             tx_command,
             rx_message,
             pump_task,
+            response_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -959,6 +961,42 @@ async fn run_websocket_response_stream(
                     }
                     continue;
                 }
+                // Public Responses lifecycle objects report the model used for this
+                // response. Only the admitted, exclusively owned WebSocket generation
+                // may use that field; HTTP and ordinary session semantics stay intact.
+                let response_model = if admission.is_some()
+                    && let Some(response) = event.lifecycle_response()
+                {
+                    let id = response
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .ok_or_else(|| {
+                            ApiError::Transport(TransportError::GenerationDenied(
+                                "missing websocket response identity".into(),
+                            ))
+                        })?;
+                    if event.kind() == "response.created" {
+                        if response_id.is_some()
+                            || timing_log_context.previous_response_id.as_deref() == Some(id)
+                            || !ws_stream.response_ids.insert(id.to_owned())
+                        {
+                            return Err(ApiError::Transport(TransportError::GenerationDenied(
+                                "reused websocket response identity".into(),
+                            )));
+                        }
+                    } else if response_id.as_deref() != Some(id) {
+                        return Err(ApiError::Transport(TransportError::GenerationDenied(
+                            "websocket response identity changed".into(),
+                        )));
+                    }
+                    response
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                } else {
+                    None
+                };
                 let model = event.response_model();
                 // Preserve terminal usage before any accompanying notification can block.
                 let event = match process_responses_event(event) {
@@ -990,6 +1028,17 @@ async fn run_websocket_response_stream(
                     Err(error) => {
                         return Err(error.into_api_error());
                     }
+                }
+                // Created is delivered first so the durable receipt binds the response
+                // ID before its model. Conflicting header/body observations both reach
+                // the existing admission policy; neither silently overrides the other.
+                if let Some(model) = response_model
+                    && last_server_model.as_deref() != Some(model.as_str())
+                {
+                    let _ = tx_event
+                        .send(Ok(ResponseEvent::ServerModel(model.clone())))
+                        .await;
+                    last_server_model = Some(model);
                 }
                 if completion.is_some() {
                     if awaiting_interrupt_ack {

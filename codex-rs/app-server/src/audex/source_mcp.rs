@@ -66,7 +66,12 @@ impl ServerHandler for SourceMcpServer {
                 let schema = serde_json::to_value(spec.parameters)
                     .and_then(serde_json::from_value)
                     .map_err(|_| ErrorData::internal_error("invalid source schema", None))?;
-                Ok(Tool::new(spec.name, spec.description, Arc::new(schema)))
+                let mut meta = rmcp::model::MetaObject::new();
+                meta.insert(
+                    "anthropic/maxResultSizeChars".into(),
+                    serde_json::json!(super::source::MAX_RESULT_BYTES),
+                );
+                Ok(Tool::new(spec.name, spec.description, Arc::new(schema)).with_meta(meta))
             })
             .collect::<Result<Vec<_>, ErrorData>>()?;
         Ok(ListToolsResult::with_all_items(tools))

@@ -139,7 +139,8 @@ impl<T: HttpTransport> EndpointSession<T> {
 
         let mut policy = self.provider.retry.to_policy();
         if admission.is_some() {
-            policy.max_attempts = 1;
+            // The retry loop includes attempt zero: no retries means one physical send.
+            policy.max_attempts = 0;
         }
         let stream = run_with_request_telemetry(
             policy,

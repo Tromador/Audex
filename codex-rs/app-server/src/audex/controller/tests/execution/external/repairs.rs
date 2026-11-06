@@ -2,6 +2,9 @@
 use super::capture::{assert_no_private_files, settled};
 use super::*;
 
+#[path = "repairs/finished_output.rs"]
+mod finished_output;
+
 pub(super) async fn seed(
     controller: &AuditController,
     temp: &tempfile::TempDir,

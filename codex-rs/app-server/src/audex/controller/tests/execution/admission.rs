@@ -6,6 +6,9 @@ use codex_protocol::protocol::{AgentStatus, EventMsg};
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::Semaphore;
 
+mod failure_causes;
+mod served_model;
+
 async fn wait(signal: &Notify) -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(10), signal.notified()).await?;
     Ok(())
@@ -27,7 +30,7 @@ async fn settled(threads: &ThreadManager, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn native_reader() -> crate::audex::dispatch::Listen {
+pub(super) fn native_reader() -> crate::audex::dispatch::Listen {
     Arc::new(|_, thread| {
         Box::pin(async move {
             tokio::spawn(async move {
@@ -414,50 +417,10 @@ fn native_http_errors_and_context_overflow_do_not_replay_or_compact() -> anyhow:
 #[test]
 fn native_websocket_errors_cannot_resend_or_fall_back_to_another_generation() -> anyhow::Result<()>
 {
-    run_test_with_large_stack("audex-native-ws-no-resend", || async {
-        for (status, code) in [
-            (401, "unauthorized"),
-            (503, "server_error"),
-            (400, "previous_response_not_found"),
-        ] {
-            let provider=Provider::new(true,vec![json!({"type":"error","status":status,"error":{"code":code,"message":"fixture failure"}})]).await;
-            let temp = tempfile::tempdir()?;
-            let (controller, threads) = fixture_with_transport(
-                &temp,
-                &provider.uri(),
-                CodexAuth::from_api_key("dummy"),
-                false,
-                native_reader(),
-                DispatchTestHooks::default(),
-                true,
-            )
-            .await;
-            let id = start(&controller, "websocket-no-replay").await;
-            controller.tick().await?;
-            let store = controller.store().await?;
-            let run = store.load_run_metadata(&id).await?;
-            let (thread, _, _) = store
-                .execution(&run.operation_id)
-                .await?
-                .expect("execution");
-            settled(&threads, &thread).await?;
-            assert_eq!(provider.generations().await, 1);
-            let records = store.generation_records(&run.assignment_id).await?;
-            assert_eq!(
-                records.len(),
-                1,
-                "neither WS recovery nor HTTP fallback can obtain a second permit"
-            );
-            assert!(
-                records[0].send_started_at_ms.is_some() && records[0].confirmed_at_ms.is_none()
-            );
-            threads
-                .shutdown_all_threads_bounded(Duration::from_secs(5))
-                .await;
-            provider.shutdown().await;
-        }
-        Ok(())
-    })
+    run_test_with_large_stack(
+        "audex-native-ws-no-resend",
+        failure_causes::websocket_errors,
+    )
 }
 
 #[test]
@@ -521,8 +484,16 @@ fn legitimate_websocket_tool_continuation_gets_a_fresh_one_use_request_without_c
         let result = store.load_run(&id).await?;
         assert_eq!(
             result.assignment_state,
-            AssignmentState::Failed,
-            "an invalid terminal model response is still invalid"
+            AssignmentState::Succeeded,
+            "successful native completion is independent of structured extraction"
+        );
+        assert_eq!(
+            store
+                .result_extraction(&run.assignment_id)
+                .await?
+                .unwrap()
+                .status,
+            codex_app_server_protocol::AuditExtractionStatus::UnstructuredOpinion
         );
         assert!(result.findings.is_empty());
         assert_eq!(

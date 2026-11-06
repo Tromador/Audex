@@ -1,5 +1,8 @@
 //! S2 public CLI/IPC commissioning, exact controls and native attribution. Loopback only.
 use super::*;
+#[cfg(target_os = "linux")]
+#[path = "legacy.rs"]
+mod legacy;
 use sqlx::Row;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
@@ -335,7 +338,7 @@ async fn public_three_reviewer_cli_preflight_replay_report_and_restart() -> Resu
     let frozen_raw: String = sqlx::query_scalar("SELECT s.input_json FROM audit_report_selections s JOIN audit_runs r ON r.authoritative_selection_id=s.id WHERE r.id=?")
         .bind(&id).fetch_one(&frozen_db).await?;
     let frozen: Value = serde_json::from_str(&frozen_raw)?;
-    assert_eq!(frozen["format_version"], 4);
+    assert_eq!(frozen["format_version"], 5);
     for reviewer in frozen["reviewers"].as_array().context("frozen reviewers")? {
         let facts = &reviewer["provider_facts"];
         assert_eq!(facts["route"]["value"], "daemon_configured_native");

@@ -87,7 +87,7 @@ struct SourceArgs {
 
 #[derive(Debug, Subcommand)]
 enum Action {
-    /// Control one reviewer attempt or read its retained, unvalidated activity.
+    /// Control one reviewer attempt or read its retained opinion and activity.
     Attempt {
         #[command(subcommand)]
         action: attempts::AttemptCommand,
@@ -392,7 +392,8 @@ async fn execute(
                 !request_key.trim().is_empty(),
                 "--request-key must not be empty"
             );
-            let params = AuditStartParams {
+            let mut params = AuditStartParams {
+                preflight: None,
                 request_key: request_key.clone(),
                 source: source.context("missing audit source")?,
                 model: if reviewers.is_empty() {
@@ -426,8 +427,14 @@ async fn execute(
             };
             eprint!(
                 "{}",
-                codex_app_server_client::audit::reviewer_selection_disclosure(&params)
+                codex_app_server_client::audit::start_disclosure(&params)
             );
+            let preflight = audits.preflight(params.clone()).await?;
+            eprint!(
+                "{}",
+                codex_app_server_client::audit::preflight_binding_disclosure(&preflight)
+            );
+            params.preflight = Some(preflight);
             eprintln!("Audit request key: {request_key}");
             let run = audits.start(params).await.inspect_err(|error| {
                 if error.start_acknowledgement_uncertain() {

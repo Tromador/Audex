@@ -1231,6 +1231,7 @@ impl MessageProcessor {
                 .await;
             }
             request @ (ClientRequest::AuditCapabilities { .. }
+            | ClientRequest::AuditPreflight { .. }
             | ClientRequest::AuditStart { .. }
             | ClientRequest::AuditRead { .. }
             | ClientRequest::AuditList { .. }

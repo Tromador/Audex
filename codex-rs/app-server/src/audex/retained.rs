@@ -56,7 +56,7 @@ pub(super) struct ExecutionLimits {
 }
 
 impl ExecutionLimits {
-    fn native() -> Self {
+    pub(super) fn native() -> Self {
         let access = AccessLimits::default();
         Self {
             request_retries: 0,

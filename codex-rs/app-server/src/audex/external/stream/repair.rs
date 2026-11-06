@@ -67,9 +67,30 @@ pub(super) struct Tracker {
     notices: HashSet<String>,
     prompted: Option<Class>,
     chain: Option<(Class, u8)>,
+    cutoff_continuation: bool,
 }
 
 impl Tracker {
+    /// The pinned client can emit a successful result for an unfinished turn.
+    /// Require end_turn evidence bound to the final generation, and refuse any
+    /// conflicting terminal stop. Missing evidence is not a completed opinion.
+    pub(super) fn require_finished(&self, message: &str, terminal_stop: &Value) -> Result<()> {
+        let observed = self.messages.get(message).and_then(|g| g.stop.as_deref());
+        let terminal = terminal_stop.as_str();
+        if self.last.as_deref() != Some(message)
+            || (!terminal_stop.is_null() && terminal.is_none())
+            || observed.is_some_and(|stop| stop != "end_turn")
+            || terminal.is_some_and(|stop| stop != "end_turn")
+            || (observed.is_none() && terminal.is_none())
+        {
+            return Err("external_final_generation_incomplete");
+        }
+        Ok(())
+    }
+
+    pub(super) fn has_cutoff_continuation(&self) -> bool {
+        self.cutoff_continuation
+    }
     fn notice(
         &mut self,
         session: &str,
@@ -77,6 +98,9 @@ impl Tracker {
         class: Option<Class>,
         evidence: &'static str,
     ) -> Option<Notice> {
+        // A later end_turn can contain only the continuation tail. Remember
+        // the cut-off even when a later tool round resets the qualified chain.
+        self.cutoff_continuation |= class == Some(Class::Cutoff);
         // The fixed prompt and the following generation describe the same send.
         let key = format!("client-policy:{anchor}");
         if !self.notices.insert(key.clone()) {

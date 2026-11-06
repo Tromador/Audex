@@ -1,4 +1,4 @@
-//! Common isolated client input. Provider authentication remains unavailable.
+//! Common isolated client input and the accepted pre-prompt policy boundary.
 use super::super::snapshot::manifest::sha256_hex;
 use super::super::store::{admission::AdmissionIdentity, launch::LaunchRecord};
 use super::super::{backends::BackendSettings, retained::RetainedInput, snapshot::SnapshotHandle};
@@ -7,9 +7,8 @@ use codex_app_server_protocol::{AuditAuthenticationRoute, AuditExecutionAdapter}
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::Path;
 use std::process::Command;
 
 pub(super) const CLIENT_VERSION: &str = "2.1.314";
@@ -21,17 +20,6 @@ pub(super) struct Prepared {
     pub mcp_digest: String,
     pub policy: Option<super::policy::Policy>,
     pub billing_source: &'static str,
-}
-
-fn private_directory(path: &Path) -> anyhow::Result<()> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    anyhow::ensure!(
-        metadata.is_dir()
-            && metadata.uid() == unsafe { libc::geteuid() }
-            && metadata.mode() & 0o077 == 0,
-        "runtime root must be an owned private directory"
-    );
-    Ok(())
 }
 
 fn create_directory(path: &Path) -> anyhow::Result<()> {
@@ -80,12 +68,10 @@ pub(super) async fn prepare(
         }
         _ => anyhow::bail!("wrong external route"),
     };
-    anyhow::ensure!(version == CLIENT_VERSION, "unqualified client version");
-    let executable = PathBuf::from(executable);
-    anyhow::ensure!(
-        executable == executable.canonicalize()? && executable.is_file(),
-        "client executable must be resolved"
-    );
+    let executable = super::commissioning::executable(executable, version)?;
+    if route == "claude_subscription" {
+        super::commissioning::revalidate(root, settings, policy)?;
+    }
     let binding = input
         .bindings
         .as_ref()
@@ -115,14 +101,7 @@ pub(super) async fn prepare(
         "retained external policy mismatch"
     );
     let runtime_root = Path::new(runtime_root);
-    let host_home =
-        std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("daemon home unavailable"))?;
-    let host_home = PathBuf::from(host_home).canonicalize()?;
-    anyhow::ensure!(
-        !runtime_root.starts_with(&host_home),
-        "client runtime must be outside the daemon home"
-    );
-    private_directory(runtime_root)?;
+    let host_home = super::commissioning::runtime(runtime_root)?;
     let subscription_policy = if route == "claude_subscription" {
         let profile = Path::new(
             &settings
@@ -131,19 +110,11 @@ pub(super) async fn prepare(
                 .expect("selected route")
                 .profile,
         );
-        anyhow::ensure!(
-            !profile.starts_with(runtime_root) && !runtime_root.starts_with(profile),
-            "profile and runtime must be separate"
-        );
-        let machine = PathBuf::from("/etc/claude-code");
-        #[cfg(test)]
-        let machine = if root.join("c71-system-policy").is_dir() {
-            root.join("c71-system-policy")
-        } else {
-            machine
-        };
-        Some(super::policy::Policy::inspect(
-            profile, &host_home, &machine,
+        Some(super::commissioning::policy(
+            root,
+            profile,
+            runtime_root,
+            &host_home,
         )?)
     } else {
         for name in [
@@ -158,22 +129,7 @@ pub(super) async fn prepare(
         }
         None
     };
-    anyhow::ensure!(
-        runtime_root == runtime_root.canonicalize()?,
-        "runtime root must be resolved"
-    );
     let directory = runtime_root.join(&identity.execution_id);
-    // The pinned client falls back outside TMPDIR above 103 bytes. Reject that
-    // possibility before preparing files or probing/spawning any client process.
-    let pid_max: u32 = std::fs::read_to_string("/proc/sys/kernel/pid_max")?
-        .trim()
-        .parse()?;
-    anyhow::ensure!(pid_max > 1, "system maximum PID unavailable");
-    let maximum_socket = directory.join(format!("tmp/cc-socks/{pid_max}.sock"));
-    anyhow::ensure!(
-        maximum_socket.as_os_str().as_bytes().len() <= 103,
-        "runtime root exceeds the pinned client's 103-byte socket path limit"
-    );
     create_directory(&directory)?;
     let result = prepare_files(
         root,
@@ -188,7 +144,20 @@ pub(super) async fn prepare(
         tools,
         subscription_policy,
     )
-    .await;
+    .await
+    .and_then(|prepared| {
+        let retained: serde_json::Value = serde_json::from_str(policy)?;
+        if route == "claude_subscription" && retained.get("subscription").is_some() {
+            anyhow::ensure!(
+                prepared.record.executable_digest.as_deref()
+                    == retained["subscription"]["executableDigest"].as_str()
+                    && prepared.policy.as_ref().map(|p| p.digest.as_str())
+                        == retained["subscription"]["policyDigest"].as_str(),
+                "subscription binding changed during launch preparation"
+            );
+        }
+        Ok(prepared)
+    });
     if result.is_err() {
         // This unique execution directory was created above by this invocation.
         let _ = std::fs::remove_dir_all(&directory);

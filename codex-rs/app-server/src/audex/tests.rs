@@ -1,5 +1,6 @@
 use super::result::AuditFindingV1;
 mod evidence_lines;
+mod opinions;
 use super::result::AuditResultV1;
 use super::result::FindingConfidence;
 use super::result::FindingEvidenceV1;
@@ -158,7 +159,7 @@ async fn migrations_pragmas_reopen_and_recovery_are_durable() {
     );
     assert_eq!(
         store.applied_migrations().await.expect("read migrations"),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     );
     let created = store
         .create_run(&create_request(&snapshot, "reopen"))
@@ -501,7 +502,7 @@ async fn seeded_findings_persist_and_report_is_reproducible_after_reopen() {
 }
 
 #[tokio::test]
-async fn empty_findings_succeed_and_invalid_seeded_results_remain_wanted() {
+async fn empty_findings_and_nonempty_unstructured_opinions_succeed() {
     let temp = tempfile::tempdir().expect("create temp directory");
     let snapshot = capture_snapshot(&temp).await;
     let store = AuditStore::open(absolute(&temp.path().join("audex")))
@@ -537,17 +538,24 @@ async fn empty_findings_succeed_and_invalid_seeded_results_remain_wanted() {
         store
             .commit_seeded_result(&invalid.operation_id, 3, &snapshot, raw)
             .await
-            .expect("record invalid result"),
-        ResultCommitOutcome::Rejected { revision: 4, .. }
+            .expect("retain unstructured opinion"),
+        ResultCommitOutcome::Committed { revision: 4, .. }
     ));
-    let loaded = store
-        .load_run(&invalid.run_id)
-        .await
-        .expect("load failed run");
-    assert_eq!(loaded.phase, RunPhase::Reviewing);
-    assert_eq!(loaded.assignment_state, AssignmentState::Failed);
-    assert_eq!(loaded.operation_state, OperationState::Failed);
+    let loaded = store.load_run(&invalid.run_id).await.expect("load opinion");
+    assert_eq!(loaded.phase, RunPhase::Reporting);
+    assert_eq!(loaded.assignment_state, AssignmentState::Succeeded);
+    assert_eq!(loaded.operation_state, OperationState::Committed);
     assert!(loaded.findings.is_empty());
+    assert_eq!(store.raw_result(&loaded).unwrap().unwrap(), raw);
+    assert_eq!(
+        store
+            .result_extraction(&invalid.assignment_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        codex_app_server_protocol::AuditExtractionStatus::UnstructuredOpinion
+    );
 }
 
 #[tokio::test]

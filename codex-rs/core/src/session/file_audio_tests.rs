@@ -11,7 +11,7 @@ use pretty_assertions::assert_eq;
 
 #[test]
 fn history_sums_measured_and_unknown_file_audio() {
-    let mut history = ContextManager::new();
+    let mut history = ContextManager::default();
     let item = ResponseInputItem::from(
         ["short", "unknown"]
             .map(|file_id| UserInput::Audio {

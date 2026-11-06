@@ -6,6 +6,10 @@ use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
 
+#[path = "result_extraction.rs"]
+mod extraction;
+pub(super) use extraction::extract;
+
 pub(super) const RESULT_SCHEMA_VERSION: u32 = 1;
 pub(super) const MAX_RAW_RESULT_BYTES: usize = 1024 * 1024;
 const MAX_SUMMARY_BYTES: usize = 16 * 1024;
@@ -112,6 +116,10 @@ pub(crate) struct FindingEvidenceV1 {
 pub(crate) enum ResultValidationError {
     #[error("result exceeds the {MAX_RAW_RESULT_BYTES}-byte limit")]
     TooLarge,
+    #[error("completed reviewer output is empty")]
+    Empty,
+    #[error("completed reviewer output is not UTF-8")]
+    InvalidEncoding,
     #[error("result is not valid schema-v1 JSON: {0}")]
     InvalidJson(String),
     #[error("unsupported result schema version {0}")]

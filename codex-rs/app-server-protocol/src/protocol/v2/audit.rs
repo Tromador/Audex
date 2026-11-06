@@ -2,7 +2,7 @@ use crate::{JsonSchema, TS};
 use serde::{Deserialize, Serialize};
 
 /// Audex CLI contract, independent of the Codex executable's package version.
-pub const AUDIT_PROTOCOL_VERSION: u32 = 6;
+pub const AUDIT_PROTOCOL_VERSION: u32 = 8;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -29,6 +29,9 @@ pub enum AuditSource {
 #[ts(export_to = "v2/")]
 pub struct AuditStartParams {
     pub request_key: String,
+    /// Read-only disclosure approved by the operator; required for subscription rosters.
+    #[schemars(schema_with = "inline_optional_preflight", default)]
+    pub preflight: Option<AuditPreflightResponse>,
     pub source: AuditSource,
     pub brief: String,
     pub provider: Option<String>,
@@ -42,6 +45,77 @@ pub struct AuditStartParams {
     pub scheduling: AuditScheduling,
     pub audex_guidance: Option<String>,
     pub agents_evidence: Option<String>,
+}
+
+/// Construction and local inspection only: no persistence, client launch or inference.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct AuditPreflightParams {
+    #[schemars(schema_with = "AuditStartParams::json_schema")]
+    pub request: AuditStartParams,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct AuditPreflightResponse {
+    pub protocol_version: u32,
+    /// Identical request already commissioned; Start only retrieves that approval.
+    pub existing_run_id: Option<String>,
+    pub identity: String,
+    pub snapshot_id: String,
+    pub manifest_digest: String,
+    pub brief_digest: String,
+    pub context_digest: String,
+    pub reviewers: Vec<AuditReviewerBinding>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct AuditReviewerBinding {
+    pub selection: AuditReviewerSelection,
+    pub resolved_model: String,
+    pub expected_served_model: String,
+    pub reasoning_effort: Option<String>,
+    pub backend_configuration_identity: String,
+    pub native_configuration_identity: Option<String>,
+    pub model_metadata_digest: Option<String>,
+    pub client: Option<AuditClaudeBinding>,
+}
+
+// RPC roots carry $schema in the export bundle. Inline their nested use so a
+// root and a definition cannot collide under the same exported name.
+#[cfg(test)]
+fn inline_optional_preflight(
+    generator: &mut schemars::r#gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    use schemars::schema::{SchemaObject, SubschemaValidation};
+    SchemaObject {
+        subschemas: Some(Box::new(SubschemaValidation {
+            any_of: Some(vec![
+                AuditPreflightResponse::json_schema(generator),
+                generator.subschema_for::<()>(),
+            ]),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+    .into()
+}
+
+/// Non-secret local bindings; account eligibility is checked by the owned client before prompting.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct AuditClaudeBinding {
+    pub executable: String,
+    pub executable_digest: String,
+    pub client_version: String,
+    pub profile: String,
+    pub runtime_root: String,
+    pub policy_digest: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -200,7 +274,7 @@ impl AuditExecutionAdapter {
 }
 
 /// Authentication selection is independent of provider and model. Only the
-/// daemon-configured native route is currently available for commissioning.
+/// daemon-configured native and qualified subscription routes are available for commissioning.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export_to = "v2/")]
@@ -330,7 +404,7 @@ mod tests {
         assert!(params.reviewers.is_none());
         assert_eq!(params.model.as_deref(), Some("model"));
         assert_eq!(params.scheduling, AuditScheduling::Automatic);
-        assert_eq!(AUDIT_PROTOCOL_VERSION, 6);
+        assert_eq!(AUDIT_PROTOCOL_VERSION, 8);
     }
 }
 

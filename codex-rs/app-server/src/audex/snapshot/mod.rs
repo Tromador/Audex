@@ -98,6 +98,14 @@ impl SnapshotStore {
         &self.root
     }
 
+    /// Build the same identity as capture, without publishing any files.
+    pub(crate) async fn preview(
+        &self,
+        request: CaptureRequest,
+    ) -> Result<SnapshotManifestV1, SnapshotError> {
+        capture::preview(self, request).await
+    }
+
     pub(crate) async fn capture(
         &self,
         request: CaptureRequest,

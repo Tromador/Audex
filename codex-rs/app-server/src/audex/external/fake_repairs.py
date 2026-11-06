@@ -27,6 +27,8 @@ records = []
 session = "repair-session-" + binding["execution_id"]
 model = "claude-haiku-5-5"
 secret = "PRIVATE_SENTINEL_MUST_NOT_PERSIST"
+terminal_usage = {"input_tokens": 55, "cache_read_input_tokens": 13,
+                  "cache_creation_input_tokens": 7, "output_tokens": 35}
 prompts = {
     "max_tokens": "Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
     "end_turn": "[Your previous response had no visible output. Please continue and produce a user-visible response.]",
@@ -62,6 +64,22 @@ if scenario.get("gate_start"):
     while not (root / "before-public.release").exists():
         assert time.monotonic() < deadline
         time.sleep(0.005)
+if "single_stop" in scenario:
+    # 2.1.314 wire shape: a successful result can still carry pause_turn.
+    # Full assistant records may omit stop_reason; message_delta supplies it.
+    text = "pausing"
+    if scenario.get("single_structured"):
+        text = json.dumps({"schema_version": 1, "assignment_id": assignment["assignment_id"],
+                           "snapshot_id": assignment["snapshot_id"], "summary": "Still paused", "findings": []})
+    assistant("single", None, text)
+    if scenario["single_stop"] is not None:
+        emit("stream_event", event={"type": "message_delta", "delta": {"stop_reason": scenario["single_stop"]}})
+    emit("result", subtype="success", is_error=False, result=text,
+         stop_reason=scenario.get("terminal_stop", scenario["single_stop"]),
+         usage=terminal_usage, total_cost_usd=0.0123)
+    send()
+    time.sleep(30)
+    sys.exit(0)
 mode = scenario.get("mode", "max_tokens")
 trigger = "max_tokens" if mode == "conflicting_prefix" else mode if mode in prompts else "end_turn"
 text = "" if trigger == "end_turn" and mode not in ["unexpected", "contradictory"] else "Incomplete finding draft."
@@ -110,6 +128,13 @@ for index in range(scenario.get("count", 1)):
 if scenario.get("complete"):
     result = json.dumps({"schema_version": 1, "assignment_id": assignment["assignment_id"],
                         "snapshot_id": assignment["snapshot_id"], "summary": "Completed repaired review", "findings": []})
+    if scenario.get("final_form") == "fragment":
+        result = "OK-final"
+    elif scenario.get("final_form") == "wrong_identity":
+        result = json.dumps({"schema_version": 1, "assignment_id": "foreign-assignment",
+                             "snapshot_id": assignment["snapshot_id"], "summary": "Unbound tail", "findings": []})
+    elif scenario.get("final_form") == "fenced":
+        result = "```json\n" + result + "\n```"
     # Finish the already observed corrective generation, not another request.
     # Use partial start above so its full text has not already been captured.
     emit("stream_event", event={"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
@@ -119,6 +144,7 @@ if scenario.get("complete"):
                                "content": [{"type": "text", "text": result}]})
     emit("stream_event", event={"type": "message_delta", "delta": {"stop_reason": "end_turn"}})
     emit("stream_event", event={"type": "message_stop"})
-    emit("result", subtype="success", is_error=False, result=result)
+    emit("result", subtype="success", is_error=False, result=result, stop_reason="end_turn",
+         usage=terminal_usage, total_cost_usd=0.0123)
 send()
 time.sleep(30)

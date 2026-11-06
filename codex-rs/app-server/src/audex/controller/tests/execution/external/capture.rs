@@ -134,7 +134,7 @@ fn public_capture_deduplicates_by_identity_and_freezes_external_evidence() -> an
                 && o.observed_model.as_deref() == Some("claude-haiku-5-5"))
         );
         let frozen = serde_json::to_value(store.freeze_report(&id).await?)?;
-        assert_eq!(frozen["format_version"], 4);
+        assert_eq!(frozen["format_version"], 5);
         let facts = &frozen["reviewers"][0]["provider_facts"];
         assert_eq!(facts["route"]["value"], "claude_subscription");
         assert_eq!(facts["versions"]["client_version"]["value"], "2.1.314");
@@ -198,7 +198,7 @@ fn public_capture_deduplicates_by_identity_and_freezes_external_evidence() -> an
 }
 
 #[test]
-fn invalid_streams_and_attribution_never_complete_or_replay() -> anyhow::Result<()> {
+fn stream_failures_and_unstructured_output_remain_distinct_without_replay() -> anyhow::Result<()> {
     run_test_with_large_stack("c62-invalid-streams", || async {
         for mode in [
             "malformed",
@@ -227,8 +227,22 @@ fn invalid_streams_and_attribution_never_complete_or_replay() -> anyhow::Result<
             let (controller, threads) = real_fixture(&temp, &server.uri()).await;
             let id = seed_stream(&controller, &temp, mode, false).await?;
             let run = settled(&controller, &id).await?;
-            assert_ne!(run.assignment_state, AssignmentState::Succeeded, "{mode}");
             let store = controller.store().await?;
+            if matches!(mode, "invalid_result" | "invalid_source") {
+                assert_eq!(run.assignment_state, AssignmentState::Succeeded);
+                assert!(run.findings.is_empty());
+                assert_eq!(
+                    store
+                        .result_extraction(&run.assignment_id)
+                        .await?
+                        .unwrap()
+                        .status,
+                    codex_app_server_protocol::AuditExtractionStatus::UnstructuredOpinion
+                );
+            } else {
+                assert_ne!(run.assignment_state, AssignmentState::Succeeded, "{mode}");
+                assert!(store.result_extraction(&run.assignment_id).await?.is_none());
+            }
             let launch = store.client_launch(&run.operation_id).await?.unwrap();
             for _ in 0..3 {
                 controller.drive(&id).await?;
@@ -268,7 +282,7 @@ fn invalid_streams_and_attribution_never_complete_or_replay() -> anyhow::Result<
                 .shutdown_all_threads_bounded(Duration::from_secs(5))
                 .await;
             println!(
-                "C62 {mode}: {:?}, no completed opinion or prompt replay",
+                "C62 {mode}: {:?}, extraction remains separate; no prompt replay",
                 run.assignment_state
             );
         }

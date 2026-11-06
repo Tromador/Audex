@@ -40,7 +40,7 @@ stream_max_retries = 0
             params: AuditCapabilitiesParams {},
         })
         .await?;
-    assert_eq!(capability.protocol_version, 6);
+    assert_eq!(capability.protocol_version, 8);
     let base = json!({"requestKey":"rejected", "source":{"type":"snippet", "name":"x.rs", "content":"source"},
         "brief":"brief", "reviewers":[{"provider":"local_audit_test", "model":"audit-test"},
         {"provider":"local_audit_test", "model":"audit-test"}, {"provider":"local_audit_test", "model":"audit-test"}]});
@@ -87,15 +87,18 @@ stream_max_retries = 0
         rejected.push(params);
     }
     for params in rejected {
-        let id = client
-            .send_request("audit/start", Some(params.clone()))
-            .await?;
-        let error = tokio::time::timeout(
-            Duration::from_secs(10),
-            client.read_stream_until_error_message(RequestId::Integer(id)),
-        )
-        .await??;
-        assert!(!error.error.message.is_empty(), "{params}");
+        for (method, payload) in [
+            ("audit/preflight", json!({"request":params})),
+            ("audit/start", params.clone()),
+        ] {
+            let id = client.send_request(method, Some(payload)).await?;
+            let error = tokio::time::timeout(
+                Duration::from_secs(10),
+                client.read_stream_until_error_message(RequestId::Integer(id)),
+            )
+            .await??;
+            assert!(!error.error.message.is_empty(), "{method}: {params}");
+        }
         let list: AuditListResponse = client
             .request(|id| ClientRequest::AuditList {
                 request_id: id,

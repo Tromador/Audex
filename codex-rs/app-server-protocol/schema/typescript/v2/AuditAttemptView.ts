@@ -4,6 +4,7 @@
 import type { AuditExecutionAdapter } from "./AuditExecutionAdapter";
 import type { AuditGenerationIdentity } from "./AuditGenerationIdentity";
 import type { AuditLocalExecution } from "./AuditLocalExecution";
+import type { AuditResultExtraction } from "./AuditResultExtraction";
 
 export type AuditAttemptView = { runId: string, reviewerId: string, reviewerOrdinal: bigint, assignmentId: string, attemptOrdinal: bigint, operationId: string, snapshotId: string, provider: string,
 /**
@@ -23,9 +24,14 @@ modelEvidence: Array<AuditGenerationIdentity>,
  */
 disposition: string, assignmentState: string, operationState: string,
 /**
- * True only for a canonical validated result, never inferred from activity.
+ * An authoritative completed opinion, independent of structured extraction.
+ * Never inferred from activity, process exit alone or reviewer identity claims.
  */
-completed: boolean, possibleOverlap: boolean, outputSequence: bigint, outputCutoff: bigint | null, captureGap: string | null, captureFailure: string | null, captureTruncated: boolean,
+completed: boolean,
+/**
+ * Absent for historical results predating the shared extraction contract.
+ */
+extraction?: AuditResultExtraction, possibleOverlap: boolean, outputSequence: bigint, outputCutoff: bigint | null, captureGap: string | null, captureFailure: string | null, captureTruncated: boolean,
 /**
  * Live local cleanup receipts, independent of the frozen contribution and remote billing.
  */

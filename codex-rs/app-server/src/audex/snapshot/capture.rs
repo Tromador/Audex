@@ -66,10 +66,29 @@ struct PublicationInput {
     fail_before_publication: bool,
 }
 
+pub(super) async fn preview(
+    store: &SnapshotStore,
+    request: CaptureRequest,
+) -> Result<SnapshotManifestV1, SnapshotError> {
+    Ok(prepare(store, request).await?.manifest)
+}
+
 pub(super) async fn capture(
     store: &SnapshotStore,
     request: CaptureRequest,
 ) -> Result<SnapshotHandle, SnapshotError> {
+    let publication = prepare(store, request).await?;
+    let snapshot_id = publication.manifest.snapshot_id.clone();
+    tokio::task::spawn_blocking(move || publish(publication))
+        .await
+        .map_err(|error| SnapshotError::Task(error.to_string()))??;
+    open(store, &snapshot_id).await
+}
+
+async fn prepare(
+    store: &SnapshotStore,
+    request: CaptureRequest,
+) -> Result<PublicationInput, SnapshotError> {
     let prepared_source = prepare_source(store, request.source).await?;
     let prepared_documents = prepare_context_documents(store.limits, request.context_documents)?;
     let source_digest = sha256_hex(&prepared_source.bytes);
@@ -89,7 +108,6 @@ pub(super) async fn capture(
             .map(|document| document.record.clone())
             .collect(),
     )?;
-    let snapshot_id = manifest.snapshot_id.clone();
     let manifest_bytes = manifest.to_pretty_bytes()?;
     let publication = PublicationInput {
         root: store.root.as_path().to_path_buf(),
@@ -101,11 +119,7 @@ pub(super) async fn capture(
         fail_before_publication: store.fail_before_publication,
     };
 
-    tokio::task::spawn_blocking(move || publish(publication))
-        .await
-        .map_err(|error| SnapshotError::Task(error.to_string()))??;
-
-    open(store, &snapshot_id).await
+    Ok(publication)
 }
 
 async fn prepare_source(

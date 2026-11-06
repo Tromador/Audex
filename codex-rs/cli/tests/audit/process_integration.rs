@@ -802,7 +802,7 @@ continue
         let version = serde_json::from_str::<Value>(input_json)?["format_version"]
             .as_u64()
             .context("report version")?;
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         let expected_id = format!(
             "audex-report-v{version}:sha256:{}",
             digest(format!("[{version},{input_json}]").as_bytes())

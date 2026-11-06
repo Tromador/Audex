@@ -395,7 +395,7 @@ async fn candidate(home: &Path, run: &str) -> Result<(Value, Vec<u8>)> {
         if let Some(row)=row.as_array().unwrap().first(){
             let input = row["input_json"].as_str().unwrap();
             let version = serde_json::from_str::<Value>(input)?["format_version"].as_u64().expect("report version");
-            assert_eq!(version, 4);
+            assert_eq!(version, 5);
             let report_digest=digest(format!("[{version},{input}]").as_bytes());
             let path=home.join("audex/reports").join(run).join(format!("{report_digest}.md"));
             if path.is_file(){let mut row=row.clone();row["reportInputDigest"]=json!(report_digest);return Ok((row,std::fs::read(path)?));}

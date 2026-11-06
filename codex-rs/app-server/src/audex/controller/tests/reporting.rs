@@ -1,4 +1,6 @@
 //! S1 contract fixtures: private rosters, in-process fake execution and isolated stores only.
+mod opinions;
+mod source_tools;
 use super::*;
 use crate::audex::store::attempts::{AttemptAction, ControlRequest};
 use crate::audex::store::{ReportPublishOutcome, ResultCommitOutcome};
@@ -628,7 +630,7 @@ async fn selected_integrity_is_required_but_superseded_artefacts_are_not_depende
                 &attempts[1].operation_id,
                 attempts[1].attempt_revision,
                 &snapshot,
-                b"invalid retained result"
+                b"   "
             )
             .await?,
         ResultCommitOutcome::Rejected { .. }

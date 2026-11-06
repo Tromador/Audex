@@ -2,14 +2,14 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn protocol_six_rejects_five_and_newer_without_fallback() {
-    assert_eq!(AUDIT_PROTOCOL_VERSION, 6);
-    assert!(require_audit_protocol_version(6).is_ok());
-    for version in [0, 5, 7] {
+fn protocol_eight_rejects_older_and_newer_without_fallback() {
+    assert_eq!(AUDIT_PROTOCOL_VERSION, 8);
+    assert!(require_audit_protocol_version(8).is_ok());
+    for version in [0, 5, 6, 7, 9] {
         let error = require_audit_protocol_version(version).unwrap_err();
         assert!(!error.start_acknowledgement_uncertain());
         assert!(error.retained_run_id().is_none());
-        assert!(error.to_string().contains("requires 6"));
+        assert!(error.to_string().contains("requires 8"));
     }
 }
 
@@ -52,6 +52,6 @@ fn disclosure_preserves_order_duplicates_and_actual_routes() {
         assert!(at > previous);
         previous = at;
     }
-    assert_eq!(text.matches("unavailable for commissioning").count(), 3);
-    assert_eq!(text.matches("have not been verified").count(), 3);
+    assert_eq!(text.matches("unavailable for commissioning").count(), 2);
+    assert_eq!(text.matches("have not been verified").count(), 2);
 }

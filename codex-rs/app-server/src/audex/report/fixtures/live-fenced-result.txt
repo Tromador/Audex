@@ -1,0 +1,9 @@
+```json
+{
+  "assignment_id": "audex-assignment-01a1a897-e3f9-7a20-812d-1d1009905a9b",
+  "findings": [],
+  "schema_version": 1,
+  "snapshot_id": "audex-source-v1:sha256:e525d1acaa156833264a4d2db49ca69014eaa493eed874be0b1123dd20944fe1",
+  "summary": "Read example.rs (bytes 0-43, sha256 eaf5e128c0b96e7012edbf4a7c51aeecf11cc26e62d592232fc7a00c0a7f7532). The file contains one function, `pub fn identity(value: u8) -> u8 { value }`, which returns its argument unchanged. No concrete defects are supported by this source, so the findings list is empty. I made one extra one-byte read of the same file while checking the first byte; it did not change the result."
+}
+```

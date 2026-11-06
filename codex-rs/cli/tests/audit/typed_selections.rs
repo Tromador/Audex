@@ -28,7 +28,11 @@ async fn typed_cli_rosters_reject_unavailable_members_and_disclose_native_routes
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(stderr.contains(&format!("{}. audit-test / audit_fixture; executor={executor}; authentication route={route}", position + 1)), "{stderr}");
             assert!(stderr.contains("unavailable for commissioning"), "{stderr}");
-            assert!(stderr.contains("have not been verified"), "{stderr}");
+            if route != "claude_subscription" {
+                assert!(stderr.contains("have not been verified"), "{stderr}");
+            } else {
+                assert!(stderr.contains("subscription quota"), "{stderr}");
+            }
             let list = audit(&daemon).arg("list").output()?;
             check(&list, 0)?;
             assert!(list.stdout.is_empty(), "no audit rows after rejection");

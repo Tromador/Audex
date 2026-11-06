@@ -32,6 +32,7 @@ pub(crate) struct ActivityViewer {
     reader: Option<JoinHandle<()>>,
     connected: bool,
     assistant_seen: bool,
+    opinion_shown: Option<String>,
     notice: Option<String>,
 }
 
@@ -58,6 +59,7 @@ impl ActivityViewer {
             reader: None,
             connected: false,
             assistant_seen: false,
+            opinion_shown: None,
             notice: None,
         }
     }
@@ -137,6 +139,29 @@ impl ActivityViewer {
                 .insert_cell(Arc::new(PlainHistoryCell::new(lines)));
             self.cursor = entry.sequence;
         }
+        if self.target.completed
+            && let Some(extraction) = &self.target.extraction
+            && extraction.status
+                == codex_app_server_protocol::AuditExtractionStatus::UnstructuredOpinion
+            && self.opinion_shown.as_deref() != Some(&extraction.raw_digest)
+            && let Some(raw) = page.raw_result
+        {
+            let mut lines = vec![Line::from(
+                "Completed opinion — original text; no validated structured findings",
+            )];
+            if let Some(reason) = &extraction.validation_error {
+                lines.push(Line::from(
+                    sanitize_user_text(format!("Extraction discrepancy: {reason}").into())
+                        .into_owned(),
+                ));
+            }
+            let safe = sanitize_user_text(raw.into());
+            lines.extend(safe.split('\n').map(|text| Line::from(text.to_owned())));
+            self.transcript
+                .insert_cell(Arc::new(PlainHistoryCell::new(lines)));
+            self.opinion_shown = Some(extraction.raw_digest.clone());
+            self.assistant_seen = true;
+        }
     }
 
     /// Text/search/selection owns its keys before C/R/I. Only an explicit uppercase press
@@ -178,7 +203,9 @@ impl ActivityViewer {
         } else {
             "Disconnected / reconnecting"
         };
-        let activity = if self.cursor == 0 && self.target.operation_state == "planned" {
+        let activity = if self.opinion_shown.is_some() {
+            "Full completed opinion retained; structured extraction is separate"
+        } else if self.cursor == 0 && self.target.operation_state == "planned" {
             "Queued; no observable committed activity"
         } else if self.cursor == 0 {
             "No observable committed activity"
@@ -195,11 +222,7 @@ impl ActivityViewer {
             self.target.provider,
             self.target.assignment_id,
             self.target.attempt_ordinal,
-            if self.target.completed {
-                "Completed validated contribution"
-            } else {
-                "Incomplete output"
-            },
+            super::attempts::opinion_label(&self.target),
             self.target.disposition,
             self.target.operation_state,
             self.target.current,

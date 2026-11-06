@@ -150,9 +150,25 @@ impl AttemptControlConfirmation {
     }
 }
 
+pub(crate) fn opinion_label(target: &AuditAttemptView) -> &'static str {
+    use codex_app_server_protocol::AuditExtractionStatus;
+    if !target.completed {
+        return "Incomplete / needs decision";
+    }
+    match target.extraction.as_ref().map(|value| value.status) {
+        Some(AuditExtractionStatus::UnstructuredOpinion) => {
+            "Completed opinion — unstructured; no validated findings"
+        }
+        Some(AuditExtractionStatus::DeterministicallyNormalised) => {
+            "Completed opinion — validated after deterministic normalisation"
+        }
+        _ => "Completed opinion — validated structured extraction",
+    }
+}
+
 pub(crate) fn attempt_summary(target: &AuditAttemptView) -> String {
     format!(
-        "Reviewer {}: {}\nModel: {} / {}\nRoute: {}\nRun: {}\nAssignment: {} (attempt {})\n{}; contribution={}; execution={}; current={}; Retry eligible={}\nCapture: sequence={}, gap={:?}, failure={:?}, truncated={}\nReceived output is unvalidated history; only an accepted canonical result establishes completed findings.",
+        "Reviewer {}: {}\nModel: {} / {}\nRoute: {}\nRun: {}\nAssignment: {} (attempt {})\n{}; contribution={}; execution={}; current={}; Retry eligible={}\nCapture: sequence={}, gap={:?}, failure={:?}, truncated={}\nCompletion establishes an attributable model opinion, not correctness. Only validated extraction supplies structured findings.",
         target.reviewer_ordinal + 1,
         target.reviewer_id,
         target.resolved_model,
@@ -161,11 +177,7 @@ pub(crate) fn attempt_summary(target: &AuditAttemptView) -> String {
         target.run_id,
         target.assignment_id,
         target.attempt_ordinal,
-        if target.completed {
-            "Completed validated contribution"
-        } else {
-            "Incomplete / needs decision"
-        },
+        opinion_label(target),
         target.disposition,
         target.operation_state,
         target.current,
@@ -174,7 +186,13 @@ pub(crate) fn attempt_summary(target: &AuditAttemptView) -> String {
         target.capture_gap,
         target.capture_failure,
         target.capture_truncated
-    ) + &target.local_execution.as_ref().map(|local| format!(
+    ) + &target.extraction.as_ref().map(|extraction| format!(
+        "\nRaw output SHA-256: {}; transformations: {:?}; extraction discrepancy: {}",
+        extraction.raw_digest, extraction.transformations,
+        crate::history_cell::sanitize_user_text(
+            extraction.validation_error.as_deref().unwrap_or("none").into()
+        )
+    )).unwrap_or_default() + &target.local_execution.as_ref().map(|local| format!(
         "\nLocal execution: {}; stop confirmed={}; cleanup finished={}. Remote billing is unconfirmed.",
         local.status, local.stop_confirmed_at_ms.is_some(), local.cleanup_finished_at_ms.is_some()
     )).unwrap_or_default()

@@ -37,7 +37,7 @@ async fn terminal_legacy_report_bytes_and_identity_survive_upgrade() -> anyhow::
     let store = AuditStore::open(root.clone()).await?;
     assert_eq!(
         store.applied_migrations().await?,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     );
     let record = store.load_run("legacy").await?;
     assert_eq!(record.run_id, "legacy");

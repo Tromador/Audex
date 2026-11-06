@@ -1,6 +1,8 @@
 //! Audit controls reuse the existing picker, prompt editor and transcript.
 use super::*;
-use codex_app_server_protocol::{AuditListResponse, AuditSource, AuditStartParams};
+#[cfg(test)]
+use codex_app_server_protocol::AuditSource;
+use codex_app_server_protocol::{AuditListResponse, AuditStartParams};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
@@ -97,7 +99,7 @@ impl ChatWidget {
             "Start a source audit".to_owned(),
             "--file ./example.rs --reviewer PROVIDER:MODEL --reviewer PROVIDER:MODEL [--sequential], or --snippet 'code' --name example.rs [--model MODEL --provider PROVIDER]".to_owned(),
             "--file ".to_owned(),
-            Some("Single-reviewer defaults use this conversation. Repeat --reviewer in order (duplicates stay distinct); reviewer JSON supports executionAdapter/authenticationRoute and reasoningEffort/expectedServedModel. External routes remain unavailable. --audex-md/--agents-md select explicit context. Confirm before submission.".to_owned()),
+            Some("Single-reviewer defaults use this conversation. Repeat --reviewer in order (duplicates stay distinct); reviewer JSON supports executionAdapter/authenticationRoute and reasoningEffort/expectedServedModel. Claude subscription requires an explicit route and qualified dedicated profile; API and Ollama remain unavailable. --audex-md/--agents-md select explicit context. Confirm before submission.".to_owned()),
             Box::new(move |args| tx.send(AppEvent::AuditCommand { thread_id, args })),
         ));
         self.request_redraw();
@@ -379,35 +381,8 @@ impl ChatWidget {
     }
 }
 
-fn context_disclosure(value: Option<&str>) -> String {
-    value
-        .map(|text| {
-            format!(
-                "{} UTF-8 bytes; preview: {}",
-                text.len(),
-                text.chars().take(160).collect::<String>()
-            )
-        })
-        .unwrap_or_else(|| "not supplied".to_owned())
-}
-
 fn audit_start_disclosure(params: &AuditStartParams) -> String {
-    let source = match &params.source {
-        AuditSource::File { name, path } => format!("file {path} (snapshot name {name})"),
-        AuditSource::Snippet { name, content } => format!(
-            "snippet {name} ({} UTF-8 bytes); preview: {}",
-            content.len(),
-            content.chars().take(160).collect::<String>()
-        ),
-    };
-    let mut text = format!(
-        "Source: {source}\nBrief: {}\nScheduling: {:?} (automatic is bounded; sequential permits one active reviewer reservation)\n{}",
-        params.brief,
-        params.scheduling,
-        codex_app_server_client::audit::reviewer_selection_disclosure(params)
-    );
-    text.push_str(&format!("AUDEX guidance: {}\nAGENTS evidence: {}\nIf the complete roster passes preflight, selected source, brief and explicit context will be disclosed to every selected provider, including queued reviewers. An unavailable route refuses the entire roster. All reviewers use the same sealed snapshot. Operator tools and history are not inherited.\nRequest key: {}",context_disclosure(params.audex_guidance.as_deref()),context_disclosure(params.agents_evidence.as_deref()),params.request_key));
-    text
+    codex_app_server_client::audit::start_disclosure(params)
 }
 
 fn decide(decision: &Arc<Mutex<Option<oneshot::Sender<bool>>>>, value: bool) {
@@ -427,6 +402,7 @@ mod tests {
 
     fn params() -> AuditStartParams {
         AuditStartParams {
+            preflight: None,
             reviewers: None,
             scheduling: Default::default(),
             expected_served_model: None,
@@ -615,6 +591,7 @@ mod management_tests {
             authentication_route: Default::default(),
         };
         let params = AuditStartParams {
+            preflight: None,
             request_key: "stable".into(),
             source: AuditSource::Snippet {
                 name: "source.rs".into(),
