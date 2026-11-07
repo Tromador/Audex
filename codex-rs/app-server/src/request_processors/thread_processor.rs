@@ -29,6 +29,7 @@ use crate::thread_sample::generate_sample;
 use codex_app_server_protocol::SelectedCapabilityRoot;
 use codex_app_server_protocol::ThreadHistoryMode as ApiThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadItemsListAnchor;
 use codex_app_server_protocol::ThreadItemsListCursor;
 use codex_app_server_protocol::ThreadRevertParams;
@@ -1004,11 +1005,29 @@ impl ThreadRequestProcessor {
 
     pub(crate) async fn thread_items_list(
         &self,
+        request_id: &ConnectionRequestId,
         params: ThreadItemsListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.thread_items_list_response_inner(params)
-            .await
-            .map(|response| Some(response.into()))
+        let cursor_kind = match &params.cursor {
+            None => "none",
+            Some(ThreadItemsListCursor::Opaque(_)) => "opaque",
+            Some(ThreadItemsListCursor::Anchor(ThreadItemsListAnchor::Item { .. })) => {
+                "item_anchor"
+            }
+        };
+        let started = std::time::Instant::now();
+        let result = self.thread_items_list_response_inner(params).await;
+        let page = result.as_ref().ok();
+        tracing::debug!(
+            request_id = %request_id.request_id,
+            cursor_kind,
+            item_count = page.map(|page| page.data.len()),
+            has_next_page = page.map(|page| page.next_cursor.is_some()),
+            duration_ms = started.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            "thread/items/list finished"
+        );
+        result.map(|response| Some(response.into()))
     }
 
     pub(crate) async fn thread_items_read(
@@ -2610,7 +2629,7 @@ impl ThreadRequestProcessor {
         let (_, thread) = self.load_thread(&thread_id).await?;
         ensure_direct_input_allowed(thread.as_ref()).await?;
         self.config_manager
-            .check_thread_model_provider_for_input(thread.config().await.as_ref())
+            .check_thread_model_provider(thread.config().await.as_ref())
             .await
             .map_err(|error| config_load_error(&error))?;
         self.submit_core_op(request_id, thread.as_ref(), Op::Compact)
@@ -3605,6 +3624,7 @@ impl ThreadRequestProcessor {
                     sort_direction: StoreSortDirection::Asc,
                     sort_key: StoreItemSortKey::CreatedAtOrdinal,
                     after_updated_at_ordinal: None,
+                    before_updated_at_ordinal: None,
                 })
                 .await
                 .map_err(paginated_history_list_error)?;
@@ -3722,6 +3742,7 @@ impl ThreadRequestProcessor {
                 sort_direction: StoreSortDirection::Desc,
                 sort_key: StoreItemSortKey::CreatedAtOrdinal,
                 after_updated_at_ordinal: None,
+                before_updated_at_ordinal: None,
             })
             .await
             .map_err(paginated_history_list_error)?;
@@ -3738,7 +3759,10 @@ impl ThreadRequestProcessor {
             cursor,
             limit,
             sort_direction,
+            defer_output,
         } = params;
+        let defer_command_output =
+            turn_id.is_some() && defer_output.is_some_and(|options| options.command_execution);
         let position = cursor.map(|cursor| match cursor {
             ThreadItemsListCursor::Opaque(cursor) => StoreListItemsPosition::Cursor(cursor),
             ThreadItemsListCursor::Anchor(ThreadItemsListAnchor::Item { item_id }) => {
@@ -3772,6 +3796,7 @@ impl ThreadRequestProcessor {
                 },
                 sort_key: StoreItemSortKey::CreatedAtOrdinal,
                 after_updated_at_ordinal: None,
+                before_updated_at_ordinal: None,
             })
             .await
             .map_err(|err| match err {
@@ -3787,11 +3812,26 @@ impl ThreadRequestProcessor {
                 }
                 err => internal_error(format!("failed to list thread items: {err}")),
             })?;
-        let data = page
-            .items
-            .into_iter()
-            .map(stored_thread_item_to_entry)
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut data = Vec::with_capacity(page.items.len());
+        for stored_item in page.items {
+            let mut entry = stored_thread_item_to_entry(stored_item)?;
+            if defer_command_output
+                && entry.completed_at_ms.is_some()
+                && let ThreadItemPayload::CommandExecution {
+                    status: codex_app_server_protocol::CommandExecutionStatus::Completed,
+                    exit_code: Some(0),
+                    aggregated_output,
+                    ..
+                } = &mut entry.item.payload
+                && aggregated_output
+                    .as_ref()
+                    .is_some_and(|output| !output.is_empty())
+            {
+                *aggregated_output = None;
+                entry.output_deferred = true;
+            }
+            data.push(entry);
+        }
 
         Ok(ThreadItemsListResponse {
             data,
@@ -3828,6 +3868,7 @@ impl ThreadRequestProcessor {
                 sort_direction: StoreSortDirection::Asc,
                 sort_key: StoreItemSortKey::CreatedAtOrdinal,
                 after_updated_at_ordinal: None,
+                before_updated_at_ordinal: None,
             })
             .await
             .map_err(|err| match err {
@@ -4810,7 +4851,7 @@ impl ThreadRequestProcessor {
                 );
             }
             self.config_manager
-                .check_thread_model_provider_for_input(existing_thread.config().await.as_ref())
+                .check_thread_model_provider(existing_thread.config().await.as_ref())
                 .await
                 .map_err(|err| config_load_error(&err))?;
             let redact_resume_payloads =
@@ -6498,6 +6539,7 @@ fn stored_thread_item_to_entry(
     let item = stored_thread_item_to_api_item(&stored_item)?;
     Ok(ThreadItemEntry {
         turn_id: stored_item.turn_id,
+        output_deferred: false,
         started_at_ms: item.started_at_ms,
         completed_at_ms: item.completed_at_ms,
         item,

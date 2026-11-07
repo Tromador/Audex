@@ -254,6 +254,10 @@ impl App {
     /// app-server RPC finishes. User-initiated skills refreshes still use the blocking app command path so
     /// callers that explicitly asked for fresh skill state do not race ahead of their own refresh.
     pub(super) fn refresh_startup_skills(&mut self, app_server: &AppServerSession) {
+        if app_server.thread_params_mode() == crate::ThreadParamsMode::Cloud {
+            self.skill_load_warnings.startup_complete = true;
+            return;
+        }
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         let cwd = self.config.cwd.to_path_buf();
@@ -1386,6 +1390,11 @@ mod tests {
             .respond_with(wiremock::ResponseTemplate::new(/*s*/ 200).set_body_string("{}"))
             .mount(&server)
             .await;
+        std::fs::write(
+            app.config.codex_home.join("config.toml"),
+            format!("chatgpt_base_url = {:?}\n", server.uri()),
+        )
+        .expect("persist endpoint for account config reloads");
         write_chatgpt_auth(
             app.config.codex_home.as_path(),
             ChatGptAuthFixture::new("chatgpt-token").account_id("account-123"),

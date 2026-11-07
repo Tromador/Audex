@@ -112,6 +112,7 @@ pub(crate) fn thread_items_page_params(
         cursor: cursor.map(ThreadItemsListCursor::Opaque),
         limit: Some(limit),
         sort_direction: Some(SortDirection::Desc),
+        defer_output: None,
     }
 }
 
@@ -311,8 +312,9 @@ impl AppServerSession {
             if let Some(turn) = turns.iter_mut().find(|turn| turn.id == entry.turn_id)
                 && !turn.items.iter().any(|item| item.id() == entry.item.id())
             {
-                items.push(entry.item.payload.clone());
-                turn.items.insert(/*index*/ 0, ThreadItem::from(entry));
+                let item = ThreadItem::try_from(entry)?;
+                items.push(item.payload.clone());
+                turn.items.insert(/*index*/ 0, item);
                 turn.items_view = TurnItemsView::Summary;
             }
         }
@@ -370,6 +372,19 @@ impl AppServerSession {
                 )
                 .await?;
             if page.data.is_empty() {
+                state.next_item_cursor = advancing_cursor(
+                    state.next_item_cursor.as_deref(),
+                    page.next_cursor,
+                    &mut state.seen_item_cursors,
+                );
+                if self.thread_params_mode() == super::ThreadParamsMode::Cloud
+                    && state.next_item_cursor.is_some()
+                {
+                    // Unknown native items may fill a page; preserve its continuation
+                    // and charge the requested page against the existing scan budget.
+                    scanned_items = scanned_items.saturating_add(limit as usize);
+                    continue;
+                }
                 state.next_item_cursor = None;
                 break;
             }

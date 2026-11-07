@@ -293,7 +293,7 @@ impl ThreadMetadataSync {
                     update.model = Some(turn_ctx.model.clone());
                     update.reasoning_effort = Some(turn_ctx.effort.clone());
                     update.approval_mode = Some(turn_ctx.approval_policy);
-                    update.permission_profile = Some(turn_ctx.permission_profile());
+                    update.permission_profile = Some(turn_ctx.permission_profile.clone());
                 }
                 RolloutItem::EventMsg(EventMsg::UserMessage(user)) => {
                     self.observe_user_message(user, &mut update);
@@ -504,7 +504,7 @@ mod tests {
             history_mode: ThreadHistoryMode::Legacy,
             history_base: None,
             subagent_history_start_ordinal: None,
-            initial_window_id: uuid::Uuid::now_v7().to_string(),
+            initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7().to_string(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: None,

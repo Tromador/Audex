@@ -40,6 +40,7 @@ use codex_attachment_store::AttachmentStore;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
 use codex_extension_api::ConversationHistorySnapshot;
+use codex_guardian_context::ContextBudgeting;
 use codex_guardian_context::SectionHistory;
 use codex_guardian_context::TranscriptHistory;
 use codex_history::CodexHarnessMetadata;
@@ -78,7 +79,9 @@ use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use codex_utils_output_truncation::truncate_function_output_payload;
 use codex_utils_output_truncation::with_serialization_allowance;
+use image::ImageReader;
 use std::collections::BTreeSet;
+use std::io::Cursor;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -101,11 +104,14 @@ fn next_guardian_review_context_revision() -> u64 {
 #[derive(Clone)]
 pub(crate) struct ContextManager {
     item_id_generator: ItemIdGenerator,
+    sampling: super::sampling::SamplingProgress,
     /// The oldest items are at the beginning of the vector. Snapshots share the vector until a
     /// caller needs to mutate it, avoiding deep copies for read-only history consumers.
     items: Arc<Vec<ResponseItemEnvelope>>,
     /// Compatibility history for legacy review and missing root instructions.
     review_history: Option<TranscriptHistory>,
+    /// Captured before recording; replay and legacy backups keep the same storage policy.
+    review_budgeting: ContextBudgeting,
     /// Host facts independent of the model window; snapshots share immutable state.
     retained_context: Arc<RetainedContext>,
     /// File IDs rejected by Responses. Retained history stays append-only; only
@@ -312,8 +318,10 @@ impl ContextManager {
     pub(crate) fn new(item_id_generator: ItemIdGenerator) -> Self {
         Self {
             item_id_generator,
+            sampling: Default::default(),
             items: Arc::new(Vec::new()),
             review_history: None,
+            review_budgeting: ContextBudgeting::Fixed,
             retained_context: Arc::default(),
             rejected_audio_file_ids: Arc::default(),
             file_audio_durations: Arc::default(),
@@ -353,6 +361,7 @@ impl ContextManager {
     pub(crate) fn for_session(
         root_capabilities_restricted: bool,
         features: &ManagedFeatures,
+        budgeting: ContextBudgeting,
         item_id_generator: ItemIdGenerator,
     ) -> Self {
         let independent = !features.enabled(Feature::GuardianReuseParentCompaction);
@@ -365,7 +374,9 @@ impl ContextManager {
             } else {
                 GuardianContextMode::ThreadOwned
             },
-            review_history: independent.then(TranscriptHistory::default),
+            review_budgeting: budgeting,
+            review_history: independent
+                .then(|| TranscriptHistory::new(/*generation*/ 0, budgeting)),
             ..Self::new(item_id_generator)
         }
     }
@@ -500,7 +511,7 @@ impl ContextManager {
             .as_ref()
             .map_or(self.history_version, TranscriptHistory::generation)
             .saturating_add(1);
-        let mut history = TranscriptHistory::new(generation);
+        let mut history = TranscriptHistory::new(generation, self.review_budgeting);
         if let Some(checkpoint) = checkpoint {
             history.reset(checkpoint.0.iter());
         } else {
@@ -545,17 +556,6 @@ impl ContextManager {
 
     pub(crate) fn reference_context_item(&self) -> Option<TurnContextItem> {
         self.reference_context_item.clone()
-    }
-
-    pub(crate) fn update_world_state(
-        &mut self,
-        world_state: &WorldState,
-    ) -> (Vec<WorldStateUpdate>, Option<WorldStateItem>) {
-        let (snapshot, fragments) =
-            world_state.render_history_diff(self.world_state_baseline.as_ref(), self.raw_items());
-        let rollout_item = self.world_state_item(&snapshot);
-        self.world_state_baseline = Some(snapshot);
-        (fragments, rollout_item)
     }
 
     pub(crate) fn render_step_world_state(
@@ -621,6 +621,7 @@ impl ContextManager {
         policy: TruncationPolicy,
     ) {
         for envelope in items {
+            self.sampling.record(envelope);
             if let Some(source) =
                 self.record_item_with_metadata(&envelope.item, envelope.metadata.as_ref(), policy)
             {
@@ -664,6 +665,7 @@ impl ContextManager {
             item: item.clone(),
             metadata: metadata.cloned(),
         };
+        self.sampling.record(&mut processed);
         if let ResponseItem::FunctionCallOutput { output, .. }
         | ResponseItem::CustomToolCallOutput { output, .. } = &mut processed.item
         {
@@ -807,6 +809,14 @@ impl ContextManager {
         self.history_version
     }
 
+    pub(crate) fn input_sequence(&self) -> u64 {
+        self.sampling.last_sequence
+    }
+
+    pub(crate) fn checkpoint_sampling(&mut self, items: &mut [ResponseItemEnvelope]) {
+        self.sampling.checkpoint(items);
+    }
+
     // Estimate token usage using byte-based heuristics from the truncation helpers.
     // This is a coarse lower bound, not a tokenizer-accurate count.
     pub(crate) fn estimate_token_count(&self, turn_context: &TurnContext) -> Option<i64> {
@@ -864,7 +874,8 @@ impl ContextManager {
         self.replace_annotated(items.into_iter().map(ResponseItemEnvelope::new).collect());
     }
 
-    pub(crate) fn replace_annotated(&mut self, items: Vec<ResponseItemEnvelope>) {
+    pub(crate) fn replace_annotated(&mut self, mut items: Vec<ResponseItemEnvelope>) {
+        self.sampling = super::sampling::SamplingProgress::restore(&mut items);
         self.retained_context = Arc::default();
         self.user_message_revision = self.user_message_revision.saturating_add(1);
         if let Some(review_history) = &mut self.review_history {
@@ -903,7 +914,10 @@ impl ContextManager {
         }
         if self.guardian_review_mode == GuardianContextMode::Legacy && self.review_history.is_none()
         {
-            let mut retained = TranscriptHistory::new(self.history_version.saturating_add(1));
+            let mut retained = TranscriptHistory::new(
+                self.history_version.saturating_add(1),
+                self.review_budgeting,
+            );
             for item in self
                 .annotated_items()
                 .iter()
@@ -1076,8 +1090,8 @@ impl ContextManager {
         self.set_token_info_with_boundary(Some(info), covered_item_count);
     }
 
-    /// Restored or rewritten history keeps the existing last-model-output approximation.
-    fn reset_last_usage_boundary(&mut self) {
+    /// Align the context count after history changes or buffered model output is committed.
+    pub(crate) fn reset_last_usage_boundary(&mut self) {
         self.last_model_output_item_count = self
             .items
             .iter()
@@ -1495,15 +1509,18 @@ fn estimate_original_image_bytes(image_url: &str) -> Option<i64> {
                 return None;
             }
         };
-        let dynamic = match image::load_from_memory(&bytes) {
-            Ok(dynamic) => dynamic,
+        let dimensions = image::guess_format(&bytes).and_then(|format| {
+            ImageReader::with_format(Cursor::new(bytes.as_slice()), format).into_dimensions()
+        });
+        let (width, height) = match dimensions {
+            Ok(dimensions) => dimensions,
             Err(error) => {
-                tracing::trace!("failed to decode original-detail image bytes: {error}");
+                tracing::trace!("failed to read original-detail image dimensions: {error}");
                 return None;
             }
         };
-        let width = i64::from(dynamic.width());
-        let height = i64::from(dynamic.height());
+        let width = i64::from(width);
+        let height = i64::from(height);
         let patch_size = i64::from(ORIGINAL_IMAGE_PATCH_SIZE);
         let patches_wide = width.saturating_add(patch_size.saturating_sub(1)) / patch_size;
         let patches_high = height.saturating_add(patch_size.saturating_sub(1)) / patch_size;

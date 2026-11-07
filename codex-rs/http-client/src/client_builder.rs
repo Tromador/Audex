@@ -36,6 +36,7 @@ use crate::with_chatgpt_cloudflare_cookie_store;
 pub struct HttpClientBuilder {
     http2_prior_knowledge: bool,
     pub(crate) generation_admission: Option<crate::GenerationRequest>,
+    disable_pool_idle_timeout: bool,
     pub(crate) default_headers: Option<HeaderMap>,
     follow_redirects: bool,
     pub(crate) redirect_observed: Option<Arc<AtomicBool>>,
@@ -109,6 +110,13 @@ impl HttpClientBuilder {
         self.http2_prior_knowledge = true;
         self
     }
+
+    /// Keep pooled connections reusable during long gaps between requests.
+    pub fn without_pool_idle_timeout(mut self) -> Self {
+        self.disable_pool_idle_timeout = true;
+        self
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -401,6 +409,9 @@ impl HttpClientBuilder {
         if let Some(path) = self.windows_proxy_pipe_path {
             builder = builder.windows_named_pipe(path);
         }
+        if self.disable_pool_idle_timeout {
+            builder = builder.pool_idle_timeout(None);
+        }
         if self.http2_prior_knowledge {
             builder = builder.http2_prior_knowledge();
         }
@@ -442,6 +453,7 @@ impl Default for HttpClientBuilder {
         Self {
             http2_prior_knowledge: false,
             generation_admission: None,
+            disable_pool_idle_timeout: false,
             default_headers: None,
             follow_redirects: true,
             redirect_observed: None,

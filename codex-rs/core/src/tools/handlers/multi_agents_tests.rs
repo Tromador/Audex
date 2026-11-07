@@ -2400,7 +2400,7 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
         .expect("spawned agent thread should exist");
     let child_turn = child_thread.session.new_default_turn().await;
     assert_eq!(
-        child_turn.file_system_sandbox_policy(),
+        child_turn.permission_profile().file_system_sandbox_policy(),
         expected_file_system_sandbox_policy
     );
     assert_eq!(
@@ -4687,6 +4687,41 @@ async fn build_agent_spawn_config_uses_captured_step_settings_and_turn_context_v
         .set(AskForApproval::OnRequest)
         .expect("approval policy set");
     assert_eq!(config, expected);
+}
+
+#[tokio::test]
+async fn child_agents_inherit_thread_routing_when_parent_overrides_it_for_one_turn() {
+    let home = tempfile::tempdir().expect("create test home");
+    let (session, _, _events) = make_session_and_context_with_auth_config_home_and_rx(
+        CodexAuth::from_api_key("test"),
+        Vec::new(),
+        home.path(),
+        |config| config.code_mode.direct_only_tool_namespaces = vec!["thread_tools".into()],
+    )
+    .await;
+    let turn = session
+        .new_turn_with_default_settings(
+            "parent-turn".into(),
+            crate::session::turn_context::NewTurnContextOptions {
+                direct_only_tool_namespaces: Some(vec!["user_message".into()]),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert_eq!(
+        turn.config.code_mode.direct_only_tool_namespaces,
+        ["user_message"]
+    );
+    let resumed = build_agent_resume_config(&turn).expect("resume config");
+    let step = StepContext::for_test(turn);
+    let spawned =
+        build_agent_spawn_config(&BaseInstructions::default(), &step).expect("spawn config");
+    for config in [spawned, resumed] {
+        assert_eq!(
+            config.code_mode.direct_only_tool_namespaces,
+            ["thread_tools"]
+        );
+    }
 }
 
 #[tokio::test]

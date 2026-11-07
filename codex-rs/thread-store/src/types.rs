@@ -244,13 +244,17 @@ pub struct PreparedFork {
     pub history_base: Option<HistoryPosition>,
     /// Bounded model context selected by the requested fork boundary.
     pub model_context: Arc<Vec<RolloutItem>>,
-    /// Blocks source deletion until the child's history reference is durable.
-    _source_reservation: Box<dyn std::fmt::Debug + Send>,
+    /// Prevents the source thread from being deleted until the child's history reference is
+    /// finalized.
+    ///
+    /// If absent, the backend must revalidate the prepared fork as part of finalizing that
+    /// reference.
+    _source_reservation: Option<Box<dyn std::fmt::Debug + Send>>,
 }
 
 impl PreparedFork {
     /// Creates a frozen fork snapshot while retaining a backend-owned source reservation.
-    pub fn new(
+    pub fn with_source_reservation(
         source_thread_id: ThreadId,
         history_base: Option<HistoryPosition>,
         model_context: Arc<Vec<RolloutItem>>,
@@ -260,7 +264,22 @@ impl PreparedFork {
             source_thread_id,
             history_base,
             model_context,
-            _source_reservation: Box::new(source_reservation),
+            _source_reservation: Some(Box::new(source_reservation)),
+        }
+    }
+
+    /// Creates a frozen fork snapshot for a backend that revalidates the source while making the
+    /// child's history reference durable.
+    pub fn with_source_revalidation(
+        source_thread_id: ThreadId,
+        history_base: Option<HistoryPosition>,
+        model_context: Arc<Vec<RolloutItem>>,
+    ) -> Self {
+        Self {
+            source_thread_id,
+            history_base,
+            model_context,
+            _source_reservation: None,
         }
     }
 }
@@ -495,7 +514,7 @@ pub enum ListItemsPosition {
     /// Opaque cursor returned by a previous list call.
     Cursor(String),
     /// Exclusive item anchor within the visible non-empty turn.
-    /// Requires creation order without an update watermark.
+    /// Requires creation order without an update boundary.
     ItemAnchor { item_id: String },
 }
 
@@ -516,10 +535,12 @@ pub struct ListItemsParams {
     pub page_size: usize,
     /// Direction to sort items by the selected ordinal.
     pub sort_direction: SortDirection,
-    /// Ordinal to sort items by. Update-ordinal sorting requires an update watermark.
+    /// Ordinal to sort items by. Update-ordinal sorting requires an update boundary.
     pub sort_key: ItemSortKey,
     /// Filters out items with an update ordinal less than or equal to the provided value.
     pub after_updated_at_ordinal: Option<u64>,
+    /// Filters out items with an update ordinal greater than or equal to the provided value.
+    pub before_updated_at_ordinal: Option<u64>,
 }
 
 /// The ordinal to use when listing persisted items.
@@ -942,10 +963,12 @@ impl ThreadMetadataPatch {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.updated_at.is_none() && self.is_empty_except_updated_at()
+        self.updated_at.is_none()
+            && self.token_usage.is_none()
+            && self.is_empty_except_updated_at_and_token_usage()
     }
 
-    pub(crate) fn is_empty_except_updated_at(&self) -> bool {
+    pub(crate) fn is_empty_except_updated_at_and_token_usage(&self) -> bool {
         self.name.is_none()
             && self.rollout_path.is_none()
             && self.preview.is_none()
@@ -967,7 +990,6 @@ impl ThreadMetadataPatch {
             && self.cli_version.is_none()
             && self.approval_mode.is_none()
             && self.permission_profile.is_none()
-            && self.token_usage.is_none()
             && self.first_user_message.is_none()
             && self.git_info.is_none()
             && self.memory_mode.is_none()

@@ -374,6 +374,7 @@ pub(super) async fn run_main_inner(
         workload_identity_selected,
         std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
     )?;
+    let cloud_preview_available = app_server_target.uses_embedded_network_policy();
     let remote_cwd_override = cli
         .cwd
         .clone()
@@ -568,18 +569,23 @@ pub(super) async fn run_main_inner(
         None
     };
     let auto_start_daemon = cfg!(any(unix, windows))
+        && (cli.agents_overview || config.features.enabled(Feature::DaemonAutoStart))
         && implicit_connection
         && !cli.no_daemon
         && !app_server_target.uses_remote_workspace();
     if auto_start_daemon
         && daemon_exclusion.is_none()
-        && should_show_provider_setup_wizard(
-            LoginStatus::NotAuthenticated,
-            config.model_provider.requires_openai_auth,
-            &config,
-            &AppServerTarget::Embedded,
-            Feature::GcpSetupWizard,
-        )
+        && [Feature::GcpSetupWizard, Feature::GatewaySetupWizard]
+            .into_iter()
+            .any(|feature| {
+                should_show_provider_setup_wizard(
+                    LoginStatus::NotAuthenticated,
+                    config.model_provider.requires_openai_auth,
+                    &config,
+                    &AppServerTarget::Embedded,
+                    feature,
+                )
+            })
         && startup_draft
             .run_until(
                 config
@@ -591,8 +597,13 @@ pub(super) async fn run_main_inner(
             .flatten()
             .is_none()
     {
-        // GCP setup resolves credential paths and runs gcloud in the launch environment.
-        daemon_exclusion = Some("GCP sign-in");
+        // These wizards use credentials from the launch environment and rebuild the
+        // embedded server with the selected provider after onboarding.
+        daemon_exclusion = Some(if config.features.enabled(Feature::GcpSetupWizard) {
+            "GCP sign-in"
+        } else {
+            "custom gateway sign-in"
+        });
         app_server_target = AppServerTarget::Embedded;
     }
     if auto_start_daemon
@@ -726,13 +737,14 @@ pub(super) async fn run_main_inner(
     }
     let selection_reason = match (&app_server_target, daemon_exclusion) {
         (AppServerTarget::Remote { .. }, _) => "explicit_remote",
+        (AppServerTarget::Cloud, _) => "cloud",
         _ if cli.agents_overview => "agents",
         _ if elevated_warning.is_some() => "elevated_windows",
         (_, Some("--no-daemon")) => "explicit_no_daemon",
         (_, Some(_)) => "incompatible_option",
         _ if auto_start_daemon => "auto_start",
         (AppServerTarget::LocalDaemon { .. }, _) => "existing_daemon",
-        (AppServerTarget::Embedded, None) => "unclassified",
+        (AppServerTarget::Embedded, None) => "auto_start_disabled",
     };
     let daemon_settings = if metrics.is_some() {
         codex_app_server_daemon::telemetry::settings_tags(&config.codex_home)
@@ -743,7 +755,17 @@ pub(super) async fn run_main_inner(
     };
     let mut launch_tags = daemon_settings.to_vec();
     launch_tags.extend(terminal_size_tags);
-    launch_tags.push(("daemon_selection_reason", selection_reason));
+    launch_tags.extend([
+        ("daemon_selection_reason", selection_reason),
+        (
+            "daemon_auto_start",
+            if config.features.enabled(Feature::DaemonAutoStart) {
+                "enabled"
+            } else {
+                "disabled"
+            },
+        ),
+    ]);
     let selected_local_daemon = matches!(app_server_target, AppServerTarget::LocalDaemon { .. });
     let launch_telemetry = move |app_server_mode| {
         let Some(metrics) = metrics else {
@@ -800,9 +822,13 @@ pub(super) async fn run_main_inner(
                     }
                 }
                 Some("GCP sign-in") => "gcp_sign_in",
+                Some("custom gateway sign-in") => "gateway_sign_in",
                 Some(daemon_startup::WSL_DRVFS_EXCLUSION) => "wsl_drvfs",
                 Some("this Windows launcher") => "windows_detach_restricted",
                 Some("daemon feature settings") => "daemon_compatibility",
+                None if selection_reason == "auto_start_disabled" => {
+                    "auto_start_disabled_no_daemon"
+                }
                 None if selected_local_daemon => "daemon_connection_failed",
                 None if selection_reason == "agents" => "agents_no_daemon_discovered",
                 Some(_) | None => "unclassified",
@@ -985,6 +1011,7 @@ pub(super) async fn run_main_inner(
         state_db,
         environment_manager,
         embedded_network_policy,
+        cloud_preview_available,
         managed_worktree.clone(),
         daemon_startup_warning,
         managed_daemon,

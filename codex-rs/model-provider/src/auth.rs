@@ -13,6 +13,7 @@ use codex_api::SharedAuthProvider;
 use codex_features::RuntimeAuthMode;
 use codex_http_client::CHATGPT_ACCOUNT_ID_HEADER;
 use codex_http_client::HttpClientFactory;
+use codex_http_client::RouteAwareClientPool;
 use codex_login::AuthHeaders;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -23,6 +24,7 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::SessionSource;
 use codex_runtime_agent_instance::RuntimeAuth;
+use codex_runtime_agent_instance::RuntimeAuthError;
 use codex_runtime_agent_instance::RuntimeAuthManager;
 use http::HeaderMap;
 use http::HeaderValue;
@@ -109,6 +111,24 @@ impl ResolvedProviderAuth {
         match &self.runtime {
             Some(runtime) => runtime.bind_http_client_factory(factory),
             None => Ok(factory),
+        }
+    }
+
+    /// Preserve the caller's connection pool and bind it to the selected login.
+    pub fn bind_http_client_pool(
+        &self,
+        pool: &RouteAwareClientPool,
+    ) -> Result<RouteAwareClientPool, AuthError> {
+        match &self.runtime {
+            Some(runtime) => pool
+                .with_account_binding(runtime.http_client_factory().network_policy())
+                .ok_or_else(|| {
+                    AuthError::Build(
+                        "runtime credentials and transport must share the application network policy"
+                            .to_string(),
+                    )
+                }),
+            None => Ok(pool.clone()),
         }
     }
 
@@ -299,16 +319,22 @@ pub(crate) fn auth_manager_for_provider(
 ) -> Option<Arc<AuthManager>> {
     match provider.auth.clone() {
         Some(config) => {
-            let mut env = HashMap::new();
-            if provider.is_gcp()
-                && let Some(credential_file) = &provider.credential_file
-            {
-                env.insert(
-                    "GOOGLE_APPLICATION_CREDENTIALS".to_string(),
-                    credential_file.as_os_str().to_os_string(),
-                );
+            if provider.is_gcp() {
+                let mut env = HashMap::new();
+                if let Some(credential_file) = &provider.credential_file {
+                    env.insert(
+                        "GOOGLE_APPLICATION_CREDENTIALS".to_string(),
+                        credential_file.as_os_str().to_os_string(),
+                    );
+                }
+                Some(AuthManager::external_bearer_only_with_env(config, env))
+            } else {
+                Some(match auth_manager {
+                    Some(manager) => crate::shared_state::process_shared_state()
+                        .command_credentials(&config, &manager.runtime_config()),
+                    None => AuthManager::external_bearer_only(config),
+                })
             }
-            Some(AuthManager::external_bearer_only_with_env(config, env))
         }
         None => auth_manager,
     }
@@ -409,7 +435,7 @@ fn should_bootstrap_chatgpt_agent_identity(
         && matches!(auth, Some(CodexAuth::Chatgpt(_)))
 }
 
-fn bearer_auth_for_provider(
+pub(crate) fn bearer_auth_for_provider(
     provider: &ModelProviderInfo,
 ) -> codex_protocol::error::Result<Option<BearerAuthProvider>> {
     if let Some(api_key) = provider.api_key()? {
@@ -445,7 +471,7 @@ pub async fn auth_provider_for_request(
     auth: &CodexAuth,
     runtime: Option<&(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
     headers: &HeaderMap,
-) -> Result<ResolvedProviderAuth, AuthError> {
+) -> Result<ResolvedProviderAuth, RuntimeAuthError> {
     observe_auth_selection(runtime.map(|(_, mode)| *mode), "request", async {
         match runtime {
             Some((manager, mode)) => {

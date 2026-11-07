@@ -1,3 +1,4 @@
+use codex_login::AuthOwner;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -15,6 +16,8 @@ use crate::compact::CompactionAnalyticsDetails;
 use crate::compact::compaction_status_from_result;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
+use crate::compact_pending_input::MAX_RETAINED_AGENT_MESSAGE_TOKENS;
+use crate::compact_pending_input::is_retained_pending_mail;
 use crate::compact_remote_history::HistoryItemGroup;
 use crate::compact_remote_history::history_item_groups;
 use crate::context::world_state::WorldState;
@@ -88,7 +91,6 @@ enum RetainedImageBudget {
 }
 
 pub(crate) const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
-const MAX_RETAINED_AGENT_MESSAGE_TOKENS: i64 = 10_000;
 // Compact attempts can run much longer than normal turns, so keep the per-transport
 // retry budget smaller than the general Responses stream retry budget.
 const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
@@ -101,7 +103,7 @@ enum CompactionRequestKind<'a> {
 
 enum CompactionRequestTransport<'a> {
     Foreground(&'a mut ModelClientSession),
-    Background(Option<String>, Option<u64>),
+    Background(Option<String>, Option<AuthOwner>),
 }
 
 /// The caller decides whether a declined prepared result needs a foreground request.
@@ -296,7 +298,7 @@ async fn run_remote_compaction_request_v2(
 ) -> CodexResult<RemoteCompactionV2Output> {
     let turn_context = &step_context.turn;
     let client_session = match transport {
-        CompactionRequestTransport::Background(turn_state, auth_owner_generation) => {
+        CompactionRequestTransport::Background(turn_state, auth_owner) => {
             let settings = &step_context.settings;
             let cancellation = crate::session::async_compaction::shutdown_cancellation(sess).await;
             let effort = sess
@@ -310,7 +312,7 @@ async fn run_remote_compaction_request_v2(
                 biased;
                 _ = cancellation.cancelled() => return Err(CodexErr::TurnAborted),
                 stream = http_executor.stream_responses_http(
-                    &turn_state, *auth_owner_generation, /*event_sender*/ None, prompt, &settings.model_info, &step_context.session_telemetry, effort,
+                    &turn_state, auth_owner.clone(), /*event_sender*/ None, prompt, &settings.model_info, &step_context.session_telemetry, effort,
                     settings.reasoning_summary, settings.service_tier.clone(), responses_metadata,
                     &trace,
                     None,
@@ -508,11 +510,16 @@ fn build_v2_compacted_history(
         crate::context_manager::rejected_audio::checkpoint_input_has_no_file_error_sources(
             &prompt_input,
         );
+    let pending_sequence = crate::compact_pending_input::pending_mail_sequence(&prompt_input);
     let retained = v2_history_item_groups(prompt_input)
-        .filter(|group| is_retained_for_remote_compaction_v2(&group.source, features))
+        .filter(|group| {
+            is_retained_for_remote_compaction_v2(&group.source, features)
+                || pending_sequence
+                    .is_some_and(|first| is_retained_pending_mail(&group.source, first))
+        })
         .flat_map(HistoryItemGroup::into_items)
         .collect::<Vec<_>>();
-    let mut retained = truncate_retained_messages(
+    let retained = truncate_retained_messages(
         retained,
         RETAINED_MESSAGE_TOKEN_BUDGET,
         image_budget,
@@ -529,7 +536,8 @@ fn build_v2_compacted_history(
             .get_or_insert_default()
             .compaction_without_file_error_sources = true;
     }
-    retained.push(checkpoint);
+    let retained =
+        crate::compact_pending_input::insert_summary(retained, checkpoint, pending_sequence);
     (retained, retained_image_count)
 }
 

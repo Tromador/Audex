@@ -186,7 +186,7 @@ mod tests {
             (true, "user", false),
             (false, "recap", true),
         ] {
-            let (mut app, mut events, _ops) =
+            let (mut app, mut events, mut ops) =
                 crate::app::tests::make_test_app_with_channels().await;
             let thread = ThreadId::new();
             app.active_thread_id = Some(thread);
@@ -227,6 +227,7 @@ mod tests {
             assert!(app.audits.reports.for_turn(ThreadId::new()).is_none());
             let op = AppCommand::UserTurn {
                 turn_trigger: trigger,
+                cloud_submission: crate::app_command::CloudSubmissionIntent::StartOrSteer,
                 client_user_message_id: "operator-message".into(),
                 items: vec![UserInput::Text {
                     text: "Discuss finding 1".into(),
@@ -243,11 +244,31 @@ mod tests {
                 final_output_json_schema: None,
                 collaboration_mode: None,
             };
+            // Operator turns go through the composer so a rejection has a real draft to restore.
+            let op = if trigger == "user" {
+                app.chat_widget
+                    .restore_user_message_to_composer("Discuss finding 1".to_string().into());
+                app.chat_widget
+                    .handle_key_event(crossterm::event::KeyCode::Enter.into());
+                let submitted = std::iter::from_fn(|| ops.try_recv().ok())
+                    .find(|op| matches!(op, AppCommand::UserTurn { .. }))
+                    .expect("composer submits a user turn");
+                assert!(matches!(
+                    &submitted,
+                    AppCommand::UserTurn {
+                        cloud_submission: crate::app_command::CloudSubmissionIntent::StartOrSteer,
+                        ..
+                    }
+                ));
+                submitted
+            } else {
+                op
+            };
             let (client, mut commands, _incoming) = CloudClient::channel(1);
             let mut server = AppServerSession::new(
                 crate::backend_id::BackendId::new(),
                 AppServerClient::Cloud(client),
-                ThreadParamsMode::Cloud,
+                ThreadParamsMode::Remote,
             );
             let (result, ()) = tokio::join!(
                 super::super::user_turn_submission::try_submit_user_turn(
@@ -296,7 +317,41 @@ mod tests {
                     command.response.send(Ok(reply)).unwrap();
                 }
             );
-            assert_eq!(result.is_ok(), accepted);
+            // Rejection is handled, not returned. An unhandled failure would be Err here, and an
+            // unconfirmed one would queue the message instead of restoring the draft.
+            assert!(result.is_ok());
+            if !accepted {
+                let shown = std::iter::from_fn(|| events.try_recv().ok())
+                    .filter_map(|event| match event {
+                        AppEvent::InsertHistoryCell(cell) => Some(
+                            cell.display_lines(100)
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        ),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(shown.contains("rejected fixture input"), "{shown}");
+                assert_eq!(shown.contains("Failed to start turn"), !steer, "{shown}");
+                assert_eq!(
+                    app.chat_widget.composer_text_with_pending(),
+                    "Discuss finding 1"
+                );
+                assert!(app.chat_widget.queued_user_message_texts().is_empty());
+                let retained = app
+                    .audits
+                    .reports
+                    .for_turn(thread)
+                    .expect("report survives rejection");
+                assert!(
+                    retained
+                        .values()
+                        .any(|entry| entry.value.contains("Finding 1"))
+                );
+            }
             assert_eq!(
                 app.audits.reports.for_turn(thread).is_none(),
                 accepted && trigger == "user"

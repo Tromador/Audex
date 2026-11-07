@@ -1,3 +1,5 @@
+pub(crate) mod recorded;
+
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
@@ -37,6 +39,7 @@ use codex_connectors::AppToolPolicyEvaluator;
 use codex_connectors::AppToolPolicyInput;
 use codex_extension_api::McpToolContext;
 use codex_features::Feature;
+use codex_file_system::FileSystemSandboxContext;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::MCP_TOOL_CODEX_APPS_META_KEY;
 use codex_mcp::McpPermissionPromptAutoApproveContext;
@@ -130,6 +133,23 @@ const MCP_RESULT_TELEMETRY_SERVER_USER_FLOW_SPAN_ATTR: &str =
     "codex.mcp.server_user_flow.triggered";
 const MCP_RESULT_TELEMETRY_TARGET_ID_MAX_CHARS: usize = 256;
 const MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES: usize = DEFAULT_OUTPUT_BYTES_CAP;
+const APPS_INVOCATION_CONTEXT: &str = "invocation_context";
+
+fn apps_invocation_context(tool: &ToolInfo) -> Option<&JsonValue> {
+    tool.tool
+        .meta
+        .as_ref()?
+        .get(MCP_TOOL_CODEX_APPS_META_KEY)?
+        .get(APPS_INVOCATION_CONTEXT)
+}
+
+fn parse_mcp_tool_arguments(arguments: &str) -> serde_json::Result<Option<JsonValue>> {
+    if arguments.trim().is_empty() {
+        Ok(None)
+    } else {
+        serde_json::from_str(arguments).map(Some)
+    }
+}
 
 /// Handles the specified tool call and dispatches the appropriate MCP tool-call
 /// item lifecycle events to the `Session`.
@@ -140,30 +160,24 @@ pub(crate) async fn handle_mcp_tool_call(
     cancellation_token: &CancellationToken,
     call_id: String,
     originating_call: Option<ToolCallOrigin>,
-    tool_info: &ToolInfo,
-    prepared_call: Option<PreparedMcpCall>,
+    advertised_tool: &ToolInfo,
+    prepared_call: anyhow::Result<PreparedMcpCall>,
     hook_tool_name: HookToolName,
     invocation_tool_name: ToolName,
     source: &crate::tools::context::ToolCallSource,
     arguments: String,
 ) -> HandledMcpToolCall {
     let turn_context = &step_context.turn;
-    let server = tool_info.server_name.clone();
-    let tool_name = tool_info.tool.name.to_string();
-    // Parse the `arguments` as JSON. An empty string is OK, but invalid JSON
-    // is not.
-    let arguments_value = if arguments.trim().is_empty() {
-        None
-    } else {
-        match serde_json::from_str::<serde_json::Value>(&arguments) {
-            Ok(value) => Some(value),
-            Err(e) => {
-                error!("failed to parse tool call arguments: {e}");
-                return HandledMcpToolCall {
-                    result: CallToolResult::from_error_text(format!("err: {e}")),
-                    tool_input: JsonValue::Object(serde_json::Map::new()),
-                };
-            }
+    let server = advertised_tool.server_name.clone();
+    let tool_name = advertised_tool.tool.name.to_string();
+    let arguments_value = match parse_mcp_tool_arguments(&arguments) {
+        Ok(value) => value,
+        Err(e) => {
+            error!("failed to parse tool call arguments: {e}");
+            return HandledMcpToolCall {
+                result: CallToolResult::from_error_text(format!("err: {e}")),
+                tool_input: JsonValue::Object(serde_json::Map::new()),
+            };
         }
     };
 
@@ -173,32 +187,32 @@ pub(crate) async fn handle_mcp_tool_call(
         arguments: arguments_value.clone(),
     };
 
-    let Some(prepared_call) = prepared_call else {
-        let item_metadata =
-            McpToolCallItemMetadata::from_tool_metadata(&server, /*metadata*/ None);
-        let result = notify_mcp_tool_call_skip(
-            sess.as_ref(),
-            turn_context.as_ref(),
-            &call_id,
-            invocation,
-            item_metadata,
-            format!("MCP tool `{server}/{tool_name}` is not available to the model"),
-            /*already_started*/ false,
-        )
-        .await;
-        return HandledMcpToolCall {
-            result: CallToolResult::from_result(result),
-            tool_input: arguments_value
-                .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
-        };
-    };
-    let metadata = match mcp_tool_metadata(
-        prepared_call.tool_info(),
-        prepared_call.plugin_id(),
-        invocation.arguments.as_ref(),
-    ) {
-        Ok(metadata) => metadata,
-        Err(err) => {
+    let prepared = prepared_call.and_then(|call| {
+        let issued_context = apps_invocation_context(advertised_tool);
+        let context_changed = server == CODEX_APPS_MCP_SERVER_NAME
+            && apps_invocation_context(call.tool_info()) != issued_context;
+        // Only the connection that advertised the context may receive it after a catalog refresh.
+        if context_changed && !call.uses_connection_from(&step_context.mcp) {
+            return Err(advertised_tool.unavailable_to_model_error());
+        }
+        let mut metadata = mcp_tool_metadata(
+            call.tool_info(),
+            call.plugin_id(),
+            invocation.arguments.as_ref(),
+        )?;
+        if context_changed {
+            let apps_meta = metadata.codex_apps_meta.get_or_insert_default();
+            if let Some(value) = issued_context {
+                apps_meta.insert(APPS_INVOCATION_CONTEXT.to_string(), value.clone());
+            } else {
+                apps_meta.remove(APPS_INVOCATION_CONTEXT);
+            }
+        }
+        Ok((call, metadata))
+    });
+    let (prepared_call, metadata) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
             let item_metadata =
                 McpToolCallItemMetadata::from_tool_metadata(&server, /*metadata*/ None);
             let result = notify_mcp_tool_call_skip(
@@ -207,7 +221,7 @@ pub(crate) async fn handle_mcp_tool_call(
                 &call_id,
                 invocation,
                 item_metadata,
-                err.to_string(),
+                format!("{error:#}"),
                 /*already_started*/ false,
             )
             .await;
@@ -219,22 +233,10 @@ pub(crate) async fn handle_mcp_tool_call(
         }
     };
     let item_metadata = McpToolCallItemMetadata::from_tool_metadata(&server, Some(&metadata));
-    let runtime_config = prepared_call.config();
-    let app_tool_policy = if server == CODEX_APPS_MCP_SERVER_NAME {
-        app_tool_policy(runtime_config, &metadata, &tool_name)
-    } else {
-        AppToolPolicy::default()
-    };
-    let approval_mode = if server == CODEX_APPS_MCP_SERVER_NAME {
-        app_tool_policy.approval
-    } else {
-        prepared_call.tool_approval_mode()
-    };
-
     let connector_id = metadata.connector_id.clone();
     let connector_name = metadata.connector_name.clone();
 
-    if server == CODEX_APPS_MCP_SERVER_NAME && !app_tool_policy.enabled {
+    let Some(approval_policy) = mcp_tool_approval_policy(&prepared_call, &metadata) else {
         let result = notify_mcp_tool_call_skip(
             sess.as_ref(),
             turn_context.as_ref(),
@@ -261,12 +263,13 @@ pub(crate) async fn handle_mcp_tool_call(
             tool_input: arguments_value
                 .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
         };
-    }
+    };
     let _approval_metadata = sess.register_mcp_tool_approval_metadata(
         &call_id,
         &invocation,
         metadata.clone(),
         GuardianReviewContext::from(step_context),
+        capture_environment_permissions(prepared_call.permission_source()),
     );
     notify_mcp_tool_call_started(
         sess.as_ref(),
@@ -277,11 +280,6 @@ pub(crate) async fn handle_mcp_tool_call(
     )
     .await;
 
-    let approval_policy = if prepared_call.is_selected_plugin_server() {
-        McpToolApprovalPolicy::for_selected_plugin(approval_mode)
-    } else {
-        McpToolApprovalPolicy::for_server(approval_mode)
-    };
     if let Some(approval) = maybe_request_mcp_tool_approval(
         &sess,
         step_context,
@@ -560,6 +558,7 @@ async fn handle_approved_mcp_tool_call(
                         .as_ref()
                         .zip(item_metadata.action_name.as_ref())
                         .map(|(connector_id, action_name)| HostedFileUploadContext {
+                            thread_id: None,
                             connector_id: connector_id.clone(),
                             action_name: action_name.clone(),
                             model: step_context.settings.model_info.slug.clone(),
@@ -1327,6 +1326,20 @@ pub(crate) struct McpToolApprovalContext {
     pub(crate) invocation: Option<McpInvocation>,
     pub(crate) metadata: McpToolApprovalMetadata,
     pub(crate) review_context: GuardianReviewContext,
+    /// Rules captured when MCP prepared this call, if the server belongs to an environment.
+    pub(crate) environment_permissions: Option<(String, Arc<FileSystemSandboxContext>)>,
+}
+
+fn capture_environment_permissions(
+    source: McpPermissionSource<'_>,
+) -> Option<(String, Arc<FileSystemSandboxContext>)> {
+    match source {
+        McpPermissionSource::Environment {
+            environment_id,
+            sandbox,
+        } => Some((environment_id.to_owned(), Arc::clone(sandbox))),
+        McpPermissionSource::Thread { .. } => None,
+    }
 }
 
 impl Session {
@@ -1336,6 +1349,7 @@ impl Session {
         invocation: &McpInvocation,
         metadata: McpToolApprovalMetadata,
         review_context: GuardianReviewContext,
+        environment_permissions: Option<(String, Arc<FileSystemSandboxContext>)>,
     ) -> Arc<McpToolApprovalContext> {
         let key = (invocation.server.clone(), call_id.to_string());
         let metadata = Arc::new(McpToolApprovalContext {
@@ -1344,6 +1358,7 @@ impl Session {
             .then(|| invocation.clone()),
             metadata,
             review_context,
+            environment_permissions,
         });
         let mut registry = self
             .mcp_tool_approval_metadata
@@ -1616,21 +1631,28 @@ struct McpToolApproval {
     cancellation_reason: Option<McpApprovalCancellationReason>,
 }
 
+enum McpToolApprovalRequirement {
+    NotRequired,
+    Remembered,
+    Required {
+        action: Box<ApprovalAction>,
+        strict_auto_review: bool,
+    },
+}
+
 #[expect(clippy::too_many_arguments)]
-async fn maybe_request_mcp_tool_approval(
+async fn prepare_mcp_tool_approval(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
-    cancellation_token: &CancellationToken,
     call_id: &str,
     invocation: &McpInvocation,
-    invocation_tool_name: &ToolName,
     hook_tool_name: &HookToolName,
     metadata: &McpToolApprovalMetadata,
     config: &codex_mcp::McpConfig,
     permission_source: McpPermissionSource<'_>,
     environment_id: &str,
     policy: McpToolApprovalPolicy,
-) -> Option<McpToolApproval> {
+) -> McpToolApprovalRequirement {
     let turn_context = &step_context.turn;
     let strict_auto_review = turn_context.strict_auto_review_enabled();
     let approvals_reviewer = connectors::mcp_approvals_reviewer_from_layers(
@@ -1653,12 +1675,12 @@ async fn maybe_request_mcp_tool_approval(
             },
         )
     {
-        return None;
+        return McpToolApprovalRequirement::NotRequired;
     }
 
     let annotations = metadata.annotations.as_ref();
     if !strict_auto_review && !requires_mcp_tool_approval_for_mode(annotations, policy.mode) {
-        return None;
+        return McpToolApprovalRequirement::NotRequired;
     }
 
     let session_approval_key =
@@ -1672,11 +1694,7 @@ async fn maybe_request_mcp_tool_approval(
         && let Some(key) = session_approval_key.as_ref()
         && mcp_tool_approval_is_remembered(sess, key).await
     {
-        return Some(McpToolApproval {
-            decision: ReviewDecision::Approved,
-            source: None,
-            cancellation_reason: None,
-        });
+        return McpToolApprovalRequirement::Remembered;
     }
 
     let action = ApprovalAction::McpToolCall {
@@ -1707,13 +1725,55 @@ async fn maybe_request_mcp_tool_approval(
         approval_mode: policy.mode,
         allow_session_remember: session_approval_key.is_some(),
         allow_persistent_approval: persistent_approval_key.is_some(),
-        prompt_permissions: match permission_source {
-            McpPermissionSource::Environment {
-                environment_id,
-                sandbox,
-            } => Some((environment_id.to_owned(), Arc::clone(sandbox))),
-            McpPermissionSource::Thread { .. } => None,
-        },
+        prompt_permissions: capture_environment_permissions(permission_source),
+    };
+    McpToolApprovalRequirement::Required {
+        action: Box::new(action),
+        strict_auto_review,
+    }
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn maybe_request_mcp_tool_approval(
+    sess: &Arc<Session>,
+    step_context: &Arc<StepContext>,
+    cancellation_token: &CancellationToken,
+    call_id: &str,
+    invocation: &McpInvocation,
+    invocation_tool_name: &ToolName,
+    hook_tool_name: &HookToolName,
+    metadata: &McpToolApprovalMetadata,
+    config: &codex_mcp::McpConfig,
+    permission_source: McpPermissionSource<'_>,
+    environment_id: &str,
+    policy: McpToolApprovalPolicy,
+) -> Option<McpToolApproval> {
+    let (action, strict_auto_review) = match prepare_mcp_tool_approval(
+        sess,
+        step_context,
+        call_id,
+        invocation,
+        hook_tool_name,
+        metadata,
+        config,
+        permission_source,
+        environment_id,
+        policy,
+    )
+    .await
+    {
+        McpToolApprovalRequirement::NotRequired => return None,
+        McpToolApprovalRequirement::Remembered => {
+            return Some(McpToolApproval {
+                decision: ReviewDecision::Approved,
+                source: None,
+                cancellation_reason: None,
+            });
+        }
+        McpToolApprovalRequirement::Required {
+            action,
+            strict_auto_review,
+        } => (*action, strict_auto_review),
     };
     let approval_context = ApprovalContext {
         exec_requirement: None,
@@ -1977,6 +2037,27 @@ pub(crate) fn build_guardian_mcp_tool_review_request(
             }),
         prompt_permissions: None,
     }
+}
+
+fn mcp_tool_approval_policy(
+    call: &PreparedMcpCall,
+    metadata: &McpToolApprovalMetadata,
+) -> Option<McpToolApprovalPolicy> {
+    let mode = if call.server_name() == CODEX_APPS_MCP_SERVER_NAME {
+        let policy = app_tool_policy(call.config(), metadata, call.tool_info().tool.name.as_ref());
+        if !policy.enabled {
+            return None;
+        }
+        policy.approval
+    } else {
+        call.tool_approval_mode()
+    };
+
+    Some(if call.is_selected_plugin_server() {
+        McpToolApprovalPolicy::for_selected_plugin(mode)
+    } else {
+        McpToolApprovalPolicy::for_server(mode)
+    })
 }
 
 fn app_tool_policy(

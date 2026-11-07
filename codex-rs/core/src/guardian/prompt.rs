@@ -1,5 +1,4 @@
 use codex_extension_api::ConversationHistorySnapshot;
-use codex_features::Feature;
 use codex_guardian_context::CollectedContext;
 use codex_guardian_context::ContextProfile;
 use codex_guardian_context::GuardianRootMessage;
@@ -122,20 +121,7 @@ pub(super) async fn collect_guardian_prompt_items_with_parent_turn(
         &request,
         reasons.retry.or(reasons.approval),
     )?;
-    let permissions = match request {
-        GuardianApprovalRequest::McpToolCall {
-            prompt_permissions: Some((environment_id, sandbox)),
-            ..
-        } => Some(super::permissions::for_mcp_environment(
-            &environment_id,
-            &sandbox,
-        )?),
-        _ => parent_context
-            .map(|context| {
-                super::permissions::for_environment(context, request.target_environment_id())
-            })
-            .transpose()?,
-    };
+    let permissions = super::permissions::for_request(&request, parent_context)?;
     let node_repl_snapshot = if node_repl_transcripts_enabled {
         session
             .services
@@ -158,9 +144,7 @@ pub(super) async fn collect_guardian_prompt_items_with_parent_turn(
     profile.transcript.options.native_multi_agent_namespace = parent_context
         .is_some_and(|context| {
             let turn = context.turn();
-            turn.config
-                .features
-                .enabled(Feature::GuardianNativeMultiAgentHistory)
+            turn.config.guardian_native_multi_agent_history_enabled()
                 && turn.multi_agent_version == codex_protocol::protocol::MultiAgentVersion::V2
         })
         .then(|| {

@@ -25,9 +25,7 @@ doctest = false
 workspace = true
 
 [dependencies]
-codex-agent-message-board-client = { workspace = true }
-codex-agent-message-board-extension = { workspace = true }
-codex-message-board = { workspace = true }
+codex-agent-message-board-host = { workspace = true }
 codex-utils-process = { workspace = true }
 anyhow = { workspace = true }
 base64 = { workspace = true }
@@ -76,6 +74,7 @@ codex-backend-client = { workspace = true }
 codex-file-search = { workspace = true }
 codex-chatgpt = { workspace = true }
 codex-login = { workspace = true }
+codex-runtime-agent-instance = { workspace = true }
 codex-image-generation-extension = { workspace = true }
 codex-memories-extension = { workspace = true }
 codex-web-search-extension = { workspace = true }
@@ -142,6 +141,7 @@ codex-windows-sandbox = { workspace = true }
 # Match the CLI/TUI feature set when checking frozen production report bytes.
 serde_json = { workspace = true, features = ["preserve_order"] }
 codex-attachment-store = { workspace = true }
+codex-message-board = { workspace = true }
 zip = { workspace = true }
 codex-uds = { workspace = true }
 app_test_support = { workspace = true }

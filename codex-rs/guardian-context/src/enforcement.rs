@@ -38,13 +38,15 @@ pub(crate) enum BudgetPriority {
 }
 
 /// Content and its selection policy move together through rendering and admission.
-/// Required support uses the section minimum in Elastic mode. Protected host framing
+/// Required support has priority within Elastic section allocations. Protected host framing
 /// and exact actions stay complete; Fixed retention remains unchanged.
 #[derive(Clone, PartialEq)]
 pub struct Budgeted<T> {
     pub content: T,
     /// Host framing and exact actions use global space, outside section quotas.
     pub(crate) protected: bool,
+    /// Host-verified question/answer records must be kept or omitted whole.
+    pub(crate) verified_answer: bool,
     pub(crate) source: Option<codex_history::RetainedSource>,
     pub(crate) retention: Retention,
 }
@@ -54,6 +56,7 @@ impl<T> Budgeted<T> {
         Self {
             content,
             protected: false,
+            verified_answer: false,
             source: None,
             retention: Retention::Required,
         }
@@ -66,10 +69,18 @@ impl<T> Budgeted<T> {
         }
     }
 
+    pub(crate) fn verified_answer(content: T) -> Self {
+        Self {
+            verified_answer: true,
+            ..Self::required(content)
+        }
+    }
+
     pub(crate) fn map<U>(self, transform: impl FnOnce(T) -> U) -> Budgeted<U> {
         Budgeted {
             content: transform(self.content),
             protected: self.protected,
+            verified_answer: self.verified_answer,
             source: self.source,
             retention: self.retention,
         }
@@ -79,6 +90,7 @@ impl<T> Budgeted<T> {
         Self {
             content,
             protected: false,
+            verified_answer: false,
             source: None,
             retention: Retention::Historical,
         }
@@ -88,6 +100,7 @@ impl<T> Budgeted<T> {
         Self {
             content,
             protected: false,
+            verified_answer: false,
             source: None,
             retention: Retention::Optional(priority),
         }

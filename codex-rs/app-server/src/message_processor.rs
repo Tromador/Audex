@@ -98,6 +98,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_queue_extension::QueuedItemService;
 use codex_rollout::StateDbHandle;
+use codex_runtime_agent_instance::RuntimeAuthSlot;
 use codex_state::log_db::LogDbLayer;
 use codex_thread_store::LocalQueueStore;
 use codex_thread_store::QueueStore;
@@ -276,6 +277,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) startup_warnings_tx: mpsc::UnboundedSender<String>,
     pub(crate) session_source: SessionSource,
     pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) runtime_auth_slot: Option<RuntimeAuthSlot>,
     pub(crate) user_verification: Arc<crate::user_verification::Service>,
     pub(crate) installation_id: String,
     pub(crate) code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>>,
@@ -305,6 +307,7 @@ impl MessageProcessor {
             startup_warnings_tx,
             session_source,
             auth_manager,
+            runtime_auth_slot,
             user_verification,
             installation_id,
             code_mode_session_provider,
@@ -426,6 +429,11 @@ impl MessageProcessor {
                 None => manager,
             }
         });
+        let runtime_auth = thread_manager.runtime_auth_manager();
+        if let (Some(slot), Some(runtime)) = (runtime_auth_slot, &runtime_auth) {
+            // Analytics starts before the harness. Bind its requests to the harness registration.
+            slot.get_or_init(|| Arc::clone(runtime));
+        }
         let model_catalog = Arc::new(crate::model_catalog::ModelCatalog::new(
             config_manager.clone(),
             startup_cwd,
@@ -433,8 +441,11 @@ impl MessageProcessor {
             Arc::clone(&thread_manager),
         ));
         let models_refresh_worker = crate::models_refresh_worker::spawn(&model_catalog);
-        let turn_cost_worker =
-            TurnCostWorker::spawn(Arc::clone(&config), Arc::clone(&auth_manager));
+        let turn_cost_worker = TurnCostWorker::spawn(
+            Arc::clone(&config),
+            Arc::clone(&auth_manager),
+            runtime_auth.map(|runtime| (runtime, config.runtime_auth_mode)),
+        );
         thread_manager
             .plugins_manager()
             .set_analytics_events_client(analytics_events_client.clone());
@@ -474,7 +485,6 @@ impl MessageProcessor {
             Arc::clone(&model_catalog),
         );
         let apps_processor = AppsRequestProcessor::new(
-            auth_manager.clone(),
             Arc::clone(&thread_manager),
             outgoing.clone(),
             config_manager.clone(),
@@ -550,7 +560,7 @@ impl MessageProcessor {
             Arc::clone(&thread_list_state_permit),
         );
         let thread_processor = ThreadRequestProcessor::new(
-            auth_manager.clone(),
+            auth_manager,
             Arc::clone(&thread_manager),
             outgoing.clone(),
             arg0_paths.clone(),
@@ -570,7 +580,6 @@ impl MessageProcessor {
             sample_responses,
         );
         let turn_processor = TurnRequestProcessor::new(
-            auth_manager,
             Arc::clone(&thread_manager),
             outgoing.clone(),
             analytics_events_client.clone(),
@@ -602,7 +611,6 @@ impl MessageProcessor {
             Arc::clone(&outgoing),
         );
         if let Some(startup_config) = plugin_startup_tasks {
-            // Keep plugin startup warmups aligned at app-server startup.
             let reload_config = match startup_config {
                 PluginStartupConfig::Current => {
                     plugin_config_reload::for_cwd(config_manager.clone(), config.cwd.clone())
@@ -617,7 +625,6 @@ impl MessageProcessor {
                 .plugins_manager()
                 .maybe_start_plugin_startup_tasks_for_config(
                     &config.plugins_config_input(),
-                    config.features.enabled(Feature::PluginDiscoveryPrefetch),
                     reload_config,
                     Some(on_effective_plugins_changed),
                     startup_warnings_tx,
@@ -1660,7 +1667,9 @@ impl MessageProcessor {
                 self.thread_processor.thread_turns_list(params).await
             }
             ClientRequest::ThreadItemsList { params, .. } => {
-                self.thread_processor.thread_items_list(params).await
+                self.thread_processor
+                    .thread_items_list(&request_id, params)
+                    .await
             }
             ClientRequest::ThreadItemsRead { params, .. } => {
                 self.thread_processor.thread_items_read(params).await
@@ -1920,12 +1929,13 @@ impl MessageProcessor {
                     .bedrock_check_gov_cloud_requirements()
                     .await
             }
-            ClientRequest::GatewayOAuthRead { .. } => {
-                Box::pin(self.account_processor.gateway_oauth_read())
-                    .await
-                    .map(|response| Some(response.into()))
-            }
-            ClientRequest::GatewayOAuthLogin { .. } => {
+            ClientRequest::GatewayOAuthRead { params, .. } => Box::pin(
+                self.account_processor
+                    .gateway_oauth_read(params.unwrap_or_default()),
+            )
+            .await
+            .map(|response| Some(response.into())),
+            ClientRequest::GatewayOAuthLogin { params, .. } => {
                 if session
                     .opted_out_notification_methods()
                     .contains("account/gatewayOAuth/changed")
@@ -1934,10 +1944,11 @@ impl MessageProcessor {
                         "Gateway login requires account/gatewayOAuth/changed notifications",
                     ))
                 } else {
-                    Box::pin(
-                        self.account_processor
-                            .gateway_oauth_login(connection_id, &session.rpc_gate),
-                    )
+                    Box::pin(self.account_processor.gateway_oauth_login(
+                        params.unwrap_or_default(),
+                        connection_id,
+                        &session.rpc_gate,
+                    ))
                     .await
                     .map(|response| Some(response.into()))
                 }
@@ -1971,6 +1982,12 @@ impl MessageProcessor {
             ClientRequest::GetAuthStatus { params, .. } => {
                 self.account_processor.get_auth_status(params).await
             }
+            ClientRequest::GetAccountSecuritySetup { .. } => Ok(Some(
+                self.account_processor
+                    .get_account_security_setup()
+                    .await
+                    .into(),
+            )),
             ClientRequest::GetAccountRateLimits { params, .. } => {
                 self.account_processor.get_account_rate_limits(params).await
             }

@@ -2322,6 +2322,32 @@
       ],
       "type": "object"
     },
+    "GatewayOAuthLoginParams": {
+      "description": "Authorize a configured provider without changing the default or any thread's provider.",
+      "properties": {
+        "modelProvider": {
+          "description": "Defaults to the current provider when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GatewayOAuthReadParams": {
+      "description": "Read credential readiness for a configured provider without starting browser login.",
+      "properties": {
+        "modelProvider": {
+          "description": "Defaults to the current provider when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "GcpProviderId": {
       "enum": [
         "gcp"
@@ -2817,6 +2843,14 @@
     },
     "McpResourceReadParams": {
       "properties": {
+        "_meta": {
+          "additionalProperties": true,
+          "description": "Additional MCP request metadata. Account and turn routing keys are reserved.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "connectorId": {
           "type": [
             "string",
@@ -3093,6 +3127,13 @@
           "minimum": 0.0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "modelProvider": {
+          "description": "List models for this configured provider instead of the app-server default.",
+          "type": [
+            "string",
             "null"
           ]
         }
@@ -5585,6 +5626,10 @@
       ],
       "type": "object"
     },
+    "ThreadItemOutputDeferral": {
+      "properties": {},
+      "type": "object"
+    },
     "ThreadItemsListAnchor": {
       "description": "An exclusive item position within the requested visible turn.",
       "oneOf": [
@@ -5633,6 +5678,17 @@
             }
           ],
           "description": "Opaque continuation cursor or an exclusive item anchor in the requested visible turn. An item anchor requires a non-empty `turnId`; ascending (the default) returns items after it, and descending returns items before it. Continue with the returned string cursor."
+        },
+        "deferOutput": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadItemOutputDeferral"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "For a single turn, choose which saved outputs to fetch separately by item ID."
         },
         "limit": {
           "description": "Optional item page size.",
@@ -9039,7 +9095,14 @@
           "type": "string"
         },
         "params": {
-          "type": "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GatewayOAuthReadParams"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -9062,7 +9125,14 @@
           "type": "string"
         },
         "params": {
-          "type": "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GatewayOAuthLoginParams"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -9474,6 +9544,29 @@
         "method"
       ],
       "title": "Account/logoutRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "account/securitySetup/read"
+          ],
+          "title": "Account/securitySetup/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "id",
+        "method"
+      ],
+      "title": "Account/securitySetup/readRequest",
       "type": "object"
     },
     {

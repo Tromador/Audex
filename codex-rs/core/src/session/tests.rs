@@ -1,6 +1,16 @@
 use crate::agent::LocalAgentControl;
+use codex_protocol::ContextWindowId;
+#[path = "compaction_replay_tests.rs"]
+mod compaction_replay_tests;
+
+#[path = "network_policy_tests.rs"]
+mod network_policy_tests;
+
 #[path = "notification_tests.rs"]
 mod notification_tests;
+
+#[path = "patch_approval_tests.rs"]
+mod patch_approval_tests;
 
 use super::mcp_refresh::McpRefresh;
 #[path = "turn_start_mcp_tests.rs"]
@@ -21,7 +31,6 @@ use crate::config::RuntimeConfigRefresh;
 use crate::context::ContextualUserFragment;
 use crate::context::DeveloperInstructions;
 use crate::context::TurnAborted;
-use crate::environment_selection::EnvironmentAttachment;
 use crate::environment_selection::EnvironmentConfigOrigin;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentState;
@@ -288,6 +297,7 @@ impl StepContext {
         });
         settings.service_tier = turn.config.service_tier.clone();
         Arc::new(Self {
+            sampled_through_sequence: None,
             preempt: turn
                 .config
                 .features
@@ -1247,52 +1257,6 @@ async fn start_managed_network_proxy_applies_execpolicy_network_rules() -> anyho
     assert_eq!(
         current_cfg.allowed_domains(),
         Some(vec!["example.com".to_string()])
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn start_managed_network_proxy_ignores_invalid_execpolicy_network_rules() -> anyhow::Result<()>
-{
-    let permission_profile = PermissionProfile::workspace_write();
-    let spec = crate::config::NetworkProxySpec::from_config_and_constraints(
-        NetworkProxyConfig::default(),
-        Some(NetworkConstraints {
-            domains: Some(NetworkDomainPermissionsToml {
-                entries: std::collections::BTreeMap::from([(
-                    "managed.example.com".to_string(),
-                    NetworkDomainPermissionToml::Allow,
-                )]),
-            }),
-            managed_allowed_domains_only: Some(true),
-            ..Default::default()
-        }),
-        &permission_profile,
-    )?;
-    let mut exec_policy = Policy::empty();
-    exec_policy.add_network_rule(
-        "example.com",
-        NetworkRuleProtocol::Https,
-        Decision::Allow,
-        /*justification*/ None,
-    )?;
-
-    let (started_proxy, _) = Session::start_managed_network_proxy(
-        &spec,
-        &exec_policy,
-        &permission_profile,
-        SandboxType::None,
-        /*network_policy_decider*/ None,
-        /*blocked_request_observer*/ None,
-        /*managed_network_requirements_enabled*/ false,
-        crate::config::NetworkProxyAuditMetadata::default(),
-    )
-    .await?;
-
-    let current_cfg = started_proxy.proxy().current_cfg().await?;
-    assert_eq!(
-        current_cfg.allowed_domains(),
-        Some(vec!["managed.example.com".to_string()])
     );
     Ok(())
 }
@@ -2466,89 +2430,6 @@ fn collect_explicit_app_ids_from_skill_items_skips_plain_mentions_with_skill_con
 }
 
 #[tokio::test]
-async fn reconstruct_history_matches_live_compactions() {
-    let (session, turn_context) = make_session_and_context().await;
-    let (rollout_items, expected) = sample_rollout(&session, &turn_context).await;
-
-    let reconstruction_turn = session.new_default_turn().await;
-    let reconstructed = session
-        .reconstruct_history_from_rollout(reconstruction_turn.as_ref(), &rollout_items)
-        .await;
-
-    assert_eq!(expected, raw_envelopes(&reconstructed.history));
-    assert_eq!(2, reconstructed.window_number);
-    assert_eq!(
-        reconstructed
-            .window_id
-            .map(|window_id| window_id.get_version_num()),
-        Some(7)
-    );
-}
-
-#[tokio::test]
-async fn reconstruct_history_uses_replacement_history_verbatim() {
-    let (session, turn_context) = make_session_and_context().await;
-    let summary_item = ResponseItem::Message {
-        status: None,
-        encrypted_content: None,
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "summary".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
-            turn_id: Some("compact-turn".to_string()),
-            ..Default::default()
-        }),
-    };
-    let replacement_history = vec![
-        ResponseItemEnvelope {
-            item: summary_item.clone(),
-            metadata: Some(CodexHarnessMetadata::default()),
-        },
-        ResponseItemEnvelope::new(ResponseItem::Message {
-            status: None,
-            encrypted_content: None,
-            id: None,
-            role: "developer".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "stale developer instructions".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        }),
-    ];
-    let first_window_id = Uuid::now_v7();
-    let previous_window_id = Uuid::now_v7();
-    let window_id = Uuid::now_v7();
-    let rollout_items = vec![RolloutItem::Compacted(Box::new(CompactedItem {
-        message: String::new(),
-        replacement_history: Some(replacement_history.clone()),
-        retained_context: None,
-        guardian_history: None,
-        mcp_resource_origins: None,
-        window_number: Some(42),
-        first_window_id: Some(first_window_id.to_string()),
-        previous_window_id: Some(previous_window_id.to_string()),
-        window_id: Some(window_id.to_string()),
-        compaction_response_id: None,
-        latest_token_usage_record: None,
-        resume_metadata: None,
-    }))];
-
-    let reconstructed = session
-        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
-        .await;
-
-    assert_eq!(reconstructed.history, replacement_history);
-    assert_eq!(42, reconstructed.window_number);
-    assert_eq!(Some(first_window_id), reconstructed.first_window_id);
-    assert_eq!(Some(previous_window_id), reconstructed.previous_window_id);
-    assert_eq!(Some(window_id), reconstructed.window_id);
-}
-
-#[tokio::test]
 async fn record_initial_history_reconstructs_resumed_transcript() {
     let (session, turn_context) = make_session_and_context().await;
     let (rollout_items, expected) = sample_rollout(&session, &turn_context).await;
@@ -2895,6 +2776,8 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
             item: expected_item.clone(),
             metadata: Some(CodexHarnessMetadata {
                 user_input_order: Some(0),
+                history_sequence: Some(1),
+                sampled_through_sequence: Some(0),
                 ..Default::default()
             }),
         }),
@@ -3067,11 +2950,11 @@ async fn annotated_history_uses_explicit_model_without_a_step(
             .executed_tool_calls
             .mcp_attribution_snapshot(),
     );
-    for envelope in &mut expected {
-        envelope
-            .metadata
-            .get_or_insert_default()
-            .history_truncation_token_limit = Some(expected_budget);
+    for (index, envelope) in expected.iter_mut().enumerate() {
+        let metadata = envelope.metadata.get_or_insert_default();
+        metadata.history_sequence = Some(index as u64 + 1);
+        metadata.sampled_through_sequence = Some(0);
+        metadata.history_truncation_token_limit = Some(expected_budget);
         let (ResponseItem::FunctionCallOutput { output, .. }
         | ResponseItem::CustomToolCallOutput { output, .. }) = &mut envelope.item
         else {
@@ -3250,7 +3133,11 @@ async fn prepares_resumed_history_before_installing_it() {
     );
     assert_eq!(
         history.annotated_items()[0].metadata,
-        Some(CodexHarnessMetadata::default())
+        Some(CodexHarnessMetadata {
+            history_sequence: Some(1),
+            sampled_through_sequence: Some(0),
+            ..Default::default()
+        })
     );
 }
 
@@ -4333,7 +4220,11 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
     assert_eq!(raw_history_items(&live_history), vec![expected_item]);
     assert_eq!(
         live_history.annotated_items()[0].metadata,
-        Some(CodexHarnessMetadata::default())
+        Some(CodexHarnessMetadata {
+            history_sequence: Some(1),
+            sampled_through_sequence: Some(0),
+            ..Default::default()
+        })
     );
 
     session.flush_rollout().await.expect("rollout should flush");
@@ -4507,15 +4398,14 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         root_turn_id: None,
+        direct_only_tool_namespaces: None,
         disabled_plugin_ids: None,
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
-        sandbox_policy: turn_context.sandbox_policy(),
-        permission_profile: None,
+        permission_profile: turn_context.permission_profile(),
         active_permission_profile: None,
-        file_system_sandbox_policy: None,
         model: previous_model.to_string(),
         comp_hash: None,
         collaboration_mode: Some(turn_context.collaboration_mode()),
@@ -5075,7 +4965,7 @@ async fn open_thread_persistence(session: &mut Session) -> PathBuf {
             history_mode: Default::default(),
             subagent_history_start_ordinal: None,
             history_base: None,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7().to_string(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
@@ -6995,6 +6885,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     state.history = ContextManager::for_session(
         session_configuration.root_capabilities_restricted,
         &config.features,
+        config.guardian_context_budgeting(),
         Arc::clone(&item_id_generator),
     );
     let (environment_manager, resolved_environments) =
@@ -7142,6 +7033,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         thread_id,
         item_id_generator,
         agent_runtime: crate::agent::host::AgentRuntimeServices::Controller,
+        outcome_reporting: None,
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         tx_event,
         parent_observer_event_tx: OnceLock::new(),
@@ -8867,7 +8759,7 @@ async fn shutdown_complete_does_not_append_to_thread_store_after_shutdown() {
             history_mode: Default::default(),
             subagent_history_start_ordinal: None,
             history_base: None,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7().to_string(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
@@ -9006,7 +8898,7 @@ async fn submission_loop_channel_close_runs_full_thread_teardown() -> anyhow::Re
             history_mode: Default::default(),
             subagent_history_start_ordinal: None,
             history_base: None,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7().to_string(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
@@ -9338,6 +9230,7 @@ where
     state.history = ContextManager::for_session(
         session_configuration.root_capabilities_restricted,
         &config.features,
+        config.guardian_context_budgeting(),
         Arc::clone(&item_id_generator),
     );
     let (environment_manager, resolved_turn_environments) =
@@ -9484,6 +9377,7 @@ where
         thread_id,
         item_id_generator,
         agent_runtime: crate::agent::host::AgentRuntimeServices::Controller,
+        outcome_reporting: None,
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         tx_event,
         parent_observer_event_tx: OnceLock::new(),
@@ -11324,11 +11218,9 @@ async fn build_initial_context_restates_realtime_start_when_reference_context_is
 }
 
 fn file_system_policy_with_unreadable_glob(turn_context: &TurnContext) -> FileSystemSandboxPolicy {
-    #[allow(deprecated)]
-    let mut policy = FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
-        &turn_context.sandbox_policy(),
-        &turn_context.cwd,
-    );
+    let mut policy = turn_context
+        .permission_profile()
+        .file_system_sandbox_policy();
     #[allow(deprecated)]
     let cwd_display = turn_context.cwd.as_path().display().to_string();
     policy.entries.push(FileSystemSandboxEntry {
@@ -11371,16 +11263,12 @@ async fn turn_context_item_stores_local_cwd() {
 }
 
 #[tokio::test]
-async fn turn_context_item_omits_legacy_equivalent_file_system_sandbox_policy() {
+async fn turn_context_item_stores_permission_profile() {
     let (_session, turn_context) = make_session_and_context().await;
 
     let item = turn_context.to_turn_context_item();
 
-    assert_eq!(item.file_system_sandbox_policy, None);
-    assert_eq!(
-        item.permission_profile,
-        Some(turn_context.permission_profile())
-    );
+    assert_eq!(item.permission_profile, turn_context.permission_profile());
 }
 
 #[tokio::test]
@@ -11407,7 +11295,7 @@ async fn turn_context_item_stores_active_permission_profile() {
 }
 
 #[tokio::test]
-async fn turn_context_item_stores_split_file_system_sandbox_policy_when_different() {
+async fn turn_context_item_preserves_file_system_restrictions() {
     let (_session, mut turn_context) = make_session_and_context().await;
     let file_system_sandbox_policy = file_system_policy_with_unreadable_glob(&turn_context);
     let permission_profile = PermissionProfile::from_runtime_permissions_with_enforcement(
@@ -11425,18 +11313,7 @@ async fn turn_context_item_stores_split_file_system_sandbox_policy_when_differen
 
     let item = turn_context.to_turn_context_item();
 
-    assert_eq!(
-        item.file_system_sandbox_policy,
-        Some(
-            file_system_sandbox_policy
-                .try_into()
-                .expect("serializable split policy"),
-        )
-    );
-    assert_eq!(
-        item.permission_profile,
-        Some(turn_context.permission_profile())
-    );
+    assert_eq!(item.permission_profile, turn_context.permission_profile());
 }
 
 #[tokio::test]
@@ -11589,7 +11466,7 @@ async fn record_context_updates_and_set_reference_context_item_persists_baseline
 }
 
 #[tokio::test]
-async fn record_context_updates_and_set_reference_context_item_persists_split_file_system_policy_to_rollout()
+async fn record_context_updates_and_set_reference_context_item_persists_permission_profile_to_rollout()
  {
     let (mut session, mut turn_context) = make_session_and_context().await;
     let file_system_sandbox_policy = file_system_policy_with_unreadable_glob(&turn_context);
@@ -11624,17 +11501,13 @@ async fn record_context_updates_and_set_reference_context_item_persists_split_fi
     else {
         panic!("expected resumed rollout history");
     };
-    let persisted_file_system_sandbox_policy = resumed.history.iter().find_map(|item| match item {
-        RolloutItem::TurnContext(ctx) => ctx.file_system_sandbox_policy.clone(),
+    let persisted_permission_profile = resumed.history.iter().find_map(|item| match item {
+        RolloutItem::TurnContext(ctx) => Some(ctx.permission_profile.clone()),
         _ => None,
     });
     assert_eq!(
-        persisted_file_system_sandbox_policy,
-        Some(
-            file_system_sandbox_policy
-                .try_into()
-                .expect("serializable split policy"),
-        )
+        persisted_permission_profile,
+        Some(turn_context.permission_profile())
     );
 }
 
@@ -12008,7 +11881,7 @@ async fn attach_in_memory_thread_store(
             history_mode: Default::default(),
             subagent_history_start_ordinal: None,
             history_base: None,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7().to_string(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
@@ -13374,9 +13247,11 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
         cancellation_token: CancellationToken::new(),
     };
 
-    let output = handle_output_item_done(&mut ctx, item, /*previously_active_item*/ None)
-        .await
-        .expect("tool call should be handled");
+    let output = handle_output_item_done(
+        &mut ctx, item, /*previously_active_item*/ None, /*moderation*/ None,
+    )
+    .await
+    .expect("tool call should be handled");
 
     assert!(output.needs_follow_up);
     assert!(output.tool_future.is_some());

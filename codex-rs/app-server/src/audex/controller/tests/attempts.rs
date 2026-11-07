@@ -476,6 +476,7 @@ async fn capture_deduplicates_identified_replay_and_complete_overlap_but_preserv
                 thread_id: codex_protocol::ThreadId::from_string(&capture.identity().session_id)?,
                 turn_id: "turn".to_owned(),
                 item: TurnItem::AgentMessage(AgentMessageItem {
+                    moderation: None,
                     id: "message".to_owned(),
                     content: vec![AgentMessageContent::Text {
                         text: "echo echo ".to_owned(),

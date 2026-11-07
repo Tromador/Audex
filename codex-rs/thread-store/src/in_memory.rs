@@ -64,6 +64,7 @@ mod tests {
     use crate::StoredTurnItemsView;
     use crate::ThreadPersistenceMetadata;
     use crate::ThreadSortKey;
+    use codex_protocol::ContextWindowId;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::protocol::SessionSource;
 
@@ -137,6 +138,7 @@ mod tests {
                 sort_direction: SortDirection::Asc,
                 sort_key: ItemSortKey::CreatedAtOrdinal,
                 after_updated_at_ordinal: None,
+                before_updated_at_ordinal: None,
             })
             .await
             .expect_err("default list_items should be unsupported");
@@ -184,7 +186,7 @@ mod tests {
                     history_mode: ThreadHistoryMode::Legacy,
                     history_base: None,
                     subagent_history_start_ordinal: None,
-                    initial_window_id: uuid::Uuid::now_v7().to_string(),
+                    initial_window_id: ContextWindowId::new_uuid_v7().to_string(),
                     runtime_workspace_roots: None,
                     metadata: ThreadPersistenceMetadata {
                         cwd: None,
@@ -461,7 +463,7 @@ mod tests {
             history_mode,
             history_base: None,
             subagent_history_start_ordinal: None,
-            initial_window_id: uuid::Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7().to_string(),
             runtime_workspace_roots: None,
             metadata: thread_metadata(),
         }

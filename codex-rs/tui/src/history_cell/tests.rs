@@ -519,6 +519,27 @@ fn structured_tool_cell_renders_raw_plain_text_without_prefix_or_style() {
 }
 
 #[test]
+fn delegated_message_list_spacing_in_scrollback_and_transcript() {
+    let cell = DelegatedMessageCell::new(
+        "other",
+        "- One\n- This item has enough words to wrap\n- Three".to_string(),
+    );
+    let width = 32;
+    let scrollback = render_lines(&cell.display_lines(width)).join("\n");
+    let transcript = render_lines(&visible_lines(fullscreen_session_lines(
+        &cell,
+        width,
+        /*detailed*/ false,
+        HistoryRenderMode::Rich,
+    )))
+    .join("\n");
+
+    insta::assert_snapshot!(format!(
+        "Scrollback\n{scrollback}\n\nRedrawable transcript\n{transcript}"
+    ));
+}
+
+#[test]
 fn raw_mode_toggle_transcript_snapshot() {
     let mut tool_cell = new_active_mcp_tool_call(
         "call-snapshot".to_string(),
@@ -2973,26 +2994,15 @@ fn deprecation_notice_renders_summary_with_details() {
 }
 
 #[test]
-fn legacy_feature_migration_notices() {
-    for (key, snapshot) in [
-        ("shell_zsh_fork", "legacy_zsh_migration_notice_snapshot"),
-        ("daemon_auto_start", "daemon_auto_start_migration_notice"),
-    ] {
-        let mut features = codex_features::Features::with_defaults();
-        features.apply_map(&std::collections::BTreeMap::from([(
-            key.to_string(),
-            false,
-        )]));
-        let usage = features
-            .legacy_feature_usages()
-            .next()
-            .expect("migration notice");
-        let cell = new_deprecation_notice(usage.summary.clone(), usage.details.clone());
-        insta::assert_snapshot!(
-            snapshot,
-            render_lines(&cell.transcript_lines(/*width*/ 80)).join("\n")
-        );
-    }
+fn legacy_zsh_migration_notice_snapshot() {
+    let mut features = codex_features::Features::default();
+    features.record_legacy_usage_force("shell_zsh_fork", codex_features::Feature::ShellZshFork);
+    let usage = features
+        .legacy_feature_usages()
+        .next()
+        .expect("migration notice");
+    let cell = new_deprecation_notice(usage.summary.clone(), usage.details.clone());
+    insta::assert_snapshot!(render_lines(&cell.transcript_lines(/*width*/ 80)).join("\n"));
 }
 
 #[test]

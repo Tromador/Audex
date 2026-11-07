@@ -1,7 +1,13 @@
 use anyhow::Result;
 use codex_protocol::models::AudioReference;
 use codex_protocol::models::ConfigurationReasoning;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::permissions::FileSystemAccessMode;
+use codex_protocol::permissions::FileSystemPath;
+use codex_protocol::permissions::FileSystemSandboxEntry;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -359,6 +365,8 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
         item: RolloutItem::ResponseItem(ResponseItemEnvelope {
             item: response_item.clone(),
             metadata: Some(CodexHarnessMetadata {
+                history_sequence: Some(9),
+                sampled_through_sequence: Some(7),
                 client_authored: true,
                 history_truncation_token_limit: Some(20_000),
                 inherited_user_message: true,
@@ -376,6 +384,8 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
             "type": "response_item",
             "payload": response_item,
             "metadata": {
+                "history_sequence": 9,
+                "sampled_through_sequence": 7,
                 "client_authored": true,
                 "fallback_token_limit_override": 20_000,
                 "inherited_user_message": true,
@@ -391,6 +401,8 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
     assert_eq!(
         envelope.metadata,
         Some(CodexHarnessMetadata {
+            history_sequence: Some(9),
+            sampled_through_sequence: Some(7),
             client_authored: true,
             history_truncation_token_limit: Some(20_000),
             inherited_user_message: true,
@@ -799,6 +811,25 @@ fn uploaded_audio_round_trips_in_canonical_message_content() -> Result<()> {
 /// Preserves the established tagged payload representation for every rollout variant.
 fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
     let cwd = std::env::current_dir()?;
+    let foreign_file_system = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: if cfg!(windows) {
+                "file:///workspace/foreign"
+            } else {
+                "file:///C:/workspace/foreign"
+            }
+            .parse()?,
+        },
+        access: FileSystemAccessMode::Write,
+        missing_path_behavior: None,
+    }]);
+    let denied_file_system = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
+        path: FileSystemPath::GlobPattern {
+            pattern: "**/private/**".to_string(),
+        },
+        access: FileSystemAccessMode::Deny,
+        missing_path_behavior: None,
+    }]);
     let fixtures = [
         json!({
             "type": "session_meta",
@@ -839,8 +870,40 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
                 "cwd": cwd,
                 "approval_policy": "never",
                 "sandbox_policy": { "type": "danger-full-access" },
+                "permission_profile": PermissionProfile::Disabled,
                 "model": "gpt-5",
                 "summary": "auto",
+            },
+        }),
+        json!({
+            "type": "turn_context",
+            "payload": {
+                "turn_id": "interrupted-turn",
+                "cwd": cwd,
+                "approval_policy": "never",
+                "sandbox_policy": {
+                    "type": "workspace-write",
+                    "network_access": false,
+                    "exclude_tmpdir_env_var": true, "exclude_slash_tmp": true,
+                },
+                "permission_profile": PermissionProfile::from_runtime_permissions(
+                    &foreign_file_system,
+                    NetworkSandboxPolicy::Restricted,
+                ),
+                "file_system_sandbox_policy": codex_protocol::permissions::RawFileSystemSandboxPolicy::try_from(foreign_file_system).expect("serializable foreign root"),
+                "model": "gpt-5",
+                "summary": "auto",
+            },
+        }),
+        json!({
+            "type": "turn_context",
+            "payload": {
+                "cwd": cwd, "approval_policy": "never", "model": "gpt-5",
+                "sandbox_policy": { "type": "read-only" },
+                "permission_profile": PermissionProfile::from_runtime_permissions(
+                    &denied_file_system, NetworkSandboxPolicy::Restricted,
+                ),
+                "file_system_sandbox_policy": codex_protocol::permissions::RawFileSystemSandboxPolicy::try_from(denied_file_system).expect("serializable deny rule"),
             },
         }),
         json!({

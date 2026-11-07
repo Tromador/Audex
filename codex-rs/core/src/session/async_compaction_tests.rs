@@ -1,4 +1,4 @@
-//! Cancellation prevents new speculation without cancelling session-owned work.
+//! Background compaction eligibility and cancellation.
 
 use super::*;
 use codex_analytics::CompactionReason;
@@ -8,6 +8,9 @@ use codex_protocol::models::AudioReference;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
+use codex_protocol::protocol::InternalSessionSource;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TokenUsage;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
@@ -117,7 +120,7 @@ async fn cancelled_turn_skips_launch_but_preserves_existing_work(trigger: Compac
     let world_state = Arc::new(WorldState::default());
     let cancelled = CancellationToken::new();
     cancelled.cancel();
-    let auth = sess.services.model_client.auth_owner_generation();
+    let auth = sess.services.model_client.auth_owner();
     maybe_start(
         &sess,
         &step,
@@ -125,7 +128,7 @@ async fn cancelled_turn_skips_launch_but_preserves_existing_work(trigger: Compac
         phase,
         &cancelled,
         &status,
-        (Some("routing".to_string()), auth),
+        (Some("routing".to_string()), auth.clone()),
     )
     .await;
     assert!(
@@ -146,7 +149,7 @@ async fn cancelled_turn_skips_launch_but_preserves_existing_work(trigger: Compac
         phase,
         &turn_cancellation,
         &status,
-        (Some("routing".to_string()), auth),
+        (Some("routing".to_string()), auth.clone()),
     )
     .await;
     turn_cancellation.cancel();
@@ -217,4 +220,25 @@ async fn cancelled_turn_skips_launch_but_preserves_existing_work(trigger: Compac
         assert_eq!(body.contains("file_expired_since_last_turn"), index == 0);
     }
     shutdown(&sess).await;
+}
+
+#[test_case::test_case(false; "all agents")]
+#[test_case::test_case(true; "root only")]
+#[tokio::test]
+async fn root_only_controls_child_eligibility(root_only: bool) {
+    let (_, mut turn) = crate::session::tests::make_session_and_context().await;
+    let features = &mut Arc::make_mut(&mut turn.config).features;
+    features.enable(Feature::AsyncCompaction).unwrap();
+    features
+        .set_enabled(Feature::AsyncCompactionRootOnly, root_only)
+        .unwrap();
+
+    assert!(enabled(&turn));
+    for source in [
+        SessionSource::SubAgent(SubAgentSource::Review),
+        SessionSource::Internal(InternalSessionSource::Guardian),
+    ] {
+        turn.session_source = source;
+        assert_eq!(enabled(&turn), !root_only);
+    }
 }

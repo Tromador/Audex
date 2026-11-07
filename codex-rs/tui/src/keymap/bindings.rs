@@ -109,9 +109,17 @@ impl KeymapActionId {
                 self.action,
                 "focus_main_composer"
                     | "focus_sidebar_content"
+                    | "focus_sidebar_tabs"
                     | "hide_pane"
                     | "focus_pane_left"
                     | "focus_pane_right"
+                    | "minimize_pane_width"
+                    | "maximize_pane_width"
+                    | "equalize_pane_widths"
+                    | "resize_panes"
+                    | "move_divider_left"
+                    | "move_divider_right"
+                    | "toggle_pane_zoom"
             )
     }
 
@@ -309,9 +317,17 @@ define_runtime_action_bindings! {
         focus_activity,
         focus_main_composer,
         focus_sidebar_content,
+        focus_sidebar_tabs,
         hide_pane,
         focus_pane_left,
         focus_pane_right,
+        minimize_pane_width,
+        maximize_pane_width,
+        equalize_pane_widths,
+        resize_panes,
+        move_divider_left,
+        move_divider_right,
+        toggle_pane_zoom,
         open_warnings => runtime_only,
         open_external_editor,
         copy,
