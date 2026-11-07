@@ -468,6 +468,14 @@ pub(super) async fn read_response_from<T: serde::de::DeserializeOwned>(
         if connection_id != expected_connection_id {
             continue;
         }
+        if let crate::outgoing_message::OutgoingMessage::Error(error) = &message
+            && error.id == RequestId::Integer(request_id)
+        {
+            panic!(
+                "request {request_id} on connection {connection_id} returned JSON-RPC error: {:?}",
+                error.error
+            );
+        }
         let crate::outgoing_message::OutgoingMessage::Response(response) = message else {
             continue;
         };
@@ -479,6 +487,73 @@ pub(super) async fn read_response_from<T: serde::de::DeserializeOwned>(
         )
         .expect("response payload should deserialize");
     }
+}
+
+fn error_envelope(
+    connection_id: ConnectionId,
+    request_id: i64,
+) -> crate::outgoing_message::OutgoingEnvelope {
+    crate::outgoing_message::OutgoingEnvelope::ToConnection {
+        connection_id,
+        message: crate::outgoing_message::OutgoingMessage::Error(
+            crate::outgoing_message::OutgoingError {
+                id: RequestId::Integer(request_id),
+                error: codex_app_server_protocol::JSONRPCErrorError {
+                    code: -32603,
+                    data: None,
+                    message: "credentials unavailable".to_string(),
+                },
+            },
+        ),
+        write_complete_tx: None,
+    }
+}
+
+#[tokio::test]
+async fn read_response_skips_errors_for_other_connections_and_requests() {
+    let (outgoing_tx, mut outgoing_rx) = mpsc::channel(/*buffer*/ 3);
+    for envelope in [
+        error_envelope(ConnectionId(8), /*request_id*/ 3),
+        error_envelope(TEST_CONNECTION_ID, /*request_id*/ 4),
+        crate::outgoing_message::OutgoingEnvelope::ToConnection {
+            connection_id: TEST_CONNECTION_ID,
+            message: crate::outgoing_message::OutgoingMessage::Response(
+                crate::outgoing_message::OutgoingResponse {
+                    id: RequestId::Integer(3),
+                    result: Box::new(
+                        codex_app_server_protocol::GatewayOAuthLoginResponse {}.into(),
+                    ),
+                },
+            ),
+            write_complete_tx: None,
+        },
+    ] {
+        outgoing_tx
+            .send(envelope)
+            .await
+            .expect("test receiver remains open");
+    }
+    let response: codex_app_server_protocol::GatewayOAuthLoginResponse =
+        read_response(&mut outgoing_rx, /*request_id*/ 3).await;
+    assert_eq!(
+        response,
+        codex_app_server_protocol::GatewayOAuthLoginResponse {}
+    );
+}
+
+#[tokio::test]
+#[should_panic(
+    expected = "request 3 on connection 7 returned JSON-RPC error: JSONRPCErrorError { code: -32603, data: None, message: \"credentials unavailable\" }"
+)]
+async fn read_response_fails_at_once_on_its_own_error() {
+    // Keeping the sender open means only the error itself can end this wait early.
+    let (outgoing_tx, mut outgoing_rx) = mpsc::channel(/*buffer*/ 1);
+    outgoing_tx
+        .send(error_envelope(TEST_CONNECTION_ID, /*request_id*/ 3))
+        .await
+        .expect("test receiver remains open");
+    let _: codex_app_server_protocol::GatewayOAuthLoginResponse =
+        read_response(&mut outgoing_rx, /*request_id*/ 3).await;
 }
 
 async fn read_thread_started_notification(

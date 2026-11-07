@@ -41,7 +41,8 @@ fn events(body: &Value, retained: &Value, generation: usize, mode: &str) -> Vec<
     if let Some(served) = served {
         created["response"]["headers"] = json!({"OpenAI-Model":served});
     }
-    // response.model is deliberately insufficient; only the authoritative metadata path counts.
+    // HTTP/SSE ignores response.model. The WebSocket handler sets it per mode, where a
+    // provider-authored lifecycle model is generation identity for admitted requests.
     created["response"]["model"] = json!(model);
     let mut events = vec![created];
     if generation == 1 {
@@ -160,6 +161,13 @@ impl NativeProvider {
                         generation+=1;log.lock().expect("requests").push(body.clone());
                         let mut output=events(&body,retained.as_ref().expect("assignment"),generation,mode);
                         if mode=="handshake_only" || (mode=="handshake_continuation_missing" && generation==2) {output[0]["response"].as_object_mut().expect("response").remove("headers");}
+                        let served=output[0]["response"]["headers"]["OpenAI-Model"].as_str().map(str::to_owned);
+                        match (mode,served) {
+                            ("payload_only",_)=>{}
+                            ("header_body_conflict",_)=>{output[0]["response"]["model"]=json!("substitute");}
+                            (_,Some(served))=>{output[0]["response"]["model"]=json!(served);}
+                            (_,None)=>{output[0]["response"].as_object_mut().expect("response").remove("model");}
+                        }
                         for event in output {if socket.send(Message::Text(event.to_string().into())).await.is_err(){return;}}
                     }
                 });
@@ -477,13 +485,17 @@ async fn native_http_and_websocket_identity_is_required_for_every_generation() -
             "missing",
             "payload_only",
             "mismatch",
+            "header_body_conflict",
             "late_mismatch",
             "continuation_missing",
             "continuation_mismatch",
             "handshake_only",
             "handshake_continuation_missing",
         ] {
-            if !websocket && mode.starts_with("handshake_") && mode != "handshake_mismatch" {
+            if !websocket
+                && ((mode.starts_with("handshake_") && mode != "handshake_mismatch")
+                    || mode == "header_body_conflict")
+            {
                 continue;
             }
             let provider = NativeProvider::new(websocket, mode).await?;
@@ -508,7 +520,8 @@ async fn native_http_and_websocket_identity_is_required_for_every_generation() -
                 r[0]["completed"] == true || r[0]["operationState"] == "failed"
             })
             .await?;
-            let valid = matches!(mode, "match" | "handshake" | "alias");
+            let valid = matches!(mode, "match" | "handshake" | "alias")
+                || (websocket && mode == "payload_only");
             assert_eq!(
                 records[0]["completed"], valid,
                 "{websocket}/{mode}: {records:?}"
