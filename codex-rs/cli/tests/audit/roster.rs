@@ -597,7 +597,10 @@ async fn native_http_and_websocket_identity_is_required_for_every_generation() -
                     .output()?;
                 check(&ignored, 0)?;
             }
-            let published = audit(&daemon).args(["read", &id, "--follow"]).output()?;
+            // Attribution receipts are requested explicitly; normal output is findings-first.
+            let published = audit(&daemon)
+                .args(["read", &id, "--follow", "--diagnostics"])
+                .output()?;
             check(&published, if valid { 0 } else { 3 })?;
             let report = String::from_utf8_lossy(&published.stdout);
             if valid {
@@ -886,7 +889,9 @@ async fn public_queued_rosters_and_exact_attempt_controls_survive_restart() -> R
             }
             assert_eq!(provider.requests().await.len(), 4);
         }
-        let report = audit(&daemon).args(["read", &id, "--follow"]).output()?;
+        let report = audit(&daemon)
+            .args(["read", &id, "--follow", "--diagnostics"])
+            .output()?;
         check(&report, 3)?;
         let report_text = String::from_utf8_lossy(&report.stdout);
         assert!(report_text.contains("CONTROLLED_PARTIAL"));

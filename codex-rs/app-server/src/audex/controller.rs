@@ -700,7 +700,38 @@ impl AuditController {
             excluded_count: excluded,
             outstanding_count: reviewers.len() as u32 - completed - excluded,
         };
+        let findings_summary = if artefacts && run.report.is_some() {
+            if let Some(selection) = store.conversation_selection(id).await? {
+                let snapshot = self
+                    .snapshots()
+                    .open(&SnapshotId::parse(run.snapshot_id.clone())?)
+                    .await?;
+                anyhow::ensure!(
+                    selection.run_id == run.run_id
+                        && selection.snapshot_id == run.snapshot_id
+                        && selection.manifest_digest
+                            == sha256_hex(&snapshot.manifest().to_pretty_bytes()?),
+                    "summary selection and snapshot identity mismatch"
+                );
+                Some(super::report::summary::render(
+                    &selection,
+                    snapshot.manifest(),
+                ))
+            } else {
+                None // Historical single-review reports already contain findings only.
+            }
+        } else if artefacts && terminal(run.phase) && completed == 0 {
+            Some(super::report::summary::without_completed_report(
+                &run.run_id,
+                &run.snapshot_id,
+                run.outcome.as_deref(),
+                &reviewers,
+            ))
+        } else {
+            None
+        };
         Ok(AuditRunView {
+            findings_summary,
             collection,
             reviewers,
             run_id: run.run_id.clone(),

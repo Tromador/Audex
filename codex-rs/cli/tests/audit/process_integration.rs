@@ -275,7 +275,7 @@ async fn assert_final(
     let output = tokio::time::timeout(
         Duration::from_secs(30),
         command
-            .args(["read", run, "--follow"])
+            .args(["read", run, "--follow", "--diagnostics"])
             .kill_on_drop(true)
             .output(),
     )
@@ -587,7 +587,7 @@ async fn candidate_crash_and_abort_supersession_recover_one_authoritative_report
         assert_eq!(recovered.bytes, expected.bytes);
         retry_refused(&case, &pool, &run).await?;
         let mut follower = tokio::process::Command::from(audit(&case))
-            .args(["read", &run, "--follow"])
+            .args(["read", &run, "--follow", "--diagnostics"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -1012,7 +1012,12 @@ async fn actual_terminal_snapshot_failure_exits_two_without_provider_inference()
     )
     .await??;
     check(&output, 2)?;
-    assert!(output.stdout.is_empty());
+    let status = String::from_utf8_lossy(&output.stdout);
+    assert!(status.contains("No reviewer completed"));
+    assert!(status.contains("Reviewer 1:"));
+    assert!(status.contains("execution state at publication: failed"));
+    assert!(status.contains(r"snapshot\_integrity\_failure"));
+    assert!(status.contains("No completed report was published"));
     let state = snapshot(&case, &pool, &run, "actual_terminal_failure").await?;
     assert_eq!(state["outcome"], "snapshot_integrity_failure");
     assert!(state["current_report"].is_null());

@@ -14,13 +14,10 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::{
     FileSystemAccessMode, FileSystemSandboxEntry, NetworkSandboxPolicy,
 };
-use codex_protocol::protocol::{
-    AdditionalContextEntry, AdditionalContextKind, AskForApproval, SessionSource, ThreadSource,
-};
+use codex_protocol::protocol::{AskForApproval, SessionSource, ThreadSource};
 use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::user_input::UserInput;
 use serde_json::json;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub(super) const AUDIT_RULES: &str = "Audex fundamental audit rules v1.
@@ -332,34 +329,26 @@ pub(super) async fn prepare(
         require_unified_exec: true,
         expose_additional_permissions: false,
     });
+    // Audit documents are already bounded and verified by snapshot capture. Keep
+    // their complete bytes in the ordinary user payload: additional_context is
+    // a lossy 1,000-token projection intended for ordinary client attachments.
+    let context = snapshot
+        .context_documents()
+        .await?
+        .into_iter()
+        .map(|(path, digest, bytes)| {
+            Ok(json!({"path":path,"sha256":digest,"untrusted_content":String::from_utf8(bytes)?}))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let assignment = json!({
         "version":1, "run_id":request.run_id, "assignment_id":request.assignment_id,
         "snapshot_id":snapshot.snapshot_id(), "brief":request.brief,
-        "output_contract":OUTPUT_CONTRACT,
+        "context":context, "output_contract":OUTPUT_CONTRACT,
     });
-    let mut context = BTreeMap::new();
-    for (path, digest, bytes) in snapshot.context_documents().await? {
-        let label = if path == "AUDEX.md" {
-            "audex_project_guidance_v1"
-        } else {
-            "audex_agents_evidence_v1"
-        };
-        let content = String::from_utf8(bytes)
-            .map_err(|_| anyhow::anyhow!("project context must be UTF-8"))?;
-        context.insert(
-            label.to_string(),
-            AdditionalContextEntry::new(
-                json!({"path":path,"sha256":digest,"content":content}).to_string(),
-                AdditionalContextKind::Untrusted,
-            )
-            .with_name(label),
-        );
-    }
     let mut input = TurnInputRequest::user_input(vec![UserInput::Text {
         text: assignment.to_string(),
         text_elements: Vec::new(),
-    }])
-    .with_additional_context(context);
+    }]);
     input.start.final_output_json_schema = Some(output_schema);
     Ok(PreparedReviewer {
         options,

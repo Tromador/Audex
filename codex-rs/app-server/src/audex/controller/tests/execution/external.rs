@@ -2,6 +2,7 @@
 use super::*;
 mod capture;
 mod control_boundaries;
+mod guidance_parity;
 mod launch_qualification;
 mod lifecycle_qualification;
 mod native_peer;

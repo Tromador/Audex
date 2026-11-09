@@ -84,6 +84,7 @@ fn aborted_report_waits_for_stdout_and_preserves_exit_code() -> anyhow::Result<(
         blocker.await?;
         eprintln!("report write remained pending until gate release");
         let view = AuditRunView {
+            findings_summary: None,
             collection: Default::default(),
             reviewers: Vec::new(),
             run_id: "run".into(),

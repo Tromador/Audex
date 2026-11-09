@@ -307,7 +307,9 @@ impl ChatWidget {
                 CloudSubmissionIntent::StartOrSteer,
                 UserMessageSource::Prompt,
             ),
-            UserMessageSource::Prompt => (CloudSubmissionIntent::StartIfIdle, source),
+            UserMessageSource::Prompt | UserMessageSource::InternalFollowUp => {
+                (CloudSubmissionIntent::StartIfIdle, source)
+            }
             UserMessageSource::QuestionAnswer | UserMessageSource::SafetyRecourse => {
                 (CloudSubmissionIntent::UseKnownTurn, source)
             }
@@ -540,7 +542,10 @@ impl ChatWidget {
         if source != UserMessageSource::SafetyRecourse && !self.submit_op(op.clone()) {
             return (false, None);
         }
-        if source != UserMessageSource::QuestionAnswer {
+        if !matches!(
+            source,
+            UserMessageSource::QuestionAnswer | UserMessageSource::InternalFollowUp
+        ) {
             self.bottom_pane.clear_pending_questions();
         }
         self.dismiss_backend_banner_for_new_turn();

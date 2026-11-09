@@ -172,3 +172,92 @@ async fn unstructured_completion_and_abort_freeze_only_the_winner_without_replay
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn completion_policy_retains_only_completed_opinions_and_identifies_stopped_jobs()
+-> anyhow::Result<()> {
+    for aborted in [false, true] {
+        for completed in 0..=2 {
+            for unstructured in [false, true] {
+                if completed == 0 && unstructured {
+                    continue;
+                }
+                let (_temp, controller, fake, id, attempts) =
+                    super::super::attempts::setup().await?;
+                let store = controller.store().await?;
+                for (index, attempt) in attempts.iter().take(completed).enumerate() {
+                    if index == 0 && unstructured {
+                        opinion(&controller, attempt).await?;
+                    } else {
+                        complete(&controller, attempt, index == 0).await?;
+                    }
+                }
+                store
+                    .finish_operation(
+                        &attempts[2].operation_id,
+                        attempts[2].attempt_revision,
+                        AssignmentState::Failed,
+                        "fixture_failure",
+                    )
+                    .await?;
+                if aborted {
+                    store.abort_run(&id, &[]).await?;
+                } else {
+                    for attempt in &attempts[completed..] {
+                        store
+                            .control_attempt(
+                                &control(
+                                    &id,
+                                    attempt,
+                                    &format!("cancel-{}", attempt.assignment_id),
+                                    AttemptAction::Cancel,
+                                ),
+                                None,
+                            )
+                            .await?;
+                    }
+                }
+                let frozen = store.freeze_report(&id).await?;
+                let diagnostic = crate::audex::report::collection::render(&frozen)?.bytes;
+                let report = record(store.publish_frozen(&frozen).await?);
+                assert_eq!(store.read_report(&report)?, diagnostic);
+                let view = controller.view(&id).await?;
+                assert_eq!(view.collection.completed_count, completed as u32);
+                assert_eq!(view.report.as_deref().unwrap().as_bytes(), diagnostic);
+                let summary = view.findings_summary.as_ref().unwrap();
+                assert!(summary.contains("Reviewer 3:"));
+                assert!(summary.contains("execution state at publication: failed"));
+                assert!(summary.contains("aborted/cancelled by operator"));
+                assert!(summary.contains(r"fixture\_failure"));
+                assert_eq!(summary.contains("Audit aborted by operator"), aborted);
+                match completed {
+                    0 => assert!(summary.contains("No reviewer completed")),
+                    1 => assert!(summary.contains("One reviewer completed")),
+                    _ => assert!(summary.contains("2 reviewers completed")),
+                }
+                assert_eq!(
+                    summary.contains("Relationships between claims"),
+                    completed >= 2
+                );
+                if completed > 0 {
+                    assert!(summary.contains(if unstructured {
+                        "An independent completed opinion with no structured extraction."
+                    } else {
+                        "Attributed finding"
+                    }));
+                }
+                if completed == 2 {
+                    assert!(summary.contains("No findings reported. This is not proof"));
+                }
+                assert_eq!(
+                    fake.starts.load(Ordering::SeqCst),
+                    3,
+                    "publication must not commission replacement reviews"
+                );
+                let reopened = AuditStore::open(controller.root.clone()).await?;
+                assert_eq!(reopened.read_report(&report)?, diagnostic);
+            }
+        }
+    }
+    Ok(())
+}

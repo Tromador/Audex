@@ -92,12 +92,15 @@ enum Action {
         #[command(subcommand)]
         action: attempts::AttemptCommand,
     },
-    /// Read a durable run, writing its Markdown report to stdout when available.
+    /// Read a durable run, showing concise findings when available.
     Read {
         run_id: String,
         /// Keep observing through recoverable pending states; Ctrl-C only disconnects.
         #[arg(long)]
         follow: bool,
+        /// Write the complete immutable report, including operational diagnostics.
+        #[arg(long)]
+        diagnostics: bool,
     },
     /// List durable run summaries, newest first, without opening reports or results.
     List {
@@ -293,6 +296,13 @@ async fn execute(
             "Audex daemon compatibility check failed; no audit start or cancellation was submitted",
         )?;
     }
+    let diagnostics = matches!(
+        &command.action,
+        Some(Action::Read {
+            diagnostics: true,
+            ..
+        })
+    );
     let (view, follow) = match command.action {
         Some(Action::Attempt { action }) => return attempts::run(&audits, action).await,
         Some(Action::List { limit, after }) => {
@@ -327,7 +337,7 @@ async fn execute(
             }
             return Ok(0);
         }
-        Some(Action::Read { run_id, follow }) => {
+        Some(Action::Read { run_id, follow, .. }) => {
             *retained_run = Some(run_id.clone());
             (audits.read(run_id).await?, follow)
         }
@@ -458,7 +468,7 @@ async fn execute(
             (run, true)
         }
     };
-    follow_run(client, view, follow).await
+    follow_run(client, view, follow, diagnostics).await
 }
 
 fn terminal_code(view: &AuditRunView) -> Option<i32> {
@@ -488,6 +498,7 @@ async fn follow_run(
     client: &mut RemoteAppServerClient,
     mut view: AuditRunView,
     follow: bool,
+    diagnostics: bool,
 ) -> anyhow::Result<i32> {
     let audits = AuditClient::new(codex_app_server_client::AppServerRequestHandle::Remote(
         client.request_handle(),
@@ -531,7 +542,11 @@ async fn follow_run(
             shown = Some(view.clone());
         }
         if let Some(code) = terminal_code(&view) {
-            if let Some(report) = &view.report {
+            if let Some(report) = if diagnostics {
+                view.report.as_ref()
+            } else {
+                view.findings_summary.as_ref().or(view.report.as_ref())
+            } {
                 write_report(report).await?;
             } else if code == 0 {
                 bail!("completed audit has no report")

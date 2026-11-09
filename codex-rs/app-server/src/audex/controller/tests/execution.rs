@@ -327,8 +327,9 @@ fn real_codex_tools_context_result_and_independence() -> anyhow::Result<()> {
         assert!(context.contains("Audex fundamental audit rules v1"));
         assert!(context.contains("HOSTILE_GUIDANCE"));
         assert!(context.contains("HOSTILE_EVIDENCE"));
-        assert!(context.contains("audex_project_guidance_v1"));
-        assert!(context.contains("audex_agents_evidence_v1"));
+        assert!(context.contains("AUDEX.md"));
+        assert!(context.contains("AGENTS.md"));
+        assert!(context.contains("untrusted_content"));
         for item in first["input"].as_array().expect("provider input") {
             if item["role"] == "developer" {
                 assert!(!item.to_string().contains("HOSTILE_GUIDANCE"));

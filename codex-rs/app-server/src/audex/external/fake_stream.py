@@ -25,7 +25,7 @@ assert prompt and sys.stdin.buffer.read() == b""
 assignment = json.loads(json.loads(prompt)["message"]["content"])
 with (root / "stream-launches").open("a") as launches:
     launches.write(binding["execution_id"] + "\n")
-(root / "stream-prompt-receipt.json").write_text(json.dumps({"count": 1, "nonce": binding["execution_id"], "pid": os.getpid()}))
+(root / "stream-prompt-receipt.json").write_text(json.dumps({"count": 1, "nonce": binding["execution_id"], "pid": os.getpid(), "assignment": assignment, "system_rules": sys.argv[sys.argv.index("--system-prompt") + 1]}))
 session = scenario.get("session", "session-" + binding["execution_id"])
 model = "claude-haiku-5-5"
 seq = 0

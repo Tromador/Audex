@@ -124,6 +124,7 @@ fn source_and_recovery_forms_parse_without_ambient_options() {
 #[test]
 fn terminal_exit_statuses_do_not_parse_free_text_outcomes() {
     let mut view = AuditRunView {
+        findings_summary: None,
         collection: Default::default(),
         reviewers: Vec::new(),
         run_id: "run".into(),
@@ -219,6 +220,7 @@ fn audit_protocol_requires_an_explicit_matching_version_even_when_empty() {
 #[test]
 fn published_aggregate_outcomes_override_individual_uncertainty() {
     let mut view = AuditRunView {
+        findings_summary: None,
         collection: Default::default(),
         reviewers: Vec::new(),
         run_id: "run".into(),

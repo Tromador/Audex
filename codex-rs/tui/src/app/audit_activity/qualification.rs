@@ -606,7 +606,12 @@ stream_max_retries=0
             .values()
             .all(|v| !v.value.contains(&report) && v.value.len() < 3000)
     );
-    let read = cli(&daemon, &["read", &run], 0);
+    let normal_read = cli(&daemon, &["read", &run], 0);
+    assert_eq!(
+        normal_read.stdout,
+        complete.findings_summary.as_deref().unwrap().as_bytes()
+    );
+    let read = cli(&daemon, &["read", &run, "--diagnostics"], 0);
     assert_eq!(read.stdout, report.as_bytes());
     evidence(
         "first-published-report",
@@ -682,7 +687,7 @@ stream_max_retries=0
         0,
     );
     let partial_report = published(&ui.audits(), &partial_run).await?;
-    let partial_read = cli(&daemon, &["read", &partial_run], 3);
+    let partial_read = cli(&daemon, &["read", &partial_run, "--diagnostics"], 3);
     assert_eq!(
         partial_report.report.unwrap().as_bytes(),
         partial_read.stdout
@@ -841,7 +846,7 @@ stream_max_retries=0
     assert_eq!(report_state(home, &second.run_id), before_crash);
     sql(home, "DROP TRIGGER s5_hold_publication", json!([]));
     let terminal = published(&ui.audits(), &second.run_id).await?;
-    let final_read = cli(&daemon, &["read", &second.run_id], 6);
+    let final_read = cli(&daemon, &["read", &second.run_id, "--diagnostics"], 6);
     assert_eq!(final_read.stdout, aborted_bytes);
     assert_eq!(
         terminal.report.as_deref(),
@@ -859,19 +864,22 @@ stream_max_retries=0
         1
     );
     let alias = cli(&daemon, &["cancel", &second.run_id], 6);
-    assert_eq!(alias.stdout, final_read.stdout);
+    assert_eq!(
+        alias.stdout,
+        terminal.findings_summary.as_deref().unwrap().as_bytes()
+    );
     assert_eq!(report_state(home, &second.run_id), final_state);
     boxed_future!(ui.command(format!("read {}", second.run_id))).await?;
     let opened = boxed_future!(ui.event(|e| matches!(e, AppEvent::AuditOpened { .. }))).await?;
     boxed_future!(ui.dispatch(opened)).await?;
     boxed_future!(ui.pump()).await?;
-    let completed_after_restart = cli(&daemon, &["read", &run], 0);
+    let completed_after_restart = cli(&daemon, &["read", &run, "--diagnostics"], 0);
     assert_eq!(completed_after_restart.stdout, read.stdout);
     for signal in provider.gates.lock().unwrap().values() {
         signal.add_permits(1);
     }
     assert_eq!(provider.count(), count);
-    let after_release = cli(&daemon, &["read", &second.run_id], 6);
+    let after_release = cli(&daemon, &["read", &second.run_id, "--diagnostics"], 6);
     assert_eq!(
         after_release.stdout,
         final_read.stdout,

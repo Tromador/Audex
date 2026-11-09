@@ -1915,6 +1915,9 @@ impl App {
         if resume_restored_queue {
             self.chat_widget.maybe_send_next_queued_input();
         }
+        if let Some(thread_id) = self.current_displayed_thread_id() {
+            self.queue_ready_audit_comparisons(thread_id);
+        }
         self.refresh_status_line();
     }
 

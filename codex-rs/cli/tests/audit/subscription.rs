@@ -154,7 +154,9 @@ async fn public_subscription_and_mixed_opinions_keep_extraction_and_reports_dist
                 .count(),
             3
         );
-        let report = audit(&daemon).args(["read", &run, "--follow"]).output()?;
+        let report = audit(&daemon)
+            .args(["read", &run, "--follow", "--diagnostics"])
+            .output()?;
         check(&report, 0)?;
         let text = String::from_utf8_lossy(&report.stdout);
         assert!(text.contains("Report format: `5`"));
@@ -196,7 +198,9 @@ async fn public_subscription_and_mixed_opinions_keep_extraction_and_reports_dist
         assert_eq!(String::from_utf8(replay.stdout)?.trim(), run);
         assert!(String::from_utf8_lossy(&replay.stderr).contains("Existing audit:"));
         for _ in 0..2 {
-            let reopened = audit(&daemon).args(["read", &run]).output()?;
+            let reopened = audit(&daemon)
+                .args(["read", &run, "--diagnostics"])
+                .output()?;
             check(&reopened, 0)?;
             assert_eq!(reopened.stdout, report.stdout);
             assert_eq!(
@@ -260,7 +264,11 @@ async fn public_subscription_failures_preserve_native_peer_and_durable_repair_di
         }
         let pending = audit(&daemon).args(["read", &run]).output()?;
         check(&pending, 5)?;
-        let report = audit(&daemon).args(["abort", &run]).output()?;
+        let aborted = audit(&daemon).args(["abort", &run]).output()?;
+        check(&aborted, 6)?;
+        let report = audit(&daemon)
+            .args(["read", &run, "--diagnostics"])
+            .output()?;
         check(&report, 6)?;
         assert!(String::from_utf8_lossy(&report.stdout).contains("CLI fixture audit"));
         if mode == "repair" {
@@ -271,7 +279,9 @@ async fn public_subscription_failures_preserve_native_peer_and_durable_repair_di
         }
         assert_eq!(fixture::prompts(&child), 1);
         assert_eq!(server.received_requests().await.unwrap().len(), 2);
-        let frozen = audit(&daemon).args(["read", &run]).output()?;
+        let frozen = audit(&daemon)
+            .args(["read", &run, "--diagnostics"])
+            .output()?;
         check(&frozen, 6)?;
         assert_eq!(frozen.stdout, report.stdout);
         evidence(

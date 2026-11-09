@@ -8,13 +8,13 @@ mod daemon_support;
 #[test]
 fn managed_conversation_compares_complete_run_findings_without_individual_reads()
 -> anyhow::Result<()> {
-    run_test_with_large_stack("audit-run-findings", || exercise(false))
+    run_test_with_large_stack("audit-run-findings", || exercise(false, false))
 }
 
 #[test]
 fn managed_conversation_compares_complete_reviewer_collections_without_individual_reads()
 -> anyhow::Result<()> {
-    run_test_with_large_stack("audit-reviewer-findings", || exercise(true))
+    run_test_with_large_stack("audit-reviewer-findings", || exercise(true, false))
 }
 
 fn claims(model: &str) -> Vec<Value> {
@@ -58,7 +58,7 @@ fn output(body: &Value, id: &str) -> Value {
     nested_object(item, "identity").expect("structured evidence output")
 }
 
-async fn exercise(per_reviewer: bool) -> anyhow::Result<()> {
+async fn exercise(per_reviewer: bool, automatic: bool) -> anyhow::Result<()> {
     let provider = responses::start_mock_server().await;
     let daemon = daemon_support::TestDaemon::new()?;
     let home = daemon.home.path();
@@ -106,7 +106,10 @@ async fn exercise(per_reviewer: bool) -> anyhow::Result<()> {
     let model_reference = reference.clone();
     let operator_calls = Arc::new(AtomicUsize::new(0));
     let observed = operator_calls.clone();
-    Mock::given(|r: &wiremock::Request| String::from_utf8_lossy(&r.body).contains("FINDING_COLLECTION_FOLLOWUP"))
+    Mock::given(|r: &wiremock::Request| {
+        let text = String::from_utf8_lossy(&r.body);
+        text.contains("FINDING_COLLECTION_FOLLOWUP") || text.contains("Audex automatic completion comparison")
+    })
         .respond_with(move |r: &wiremock::Request| {
             let body: Value = serde_json::from_slice(&r.body).unwrap();
             let index = observed.fetch_add(1, Ordering::SeqCst);
@@ -207,10 +210,38 @@ async fn exercise(per_reviewer: bool) -> anyhow::Result<()> {
     *reference.lock().unwrap() = json!({"runId":retained.run_id,"snapshotId":retained.snapshot_id});
     let mut contexts = ReportContexts::default();
     contexts.stage(thread, &retained);
+    let prompt = if automatic {
+        comparison_prompt(&retained.run_id, &retained.snapshot_id)
+    } else {
+        "FINDING_COLLECTION_FOLLOWUP: Where do these reports agree?".into()
+    };
+    if automatic {
+        assert!(
+            retained
+                .findings_summary
+                .as_ref()
+                .unwrap()
+                .contains("fixture-haiku")
+        );
+        assert!(
+            retained
+                .findings_summary
+                .as_ref()
+                .unwrap()
+                .contains("fixture-luna")
+        );
+        assert!(
+            !retained
+                .findings_summary
+                .as_ref()
+                .unwrap()
+                .contains("Policy digest")
+        );
+    }
     turn(
         &mut session,
         thread,
-        "FINDING_COLLECTION_FOLLOWUP: Where do these reports agree?",
+        &prompt,
         &config,
         contexts.for_turn(thread),
     )
@@ -255,6 +286,31 @@ async fn exercise(per_reviewer: bool) -> anyhow::Result<()> {
         4,
         "follow-up starts no reviewer generation"
     );
+    if automatic {
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let full = execute(
+            session.request_handle(),
+            thread,
+            AuditAction::Diagnostics(
+                DiagnosticArguments {
+                    run_id: retained.run_id.clone(),
+                    offset: 0,
+                    max_bytes: None,
+                },
+                true,
+            ),
+            AppEventSender::new(tx),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        assert_eq!(full["content"], *retained.report.as_ref().unwrap());
+        assert_eq!(full["eof"], true);
+        assert!(matches!(
+            events.recv().await,
+            Some(AppEvent::AuditDiagnostics { .. })
+        ));
+        assert_eq!(reviewer_calls.load(Ordering::SeqCst), 4);
+    }
     assert_eq!(
         audits.read(retained.run_id).await?.revision,
         retained.revision
@@ -275,4 +331,10 @@ async fn exercise(per_reviewer: bool) -> anyhow::Result<()> {
     }
     session.shutdown().await?;
     Ok(())
+}
+
+#[test]
+fn managed_automatic_comparison_prompt_retrieves_evidence_and_explicit_diagnostics()
+-> anyhow::Result<()> {
+    run_test_with_large_stack("audit-automatic-comparison", || exercise(false, true))
 }

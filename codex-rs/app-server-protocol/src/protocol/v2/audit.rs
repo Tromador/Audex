@@ -199,6 +199,11 @@ pub struct AuditRunView {
     /// Exact retained response, including invalid JSON, when a bounded result was received.
     pub raw_result: Option<String>,
     pub report: Option<String>,
+    /// Findings-first presentation derived from the frozen collection. The report
+    /// remains the exact historical diagnostic artefact for existing consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub findings_summary: Option<String>,
     #[serde(default)]
     pub collection: AuditCollectionView,
     /// Current attempts in logical reviewer order; history uses audit/attempts.

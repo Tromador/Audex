@@ -11,6 +11,7 @@ fn audit_commands_preserve_explicit_source_and_selection() {
         "list",
         "list --after cursor",
         "read run",
+        "diagnostics run",
         "cancel run",
         "release-slot run --reason 'Accept overlap'",
     ] {
@@ -56,6 +57,7 @@ fn conversational_audits_use_tools_with_strict_arguments() {
 #[test]
 fn audit_report_is_untrusted_conversation_context_not_an_instruction_override() {
     let view = AuditRunView {
+        findings_summary: None,
         collection: Default::default(),
         reviewers: Vec::new(),
         run_id: "run".into(),
@@ -532,4 +534,40 @@ fn complete_model_findings_are_not_serialised_twice_and_fragments_remain_lossles
         }
         assert_eq!(actual, expected);
     }
+}
+
+#[test]
+fn explicit_diagnostics_are_lossless_continuable_and_do_not_create_a_new_audit() {
+    assert!(matches!(
+        tool_action("audit_read", json!({"runId":"r","view":"diagnostics"})).unwrap(),
+        AuditAction::Diagnostics(_, false)
+    ));
+    assert!(
+        tool_action(
+            "audit_read",
+            json!({"runId":"r","view":"diagnostics","reviewer":"unexpected"})
+        )
+        .is_err()
+    );
+    let view: AuditRunView = serde_json::from_value(json!({"runId":"r","snapshotId":"s","assignmentId":"a","phase":"completed",
+        "operationState":"committed","observationPending":false,"capacityReleased":false,"revision":1,"cancellationRequested":false,
+        "outcome":null,"rawResult":null,"report":"diagnostics"})).unwrap();
+    let report = "long receipt é 漢\n".repeat(600);
+    let mut offset = 0;
+    let mut restored = String::new();
+    loop {
+        let page = diagnostic_page(&view, &report, offset, Some(131)).unwrap();
+        restored.push_str(page["content"].as_str().unwrap());
+        if page["eof"] == true {
+            break;
+        }
+        offset = page["nextOffset"].as_u64().unwrap() as usize;
+    }
+    assert_eq!(restored, report);
+    assert_eq!(
+        diagnostic_page(&view, &report, 0, None).unwrap()["content"],
+        report
+    );
+    assert!(diagnostic_page(&view, "é", 1, None).is_err());
+    assert!(diagnostic_page(&view, "é", 0, Some(1)).is_err());
 }

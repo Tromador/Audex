@@ -382,7 +382,10 @@ impl ChatWidget {
 }
 
 fn audit_start_disclosure(params: &AuditStartParams) -> String {
-    codex_app_server_client::audit::start_disclosure(params)
+    format!(
+        "{}\nAt completion (including an aborted audit), zero completed opinions produce a status report; one produces that reviewer's findings; two or more queue one Codex comparison using the conversation's current model and retained evidence. Failed and aborted jobs are identified separately. The comparison waits for any active turn and preserves pending questions and drafts; it does not launch another reviewer audit.",
+        codex_app_server_client::audit::start_disclosure(params)
+    )
 }
 
 fn decide(decision: &Arc<Mutex<Option<oneshot::Sender<bool>>>>, value: bool) {

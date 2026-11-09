@@ -66,6 +66,8 @@ pub(super) enum UserMessageSource {
     Prompt,
     DirectEnter,
     QuestionAnswer,
+    /// Application follow-up that must not dismiss the operator's pending questions.
+    InternalFollowUp,
     SafetyRecourse,
 }
 

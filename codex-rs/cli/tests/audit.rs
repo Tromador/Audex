@@ -199,6 +199,15 @@ async fn file_report_contexts_idempotency_and_managed_restart() -> Result<()> {
     check(&output, 0)?;
     let id = run_id(&output)?;
     assert!(String::from_utf8_lossy(&output.stdout).contains("CLI fixture audit"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("# Audit findings"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("Policy digest"));
+    let diagnostics = audit(&daemon)
+        .args(["read", &id, "--diagnostics"])
+        .output()?;
+    check(&diagnostics, 0)?;
+    assert!(String::from_utf8_lossy(&diagnostics.stdout).contains("# Audex Audit Report"));
+    assert_ne!(diagnostics.stdout, output.stdout);
+
     assert!(!String::from_utf8_lossy(&output.stdout).contains("revision="));
     assert_eq!(std::fs::read(&source)?, bytes);
     assert_eq!(
@@ -218,8 +227,9 @@ async fn file_report_contexts_idempotency_and_managed_restart() -> Result<()> {
         .clone();
     let text = String::from_utf8(body)?;
     for label in [
-        "audex_project_guidance_v1",
-        "audex_agents_evidence_v1",
+        "AUDEX.md",
+        "AGENTS.md",
+        "untrusted_content",
         "GUIDANCE_SENTINEL",
         "EVIDENCE_SENTINEL",
     ] {
@@ -231,7 +241,15 @@ async fn file_report_contexts_idempotency_and_managed_restart() -> Result<()> {
     check(&read, 0)?;
     assert_eq!(
         read.stdout, output.stdout,
-        "report must survive restart byte for byte"
+        "findings view must survive restart byte for byte"
+    );
+    let diagnostics_after_restart = audit(&daemon)
+        .args(["read", &id, "--diagnostics"])
+        .output()?;
+    check(&diagnostics_after_restart, 0)?;
+    assert_eq!(
+        diagnostics_after_restart.stdout, diagnostics.stdout,
+        "immutable report bytes survive restart"
     );
     assert_eq!(server.received_requests().await.expect("requests").len(), 2);
     assert!(
@@ -500,7 +518,9 @@ async fn abort_after_runtime_loss_releases_capacity_without_replaying_the_origin
     .await??;
     // Whole-audit cancel is Abort: publication does not await uncertain execution.
     check(&audit(&daemon).args(["cancel", &first]).output()?, 6)?;
-    let stopped = audit(&daemon).args(["read", &first]).output()?;
+    let stopped = audit(&daemon)
+        .args(["read", &first, "--diagnostics"])
+        .output()?;
     check(&stopped, 6)?;
     assert!(String::from_utf8_lossy(&stopped.stdout).contains("aborted_by_operator"));
     assert!(String::from_utf8_lossy(&stopped.stdout).contains("incomplete / excluded"));
@@ -521,8 +541,11 @@ async fn abort_after_runtime_loss_releases_capacity_without_replaying_the_origin
         }
     })
     .await?;
-    let old = audit(&daemon).args(["read", &first]).output()?;
+    let old = audit(&daemon)
+        .args(["read", &first, "--diagnostics"])
+        .output()?;
     check(&old, 6)?;
+    assert_eq!(old.stdout, stopped.stdout);
     assert!(String::from_utf8_lossy(&old.stdout).contains("aborted_by_operator"));
     assert!(String::from_utf8_lossy(&old.stderr).contains("capacity released by operator"));
     check(&audit(&daemon).args(["cancel", &second]).output()?, 6)?;

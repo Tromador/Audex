@@ -424,6 +424,7 @@ async fn active_context_scenario() -> Result<()> {
     })
     .await?;
     let view = AuditRunView {
+        findings_summary: None,
         collection: Default::default(),
         reviewers: Vec::new(),
         run_id: "retained-run".into(),

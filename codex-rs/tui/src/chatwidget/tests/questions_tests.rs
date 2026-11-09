@@ -1174,3 +1174,52 @@ async fn retried_question_answers_keep_separate_envelopes_and_order() {
         assert_eq!(retried, original);
     }
 }
+
+#[tokio::test]
+async fn internal_follow_up_preserves_questions_on_submission_and_disconnect_recovery() {
+    let (mut chat, _rx, mut ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.bottom_pane
+        .set_composer_text("Operator draft".into(), Vec::new(), Vec::new());
+    chat.add_async_questions("open", &questions());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+    chat.bottom_pane.handle_paste("Partial answer".into());
+    let before = chat.capture_thread_input_state().unwrap().questions;
+    assert!(chat.queue_internal_follow_up("Audit follow-up".into()));
+    assert_answer(ops.try_recv().unwrap(), "Audit follow-up");
+    assert_eq!(chat.capture_thread_input_state().unwrap().questions, before);
+    assert_eq!(chat.bottom_pane.composer_text(), "Operator draft");
+    chat.pause_for_disconnect();
+    let state = chat.capture_thread_input_state();
+    let (mut restored, _rx, mut ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    restored.thread_id = Some(ThreadId::new());
+    restored.restore_reconnected_input(state, &[]);
+    assert_eq!(
+        restored
+            .input_queue
+            .queued_user_messages
+            .front()
+            .unwrap()
+            .source,
+        UserMessageSource::InternalFollowUp
+    );
+    assert_eq!(
+        restored.capture_thread_input_state().unwrap().questions,
+        before
+    );
+    assert_eq!(restored.bottom_pane.composer_text(), "Operator draft");
+    assert!(
+        !restored.maybe_send_next_queued_input(),
+        "uncertain delivery must wait for the operator"
+    );
+    assert!(ops.try_recv().is_err());
+    // Existing recovery requires an explicit operator retry decision.
+    restored.input_queue.recovered_queue = false;
+    assert!(restored.maybe_send_next_queued_input());
+    assert_answer(ops.try_recv().unwrap(), "Audit follow-up");
+    assert_eq!(
+        restored.capture_thread_input_state().unwrap().questions,
+        before
+    );
+    assert_eq!(restored.bottom_pane.composer_text(), "Operator draft");
+}

@@ -12286,6 +12286,13 @@ class AuditRunView(BaseModel):
         "reviewerCount": 0,
         "scheduling": "automatic",
     }
+    findings_summary: Annotated[
+        str | None,
+        Field(
+            alias="findingsSummary",
+            description="Findings-first presentation derived from the frozen collection. The report remains the exact historical diagnostic artefact for existing consumers.",
+        ),
+    ] = None
     observation_pending: Annotated[
         bool,
         Field(

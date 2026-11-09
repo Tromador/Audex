@@ -84,7 +84,8 @@ Launch the TUI using `audex --remote unix://`. Slash commands act directly throu
 | `/audit --file ./src/example.rs --model MODEL --provider PROVIDER` | Override the reviewer selection. |
 | `/audit --file ./src/example.rs --brief 'Check error handling and state transitions'` | Supply specific review priorities. |
 | `/audit list` | List existing durable audits. |
-| `/audit read RUN` | Reopen a saved run, keep observing through pending states and display its report. |
+| `/audit read RUN` | Reopen a saved run, keep observing through pending states and display its findings. |
+| `/audit diagnostics RUN` | Display the complete retained report, including execution diagnostics. |
 | `/audit cancel RUN` | Request cancellation of an existing run. |
 | `/audit release-slot RUN` | Explicitly confirm releasing an unresolved run's capacity reservation; this does not establish its outcome. |
 
@@ -144,15 +145,27 @@ The operator can propose the audit via the existing tool bridge. The same explic
 
 ### Discussing a completed report
 
-A completed report appears immediately in the TUI. **Displaying it does not initiate another model inference request.**
+When an audit being observed in the TUI reaches a terminal state, Audex displays a concise result based on completed reviewer opinions:
 
-When you next submit an ordinary operator message, Audex attaches the report as **untrusted additional context** to that deliberate turn. For example:
+- **Zero completed:** report that no reviewer completed and identify the failed or aborted jobs.
+- **One completed:** present that reviewer's findings, without a comparison.
+- **Two or more completed:** automatically queue one Codex comparison of those completed opinions.
 
-> Check the reported finding against the downstream validation. Identify which claims are supported by the code and which are overstated. Do not modify anything.
+This also applies when the overall audit was aborted: useful completed opinions remain available. Every result identifies failed or aborted jobs separately; they do not count as agreement, disagreement or clean reviews. A completed opinion with no findings still counts as completed. An unstructured completed opinion remains available in diagnostics.
 
-The context is then retained with that conversation turn. If you leave the TUI before asking a question, use `/audit read RUN` after restarting to stage the durable report again.
+The comparison waits behind any active turn and earlier queued input, preserving pending asynchronous questions, typed answers and the ordinary composer. Normal question-draft recovery still applies when the active turn ends. Codex retrieves the original completed opinions and sealed source, then assesses their relationships. It uses the conversation's current model and ordinary inference route, and never starts replacement reviews for failed or aborted jobs.
 
-The operator's ordinary tools and permissions are separate from the restricted reviewer. Discussing a report does not change the immutable source snapshot.
+Every original finding remains independently attributed. Severity and confidence are reviewer assessments, and verified source locations do not establish that a defect is proven. Longer prose in the immediate findings view is explicitly marked as an excerpt; the full findings and evidence remain retrievable.
+
+Ask follow-up questions normally, for example:
+
+> Check the reported finding against the downstream validation. Identify which claims are supported by the captured code and which are overstated. Do not modify anything.
+
+Use `/audit diagnostics RUN` for the complete immutable report, or ask Codex for diagnostics through `audit_read` with `view=diagnostics`. Individual reviewer opinions and source-tool histories are also available in the existing reviewer activity viewer. Diagnostic retrieval does not rerun reviewers.
+
+Reopening an already completed audit with `/audit read RUN` displays its findings and stages a compact reference for your next question; it does not automatically repeat the comparison. If the TUI was closed before completion, reopen the run and ask Codex to compare it. A comparison queued while its conversation is in the background waits until that conversation is displayed again. Runs with fewer than two completed reviewer opinions do not start an automatic comparison.
+
+The operator's ordinary tools and permissions remain separate from the restricted reviewers. Comparison instructions require read-only use of retained evidence and the original sealed source; neither retrieval nor discussion changes the immutable snapshot.
 
 ## 4. Command-line reference
 
@@ -181,7 +194,7 @@ Submission options:
 
 When `--model` or `--provider` is omitted, the CLI consults the **daemon's configuration**, not an open TUI conversation. Specify them when reproducibility matters. If the daemon has no configured model, provide `--model`.
 
-Context documents are **not discovered automatically**; they are supplied only when requested. They are disclosed to the reviewer as untrusted information, not inherited operator instructions. Source capture is limited to **32 MiB**; each optional context document to **64 KiB**.
+Context documents are **not discovered automatically**; they are supplied only when requested. They are disclosed to the reviewer as untrusted information, not inherited operator instructions. Source capture is limited to **32 MiB**; each optional context document to **64 KiB**. Native and Claude subscription reviewers receive the complete captured contents within that document limit. `AUDEX.md` may guide priorities within Audex’s fundamental rules; `AGENTS.md` remains evidence of conventions and cannot change scope or permissions.
 
 By default, a submitted CLI audit waits for progress and the terminal result. Use `--detach` for non-blocking operation.
 
@@ -194,10 +207,12 @@ audex audit list --after CURSOR
 
 audex audit read RUN
 audex audit read RUN --follow
+audex audit read RUN --diagnostics
 audex audit cancel RUN
 ```
 
 - `list` lists durable run summaries, newest first (default page size: 20; maximum: 100). The returned cursor pages towards older audits, including when creation timestamps tie. New submissions do not shift an existing page cursor.
+- The CLI prints the concise findings view by default. `--diagnostics` prints the complete immutable Markdown report. Automatic Codex comparison takes place in the TUI conversation.
 - Listing does not open results or reports. A damaged historical artefact therefore does not prevent listing other runs; retrieving the damaged artefact still fails integrity verification.
 - `read RUN` returns the existing state and the Markdown report if one is ready; it never starts another review.
 - `read RUN --follow` waits through recoverable observation-pending states until a terminal outcome or Ctrl-C. Attached submissions, cancellation watches and TUI observation do the same. A plain `read RUN` returns immediately; it can report exit 5 while work is pending.
@@ -406,12 +421,12 @@ Stopping the daemon is optional after using the TUI or CLI. Leave it running whe
 | Rust cannot find `core`/`std` for musl | Pass `--target x86_64-unknown-linux-gnu` when building for the GNU toolchain. |
 | Bubblewrap cannot find `libcap.pc` | On Ubuntu, install `libcap-dev` and rerun the build. |
 | A reviewer result has not appeared after disconnect | Use `audex audit list` and `audex audit read RUN --follow`; do not resubmit automatically. |
-| An audit report appeared but was not discussed | Ask an ordinary TUI question, or after reopening the TUI run `/audit read RUN` first. |
+| An audit completed without a comparison | Fewer than two completed opinions do not trigger comparison. If two or more completed while the TUI was closed, reopen it with `/audit read RUN` and ask Codex to compare them. Check any displayed comparison submission error. |
 
 ## 9. Current boundaries
 
 The implemented auditing workflow accepts **one source file or snippet and an ordered roster of independent reviewers per run**. Native reviewers and explicitly configured Claude subscription reviewers share the sealed snapshot and common brief. Report format 5 preserves each reviewer's attribution and extraction status, including full unstructured opinions and completed peers alongside failed or interrupted attempts. Historical reports, including formats 2, 3 and 4, retain their original identities and bytes. Clients use audit protocol 8; incompatible daemons must be updated explicitly before submitting new work.
 
-Automatic whole-repository source selection, finding deduplication, cross-reviewer reconciliation and automated build/test verification remain outside the current public workflow.
+Automatic whole-repository source selection, deterministic finding deduplication and automated build/test verification remain outside the current public workflow. The TUI completion comparison is a Codex assessment of retained independent claims; it does not replace them or establish verification.
 
 The native Codex conversation remains available for other work. An Audex reviewer is a distinct, restricted execution context, not an unrestricted second operator.

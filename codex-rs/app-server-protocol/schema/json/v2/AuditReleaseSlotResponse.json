@@ -410,6 +410,13 @@
             "scheduling": "automatic"
           }
         },
+        "findingsSummary": {
+          "description": "Findings-first presentation derived from the frozen collection. The report remains the exact historical diagnostic artefact for existing consumers.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "observationPending": {
           "description": "A retained observation issue remains unresolved. This is non-terminal: the daemon continues observing the original operation, without resampling.",
           "type": "boolean"

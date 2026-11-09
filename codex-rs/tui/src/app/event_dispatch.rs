@@ -251,6 +251,13 @@ impl App {
             AppEvent::AuditListLoaded { thread_id, page } => {
                 if self.current_displayed_thread_id() == Some(thread_id) { self.chat_widget.show_audit_list(page); }
             }
+            AppEvent::AuditDiagnostics { thread_id, text } => {
+                if self.current_displayed_thread_id() == Some(thread_id) {
+                    let mut lines = Vec::new();
+                    crate::markdown::append_markdown(&text, None, None, &mut lines);
+                    self.chat_widget.add_plain_history_lines(lines);
+                }
+            }
             AppEvent::AuditOpened { thread_id, run } => self.audit_opened(app_server, thread_id, run),
             AppEvent::AuditUpdated { thread_id, run, error } => self.audit_updated(thread_id, &run, error),
             AppEvent::AuditError { thread_id, message } => {

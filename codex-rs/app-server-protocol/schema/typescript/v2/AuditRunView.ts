@@ -19,7 +19,12 @@ capacityReleased: boolean, revision: bigint, cancellationRequested: boolean, out
 /**
  * Exact retained response, including invalid JSON, when a bounded result was received.
  */
-rawResult: string | null, report: string | null, collection: AuditCollectionView,
+rawResult: string | null, report: string | null,
+/**
+ * Findings-first presentation derived from the frozen collection. The report
+ * remains the exact historical diagnostic artefact for existing consumers.
+ */
+findingsSummary?: string, collection: AuditCollectionView,
 /**
  * Current attempts in logical reviewer order; history uses audit/attempts.
  */

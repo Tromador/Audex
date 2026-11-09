@@ -372,17 +372,27 @@ async fn untrusted_documents_and_exact_registry_cannot_change_policy() {
     let prepared = prepare(&host, &models, &snapshot, request(&host), Arc::new(|_| {}))
         .await
         .expect("prepare reviewer");
-    assert_eq!(prepared.input.additional_context.len(), 2);
-    for (key, context) in &prepared.input.additional_context {
-        assert_eq!(context.kind, AdditionalContextKind::Untrusted);
-        assert_eq!(context.name.as_deref(), Some(key.as_str()));
-        let value: serde_json::Value =
-            serde_json::from_str(&context.value).expect("context metadata");
-        assert_eq!(value["sha256"].as_str().expect("digest").len(), 64);
-        assert!(matches!(
-            value["path"].as_str(),
-            Some("AUDEX.md" | "AGENTS.md")
-        ));
+    assert!(prepared.input.additional_context.is_empty());
+    let codex_protocol::turn_input::TurnInput::UserInput { content, .. } = &prepared.input.input
+    else {
+        panic!("user evidence")
+    };
+    let UserInput::Text { text, .. } = &content[0] else {
+        panic!("text evidence")
+    };
+    let assignment: serde_json::Value = serde_json::from_str(text).unwrap();
+    let context = assignment["context"].as_array().unwrap();
+    assert_eq!(context.len(), 2);
+    for (value, (path, digest, bytes)) in context
+        .iter()
+        .zip(snapshot.context_documents().await.unwrap())
+    {
+        assert_eq!(value["path"], path);
+        assert_eq!(value["sha256"], digest);
+        assert_eq!(
+            value["untrusted_content"],
+            String::from_utf8(bytes).unwrap()
+        );
     }
     let registry = &prepared
         .options

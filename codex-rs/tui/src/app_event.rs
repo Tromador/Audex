@@ -415,6 +415,10 @@ pub(crate) enum AppEvent {
         run: codex_app_server_protocol::AuditRunView,
         error: Option<String>,
     },
+    AuditDiagnostics {
+        thread_id: ThreadId,
+        text: String,
+    },
     AuditError {
         thread_id: ThreadId,
         message: String,
