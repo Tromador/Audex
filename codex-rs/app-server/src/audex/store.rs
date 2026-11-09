@@ -235,7 +235,7 @@ pub(crate) struct AuditRunRecord {
     pub findings: Vec<FindingRecord>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct FindingRecord {
     pub id: String,
     pub ordinal: i64,
@@ -249,7 +249,7 @@ pub(crate) struct FindingRecord {
     pub evidence: Vec<EvidenceRecord>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct EvidenceRecord {
     pub ordinal: i64,
     pub description: String,

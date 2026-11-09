@@ -142,3 +142,26 @@ def test_model_provider_errors_round_trip_wire_names(payload):
 
     error = ModelProviderError.model_validate(payload)
     assert error.model_dump(by_alias=True) == payload
+
+
+def test_audit_evidence_keeps_sdk_names_and_supports_complete_collections():
+    from openai_codex.generated.v2_all import (
+        AuditEvidenceParams,
+        AuditEvidenceQuery1,
+        AuditEvidenceQuery2,
+        AuditEvidenceQuery3,
+        ViewAuditEvidenceQuery,
+    )
+
+    cases = [
+        ({"view": "reviewers"}, ViewAuditEvidenceQuery),
+        ({"view": "findings"}, AuditEvidenceQuery1),
+        ({"view": "findings", "reviewer": "haiku", "limit": 1}, AuditEvidenceQuery1),
+        ({"view": "finding", "reviewer": "haiku", "number": 2}, AuditEvidenceQuery2),
+        ({"view": "source", "snapshot": "captured", "path": "file.cpp"}, AuditEvidenceQuery3),
+    ]
+    for query, expected_type in cases:
+        payload = {"runId": "retained", "query": query}
+        parsed = AuditEvidenceParams.model_validate(payload)
+        assert isinstance(parsed.query.root, expected_type)
+        assert parsed.model_dump(by_alias=True, exclude_unset=True) == payload

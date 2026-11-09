@@ -116,15 +116,15 @@ The daemon reads `$CODEX_HOME/audex/reviewer-backends.json`. Provisioning this c
 {
   "version": 1,
   "claudeSubscription": {
-    "executable": "/absolute/resolved/path/to/claude-2.1.314",
-    "clientVersion": "2.1.314",
+    "executable": "/absolute/resolved/path/to/claude",
+    "clientVersion": "2.1.319",
     "profile": "/absolute/resolved/path/to/dedicated-profile",
     "runtimeRoot": "/var/tmp/audex"
   }
 }
 ```
 
-A dedicated subscription profile and the official Claude Code executable version 2.1.314 are required. Do not put credentials in this file. The profile must pass the existing isolation policy, including disabled hooks, connectors, synchronised plugins/skills, memory and cross-session messaging. The runtime must be an owned private directory outside the daemon's `HOME`, separate from the profile and short enough for the client's 103-byte Unix-socket path limit. Preflight refuses missing or incompatible setup; it does not create directories, modify a profile, refresh credentials or launch a client.
+A dedicated subscription profile and the official Claude Code executable are required. Set `clientVersion` to the version that executable reports; Audex refuses a client that reports anything else. To change version, update `executable` and `clientVersion` together. Do not put credentials in this file. The profile must pass the existing isolation policy, including disabled hooks, connectors, synchronised plugins/skills, memory and cross-session messaging. The runtime must be an owned private directory outside the daemon's `HOME`, separate from the profile and short enough for the client's 103-byte Unix-socket path limit. Preflight refuses missing or incompatible setup; it does not create directories, modify a profile, refresh credentials or launch a client.
 
 Before TUI confirmation, the daemon checks the entire ordered roster, including queued reviewers. Disclosure identifies source, brief and context hashes, execution/authentication routes, requested/resolved/expected served models, executable/version/hash, profile, runtime and backend/policy bindings. Start checks them again. Drift refuses commissioning without creating runnable attempts. Account eligibility and effective billing are checked by the owned client before Audex writes the prompt. The CLI prints the disclosure during submission and does not pause for confirmation.
 

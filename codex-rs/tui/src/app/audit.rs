@@ -154,7 +154,7 @@ impl App {
             return;
         }
         self.chat_widget
-            .add_info_message(crate::audit::progress(run), run.report.as_ref().filter(|_|crate::audit::terminal(run)).map(|_| format!("This report will accompany your next message as untrusted context. After restarting, retrieve it with /audit read {}.", run.run_id)));
+            .add_info_message(crate::audit::progress(run), run.report.as_ref().filter(|_|crate::audit::terminal(run)).map(|_| format!("A compact audit reference will accompany your next message. Ask about findings or their captured source; Codex can retrieve both. After restarting, reopen it with /audit read {}.", run.run_id)));
         if let Some(report) = run.report.as_ref().filter(|_| crate::audit::terminal(run)) {
             // Render in normal scrollback, alongside the existing conversation.
             let mut lines = Vec::new();
@@ -297,7 +297,11 @@ mod tests {
                         let context = context.unwrap();
                         let entry = context.values().next().unwrap();
                         assert_eq!(entry.kind, AdditionalContextKind::Untrusted);
-                        assert!(entry.value.contains("Finding 1"));
+                        assert!(
+                            entry.value.contains("report-run")
+                                && entry.value.contains("audit_read")
+                        );
+                        assert!(!entry.value.contains("Finding 1"));
                     } else {
                         assert!(context.is_none());
                     }
@@ -349,7 +353,8 @@ mod tests {
                 assert!(
                     retained
                         .values()
-                        .any(|entry| entry.value.contains("Finding 1"))
+                        .any(|entry| entry.value.contains("report-run")
+                            && entry.value.contains("audit_source"))
                 );
             }
             assert_eq!(

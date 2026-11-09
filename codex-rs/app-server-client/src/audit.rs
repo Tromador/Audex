@@ -242,6 +242,20 @@ impl AuditClient {
         Ok(response.run)
     }
 
+    pub async fn evidence(
+        &self,
+        params: codex_app_server_protocol::AuditEvidenceParams,
+    ) -> Result<serde_json::Value, AuditClientError> {
+        let response: codex_app_server_protocol::AuditEvidenceResponse = self
+            .handle
+            .request_typed(ClientRequest::AuditEvidence {
+                request_id: request_id("evidence"),
+                params,
+            })
+            .await?;
+        Ok(response.data)
+    }
+
     pub async fn read(&self, run_id: String) -> Result<AuditRunView, AuditClientError> {
         let response: AuditReadResponse = self
             .handle

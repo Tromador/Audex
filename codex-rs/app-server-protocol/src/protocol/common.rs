@@ -535,6 +535,11 @@ client_request_definitions! {
         serialization: None,
         response: v2::AuditStartResponse,
     },
+    AuditEvidence => "audit/evidence" {
+        params: v2::AuditEvidenceParams,
+        serialization: None,
+        response: v2::AuditEvidenceResponse,
+    },
     AuditRead => "audit/read" {
         params: v2::AuditReadParams,
         serialization: None,

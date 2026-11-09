@@ -411,3 +411,59 @@ mod tests {
 #[cfg(test)]
 #[path = "audit_typed_selection_tests.rs"]
 mod typed_selection_tests;
+
+/// Read-only conversation access. Offsets are zero based; finding numbers are one based.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct AuditEvidenceParams {
+    pub run_id: String,
+    pub query: AuditEvidenceQuery,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(tag = "view", rename_all = "snake_case", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub enum AuditEvidenceQuery {
+    Reviewers {
+        #[serde(default)]
+        offset: usize,
+        /// Caller-selected page length; omission returns all remaining reviewers.
+        limit: Option<usize>,
+    },
+    // Preserve the existing generated SDK name now that only `view` is required.
+    #[schemars(title = "AuditEvidenceQuery1")]
+    Findings {
+        /// Omission returns complete findings across all retained reviewers.
+        reviewer: Option<String>,
+        #[serde(default)]
+        offset: usize,
+        /// Caller-selected page length; omission returns all remaining findings.
+        limit: Option<usize>,
+    },
+    Finding {
+        reviewer: String,
+        number: usize,
+        #[serde(default)]
+        offset: usize,
+        /// Optional JSON byte range; omission returns the complete remainder.
+        #[serde(rename = "maxBytes")]
+        max_bytes: Option<usize>,
+    },
+    Source {
+        snapshot: String,
+        path: String,
+        #[serde(default)]
+        offset: u64,
+        /// Optional byte range; omission reads through EOF. No Audex size ceiling.
+        #[serde(rename = "maxBytes")]
+        max_bytes: Option<usize>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AuditEvidenceResponse {
+    pub data: serde_json::Value,
+}

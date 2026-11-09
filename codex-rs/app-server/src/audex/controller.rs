@@ -1,5 +1,6 @@
 //! Process-owned workflow. Codex execution uses the same durable boundary as deterministic tests.
 mod attempts;
+mod evidence;
 mod preflight;
 use super::reviewer;
 use super::snapshot::manifest::sha256_hex;
@@ -382,6 +383,10 @@ impl AuditController {
                 }
                 .into())
             }
+            ClientRequest::AuditEvidence { params, .. } => Ok(AuditEvidenceResponse {
+                data: self.evidence(params).await?,
+            }
+            .into()),
             ClientRequest::AuditRead { params, .. } => Ok(AuditReadResponse {
                 run: self.view(&params.run_id).await?,
             }

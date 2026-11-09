@@ -15,6 +15,7 @@ pub(super) async fn qualify(
     policy: &mut Policy,
     model: &str,
     billing_source: &str,
+    client_version: &str,
     store: &AuditStore,
     identity: &AdmissionIdentity,
 ) -> anyhow::Result<Spawned> {
@@ -88,7 +89,9 @@ pub(super) async fn qualify(
             );
             let result = &value["response"]["response"];
             match subtype {
-                "initialize" => validate_initialise(result, owned.identity.pid, billing_source)?,
+                "initialize" => {
+                    validate_initialise(result, owned.identity.pid, billing_source, client_version)?
+                }
                 "get_usage" => {
                     validate_personal_tier(result, billing_source)?;
                     // get_usage can refresh credentials. Bind only its completed
@@ -143,10 +146,15 @@ pub(super) async fn qualify(
     })
 }
 
-fn validate_initialise(value: &Value, pid: u32, billing_source: &str) -> anyhow::Result<()> {
+fn validate_initialise(
+    value: &Value,
+    pid: u32,
+    billing_source: &str,
+    client_version: &str,
+) -> anyhow::Result<()> {
     anyhow::ensure!(
         value["pid"] == pid
-            && value["claude_code_version"] == super::config::CLIENT_VERSION
+            && value["claude_code_version"] == client_version
             && value["current_permission_mode"] == "dontAsk"
             && value["commands"] == json!([])
             && value["output_style"] == "default"
@@ -299,4 +307,24 @@ fn validate_status(value: &Value, _billing_source: &str, policy: &Policy) -> any
     }
     anyhow::ensure!(source_seen, "managed source authority missing");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_initialise;
+    use serde_json::json;
+
+    #[test]
+    fn initialise_accepts_the_configured_version_and_refuses_a_mismatch() {
+        let response = json!({
+            "pid": 7,
+            "claude_code_version": "2.1.319",
+            "current_permission_mode": "dontAsk",
+            "commands": [],
+            "output_style": "default",
+            "account": {"apiProvider": "firstParty", "subscriptionType": "Claude Max"},
+        });
+        assert!(validate_initialise(&response, 7, "none", "2.1.319").is_ok());
+        assert!(validate_initialise(&response, 7, "none", "2.1.314").is_err());
+    }
 }

@@ -116,8 +116,8 @@ impl SnapshotAccess {
         Ok(hits)
     }
 
-    /// Trusted result validation uses the same manifest-bound verified reader.
-    /// This is not registered as a model-facing tool or an increased tool limit.
+    /// Result validation and retained-evidence retrieval share this manifest-bound reader.
+    /// Callers select any returned range only after complete content verification.
     pub(crate) async fn verified_content(
         &self,
         path: &SnapshotPath,

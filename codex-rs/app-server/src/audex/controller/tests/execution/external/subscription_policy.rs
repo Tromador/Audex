@@ -477,10 +477,18 @@ fn executable_and_retained_policy_identity_cannot_be_substituted() -> anyhow::Re
                 SubmissionBoundary::Unsubmitted,
                 "{mode}"
             );
-            assert!(
-                store.client_launch(&run.operation_id).await?.is_none(),
-                "{mode}"
-            );
+            let launch = store.client_launch(&run.operation_id).await?;
+            if mode == "configured_version" {
+                // The operator selects the version; the executable's own report
+                // refuses a mismatch at spawn, before any child or prompt exists.
+                assert!(
+                    launch
+                        .is_some_and(|l| l.pid.is_none() && l.prompt_write_started_at_ms.is_none()),
+                    "{mode}"
+                );
+            } else {
+                assert!(launch.is_none(), "{mode}");
+            }
             assert!(!temp.path().join("policy-control-count").exists());
             threads
                 .shutdown_all_threads_bounded(Duration::from_secs(5))

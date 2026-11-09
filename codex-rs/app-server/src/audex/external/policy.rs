@@ -1,4 +1,4 @@
-//! Read-only policy preflight for the pinned Linux client. Never opens OAuth storage.
+//! Read-only policy preflight for the configured Linux client. Never opens OAuth storage.
 //! Sources: https://code.claude.com/docs/en/managed-settings and
 //! https://code.claude.com/docs/en/server-managed-settings, checked against Linux
 //! 2.1.314 (SHA-256 4487042b4c4f5d88d4568f68ae98aae0b1ffae58864cf57fb868641bc5f84594).

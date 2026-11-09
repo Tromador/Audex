@@ -63,6 +63,16 @@
           ],
           "description": "Absent for historical results predating the shared extraction contract."
         },
+        "findingCount": {
+          "default": null,
+          "description": "Retained structured finding count; absent until the attempt completed.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "localExecution": {
           "anyOf": [
             {

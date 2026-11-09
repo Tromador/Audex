@@ -115,6 +115,16 @@ impl AuditController {
         let capture = store.capture_state(&record.assignment_id).await?;
         let retained = store.retained_selection(&record.assignment_id).await?;
         Ok(AuditAttemptView {
+            finding_count: if record.assignment_state == AssignmentState::Succeeded {
+                Some(
+                    self.store()
+                        .await?
+                        .finding_count(&record.assignment_id)
+                        .await?,
+                )
+            } else {
+                None
+            },
             run_id: record.run_id.clone(),
             reviewer_id: record.reviewer_id.clone(),
             reviewer_ordinal: record.reviewer_ordinal,

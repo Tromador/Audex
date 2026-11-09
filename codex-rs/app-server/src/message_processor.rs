@@ -1240,6 +1240,7 @@ impl MessageProcessor {
             request @ (ClientRequest::AuditCapabilities { .. }
             | ClientRequest::AuditPreflight { .. }
             | ClientRequest::AuditStart { .. }
+            | ClientRequest::AuditEvidence { .. }
             | ClientRequest::AuditRead { .. }
             | ClientRequest::AuditList { .. }
             | ClientRequest::AuditCancel { .. }

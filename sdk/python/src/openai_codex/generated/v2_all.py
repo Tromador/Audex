@@ -541,6 +541,95 @@ class AuditClaudeBinding(BaseModel):
     runtime_root: Annotated[str, Field(alias="runtimeRoot")]
 
 
+class ViewAuditEvidenceQuery(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    limit: Annotated[
+        int | None,
+        Field(
+            description="Caller-selected page length; omission returns all remaining reviewers.",
+            ge=0,
+        ),
+    ] = None
+    offset: Annotated[int | None, Field(ge=0)] = 0
+    view: Literal["reviewers"]
+
+
+class AuditEvidenceQuery1(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    limit: Annotated[
+        int | None,
+        Field(
+            description="Caller-selected page length; omission returns all remaining findings.",
+            ge=0,
+        ),
+    ] = None
+    offset: Annotated[int | None, Field(ge=0)] = 0
+    reviewer: Annotated[
+        str | None,
+        Field(description="Omission returns complete findings across all retained reviewers."),
+    ] = None
+    view: Literal["findings"]
+
+
+class AuditEvidenceQuery2(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    max_bytes: Annotated[
+        int | None,
+        Field(
+            alias="maxBytes",
+            description="Optional JSON byte range; omission returns the complete remainder.",
+            ge=0,
+        ),
+    ] = None
+    number: Annotated[int, Field(ge=0)]
+    offset: Annotated[int | None, Field(ge=0)] = 0
+    reviewer: str
+    view: Literal["finding"]
+
+
+class AuditEvidenceQuery3(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    max_bytes: Annotated[
+        int | None,
+        Field(
+            alias="maxBytes",
+            description="Optional byte range; omission reads through EOF. No Audex size ceiling.",
+            ge=0,
+        ),
+    ] = None
+    offset: Annotated[int | None, Field(ge=0)] = 0
+    path: str
+    snapshot: str
+    view: Literal["source"]
+
+
+class AuditEvidenceQuery(
+    RootModel[
+        ViewAuditEvidenceQuery | AuditEvidenceQuery1 | AuditEvidenceQuery2 | AuditEvidenceQuery3
+    ]
+):
+    root: ViewAuditEvidenceQuery | AuditEvidenceQuery1 | AuditEvidenceQuery2 | AuditEvidenceQuery3
+
+
+class AuditEvidenceResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    data: Any
+
+
 class AuditExecutionAdapter(Enum):
     native = "native"
     claude_client = "claude_client"
@@ -7710,6 +7799,15 @@ class AuditCollectionView(BaseModel):
     scheduling: AuditScheduling
 
 
+class AuditEvidenceParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    query: AuditEvidenceQuery
+    run_id: Annotated[str, Field(alias="runId")]
+
+
 class AuditProgressNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -7862,6 +7960,15 @@ class AuditStartRequest(BaseModel):
     id: RequestId
     method: Annotated[Literal["audit/start"], Field(title="Audit/startRequestMethod")]
     params: AuditStartParams
+
+
+class AuditEvidenceRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["audit/evidence"], Field(title="Audit/evidenceRequestMethod")]
+    params: AuditEvidenceParams
 
 
 class AuditReadRequest(BaseModel):
@@ -12046,6 +12153,14 @@ class AuditAttemptView(BaseModel):
             description="Absent for historical results predating the shared extraction contract."
         ),
     ] = None
+    finding_count: Annotated[
+        int | None,
+        Field(
+            alias="findingCount",
+            description="Retained structured finding count; absent until the attempt completed.",
+            ge=0,
+        ),
+    ] = None
     local_execution: Annotated[
         AuditLocalExecution | None,
         Field(
@@ -14403,6 +14518,7 @@ class ClientRequest(
         AuditCapabilitiesRequest
         | AuditPreflightRequest
         | AuditStartRequest
+        | AuditEvidenceRequest
         | AuditReadRequest
         | AuditListRequest
         | AuditCancelRequest
@@ -14525,6 +14641,7 @@ class ClientRequest(
         AuditCapabilitiesRequest
         | AuditPreflightRequest
         | AuditStartRequest
+        | AuditEvidenceRequest
         | AuditReadRequest
         | AuditListRequest
         | AuditCancelRequest

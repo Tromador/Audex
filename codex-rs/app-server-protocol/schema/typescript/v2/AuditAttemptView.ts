@@ -6,7 +6,11 @@ import type { AuditGenerationIdentity } from "./AuditGenerationIdentity";
 import type { AuditLocalExecution } from "./AuditLocalExecution";
 import type { AuditResultExtraction } from "./AuditResultExtraction";
 
-export type AuditAttemptView = { runId: string, reviewerId: string, reviewerOrdinal: bigint, assignmentId: string, attemptOrdinal: bigint, operationId: string, snapshotId: string, provider: string,
+export type AuditAttemptView = {
+/**
+ * Retained structured finding count; absent until the attempt completed.
+ */
+findingCount: number | null, runId: string, reviewerId: string, reviewerOrdinal: bigint, assignmentId: string, attemptOrdinal: bigint, operationId: string, snapshotId: string, provider: string,
 /**
  * Requested selection, retained for compatibility.
  */

@@ -1797,6 +1797,16 @@
           ],
           "description": "Absent for historical results predating the shared extraction contract."
         },
+        "findingCount": {
+          "default": null,
+          "description": "Retained structured finding count; absent until the attempt completed.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "localExecution": {
           "anyOf": [
             {
@@ -2066,6 +2076,187 @@
         "reviewerCount",
         "scheduling"
       ],
+      "type": "object"
+    },
+    "AuditEvidenceParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "description": "Read-only conversation access. Offsets are zero based; finding numbers are one based.",
+      "properties": {
+        "query": {
+          "$ref": "#/definitions/AuditEvidenceQuery"
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query",
+        "runId"
+      ],
+      "title": "AuditEvidenceParams",
+      "type": "object"
+    },
+    "AuditEvidenceQuery": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "description": "Caller-selected page length; omission returns all remaining reviewers.",
+              "format": "uint",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "default": 0,
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "view": {
+              "enum": [
+                "reviewers"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "view"
+          ],
+          "title": "ViewAuditEvidenceQuery",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "description": "Caller-selected page length; omission returns all remaining findings.",
+              "format": "uint",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "default": 0,
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "reviewer": {
+              "description": "Omission returns complete findings across all retained reviewers.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "view": {
+              "enum": [
+                "findings"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "view"
+          ],
+          "title": "AuditEvidenceQuery1",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "maxBytes": {
+              "description": "Optional JSON byte range; omission returns the complete remainder.",
+              "format": "uint",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "number": {
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "offset": {
+              "default": 0,
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "reviewer": {
+              "type": "string"
+            },
+            "view": {
+              "enum": [
+                "finding"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "number",
+            "reviewer",
+            "view"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "maxBytes": {
+              "description": "Optional byte range; omission reads through EOF. No Audex size ceiling.",
+              "format": "uint",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "path": {
+              "type": "string"
+            },
+            "snapshot": {
+              "type": "string"
+            },
+            "view": {
+              "enum": [
+                "source"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "snapshot",
+            "view"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AuditEvidenceResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "data": true
+      },
+      "required": [
+        "data"
+      ],
+      "title": "AuditEvidenceResponse",
       "type": "object"
     },
     "AuditExecutionAdapter": {
@@ -3517,6 +3708,30 @@
             "params"
           ],
           "title": "Audit/startRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "audit/evidence"
+              ],
+              "title": "Audit/evidenceRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AuditEvidenceParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Audit/evidenceRequest",
           "type": "object"
         },
         {

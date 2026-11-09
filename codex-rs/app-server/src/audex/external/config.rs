@@ -11,8 +11,6 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 use std::process::Command;
 
-pub(super) const CLIENT_VERSION: &str = "2.1.314";
-
 pub(super) struct Prepared {
     pub spec: SpawnSpec,
     pub record: LaunchRecord,
@@ -68,7 +66,7 @@ pub(super) async fn prepare(
         }
         _ => anyhow::bail!("wrong external route"),
     };
-    let executable = super::commissioning::executable(executable, version)?;
+    let executable = super::commissioning::executable(executable)?;
     if route == "claude_subscription" {
         super::commissioning::revalidate(root, settings, policy)?;
     }
@@ -329,6 +327,7 @@ async fn prepare_files(
             nonce_argument: mcp_path.display().to_string(),
             executable_digest: executable_digest.clone(),
             binding_argument: serde_json::to_string(identity)?,
+            client_version: version.to_string(),
         },
         record: LaunchRecord {
             operation_id: identity.operation_id.clone(),

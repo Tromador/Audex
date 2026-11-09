@@ -77,6 +77,9 @@ pub struct AuditAttemptReadParams {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct AuditAttemptView {
+    /// Retained structured finding count; absent until the attempt completed.
+    #[serde(default)]
+    pub finding_count: Option<u32>,
     pub run_id: String,
     pub reviewer_id: String,
     pub reviewer_ordinal: i64,

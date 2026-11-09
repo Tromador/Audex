@@ -74,7 +74,9 @@ fn audit_report_is_untrusted_conversation_context_not_an_instruction_override() 
     let context = report_context(&view).unwrap();
     assert!(context.contains("not instructions"));
     assert!(context.contains("Snapshot: snapshot"));
-    assert!(context.contains(view.report.as_ref().unwrap()));
+    assert!(!context.contains(view.report.as_ref().unwrap()));
+    assert!(context.contains("audit_read") && context.contains("audit_source"));
+    assert!(context.len() < 3000);
     assert!(terminal(&view));
     let operator = ThreadId::new();
     let other = ThreadId::new();
@@ -180,7 +182,8 @@ fn unpublished_candidate_material_never_enters_conversation_context() {
     contexts.stage(thread, &view);
     let context = contexts.for_turn(thread).unwrap();
     let value = &context.values().next().unwrap().value;
-    assert!(value.contains("AUTHORITATIVE_PUBLISHED_REPORT"));
+    assert!(!value.contains("AUTHORITATIVE_PUBLISHED_REPORT"));
+    assert!(value.contains("audit_read"));
     assert!(!value.contains("UNVALIDATED_JSON"));
     assert!(!value.contains("UNPUBLISHED_CANDIDATE"));
 }
@@ -454,5 +457,79 @@ async fn typed_reviewer_json_is_shared_by_slash_commands_and_tool_schema() {
         r#"{"provider":"p","model":"m","authenticationRoute":"unknown"}"#,
     ] {
         assert!(parse_reviewer(selection).is_err());
+    }
+}
+
+#[test]
+fn retrieval_tools_are_strict_and_oversized_reports_never_cross_the_model_boundary() {
+    assert!(matches!(
+        tool_action("audit_read", json!({"runId":"run"})).unwrap(),
+        AuditAction::Evidence(_)
+    ));
+    assert!(
+        tool_action(
+            "audit_read",
+            json!({"runId":"run","view":"finding","reviewer":"haiku-id","number":2})
+        )
+        .is_ok()
+    );
+    for args in [
+        json!({"runId":"run","view":"findings"}),
+        json!({"runId":"run","view":"findings","reviewer":"haiku-id","offset":1,"limit":2}),
+    ] {
+        assert!(tool_action("audit_read", args).is_ok());
+    }
+    assert!(
+        tool_action(
+            "audit_read",
+            json!({"runId":"run","view":"reviewers","write":true})
+        )
+        .is_err()
+    );
+    assert!(
+        tool_action(
+            "audit_source",
+            json!({"runId":"run","snapshot":"snapshot","path":"x.rs"})
+        )
+        .is_ok()
+    );
+    assert!(tool_action("audit_source",json!({"runId":"run","snapshot":"snapshot","path":"x.rs","offset":0,"maxBytes":800,"content":"overwrite"})).is_err());
+    let view:AuditRunView=serde_json::from_value(json!({"runId":"run","snapshotId":"snapshot","assignmentId":"assignment","phase":"completed","operationState":"committed",
+        "observationPending":false,"capacityReleased":false,"revision":3,"cancellationRequested":false,"outcome":null,"rawResult":"RAW_SECRET","report":"OVERSIZED_REPORT".repeat(10000)})).unwrap();
+    let context = report_context(&view).unwrap();
+    assert!(context.len() < 3000);
+    let result = response(Ok(serde_json::to_value(view).unwrap()));
+    let DynamicToolCallOutputContentItem::InputText { text } = &result.content_items[0] else {
+        panic!("text")
+    };
+    assert!(text.len() < 2000);
+    assert!(!text.contains("RAW_SECRET") && !text.contains("OVERSIZED_REPORT"));
+}
+
+#[test]
+fn complete_model_findings_are_not_serialised_twice_and_fragments_remain_lossless() {
+    let finding = json!({"id":"f1","title":"Claim","mechanism":"β mechanism","evidence":[]});
+    let text = finding.to_string();
+    let complete = json!({"identity":{"runId":"run","snapshotId":"snapshot"},
+        "reviewer":{"reviewerId":"reviewer"},"finding":finding,"findingId":"f1","number":1,
+        "encoding":"json-utf8","content":text,"offset":0,"nextOffset":null,"totalBytes":text.len(),"eof":true});
+    let mut partial = complete.clone();
+    partial["finding"] = Value::Null;
+    partial["content"] = json!(&text[..8]);
+    partial["eof"] = json!(false);
+    partial["nextOffset"] = json!(8);
+    for original in [complete, partial] {
+        let response = response(Ok(original.clone()));
+        assert!(response.success);
+        let DynamicToolCallOutputContentItem::InputText { text } = &response.content_items[0]
+        else {
+            panic!("text");
+        };
+        let actual: Value = serde_json::from_str(text).unwrap();
+        let mut expected = original;
+        if expected["finding"].is_object() {
+            expected.as_object_mut().unwrap().remove("content");
+        }
+        assert_eq!(actual, expected);
     }
 }

@@ -348,6 +348,34 @@ impl AuditStore {
         Ok(input)
     }
 
+    pub(in crate::audex) async fn finding_count(
+        &self,
+        assignment: &str,
+    ) -> Result<u32, AuditStoreError> {
+        Ok(
+            sqlx::query_scalar("SELECT count(*) FROM findings WHERE assignment_id=?")
+                .bind(assignment)
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+
+    pub(in crate::audex) async fn conversation_selection(
+        &self,
+        run: &str,
+    ) -> Result<Option<CollectionInput>, AuditStoreError> {
+        let mut connection = self.pool.acquire().await?;
+        let id: Option<String> =
+            sqlx::query_scalar("SELECT authoritative_selection_id FROM audit_runs WHERE id=?")
+                .bind(run)
+                .fetch_one(&mut *connection)
+                .await?;
+        match id {
+            Some(id) => self.load_selection(&mut connection, &id).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
     async fn load_selection(
         &self,
         connection: &mut sqlx::SqliteConnection,

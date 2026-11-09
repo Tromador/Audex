@@ -184,6 +184,7 @@ impl ExternalDispatch {
                 policy,
                 input.resolved_model.as_deref().expect("decoded model"),
                 prepared.billing_source,
+                &prepared.record.client_version,
                 store,
                 &identity,
             )

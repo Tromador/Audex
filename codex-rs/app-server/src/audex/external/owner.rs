@@ -15,6 +15,8 @@ pub(super) struct SpawnSpec {
     pub nonce_argument: String,
     pub executable_digest: String,
     pub binding_argument: String,
+    /// The operator-configured version this executable must report.
+    pub client_version: String,
 }
 
 pub(super) struct OwnedChild {
@@ -356,8 +358,8 @@ fn verify_version(spec: &SpawnSpec) -> anyhow::Result<()> {
     anyhow::ensure!(
         status.success()
             && std::str::from_utf8(&bytes[..n])?.trim()
-                == format!("{} (Claude Code)", super::config::CLIENT_VERSION),
-        "unqualified executable version"
+                == format!("{} (Claude Code)", spec.client_version),
+        "client executable does not report the configured version"
     );
     Ok(())
 }

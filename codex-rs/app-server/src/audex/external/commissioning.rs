@@ -7,11 +7,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-pub(super) fn executable(path: &str, version: &str) -> anyhow::Result<PathBuf> {
-    anyhow::ensure!(
-        version == super::config::CLIENT_VERSION,
-        "unqualified client version"
-    );
+pub(super) fn executable(path: &str) -> anyhow::Result<PathBuf> {
     let path = PathBuf::from(path);
     anyhow::ensure!(
         path == path.canonicalize()?
@@ -82,7 +78,7 @@ pub(crate) fn inspect(
             "subscription route is unavailable for commissioning: missing client configuration"
         )
     })?;
-    let executable = executable(&config.executable, &config.client_version)?;
+    let executable = executable(&config.executable)?;
     let runtime_root = Path::new(&config.runtime_root);
     let home = runtime(runtime_root)?;
     let policy = policy(root, Path::new(&config.profile), runtime_root, &home)?;

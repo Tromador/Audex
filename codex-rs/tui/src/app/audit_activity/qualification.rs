@@ -598,7 +598,14 @@ stream_max_retries=0
     })
     .await??;
     let staged = ui.app.audits.reports.for_turn(ui.thread).unwrap();
-    assert!(staged.values().any(|v| v.value.contains(&report)));
+    assert!(staged.values().any(|v| v.value.contains(&run)
+        && v.value.contains("audit_read")
+        && v.value.contains("audit_source")));
+    assert!(
+        staged
+            .values()
+            .all(|v| !v.value.contains(&report) && v.value.len() < 3000)
+    );
     let read = cli(&daemon, &["read", &run], 0);
     assert_eq!(read.stdout, report.as_bytes());
     evidence(

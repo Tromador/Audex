@@ -19,6 +19,14 @@ use wiremock::{
 
 pub(super) type Result<T> = color_eyre::Result<T>;
 
+#[cfg(unix)]
+#[path = "source_access.rs"]
+mod source_access;
+
+#[cfg(unix)]
+#[path = "finding_collections.rs"]
+mod finding_collections;
+
 pub(super) struct Home(tempfile::TempDir);
 impl Home {
     fn new() -> Result<Self> {
@@ -256,6 +264,31 @@ fn tool_name(value: &Value) -> Option<(String, String)> {
     })
 }
 
+fn nested_object(value: &Value, key: &str) -> Option<Value> {
+    match value {
+        Value::Object(object) if object.contains_key(key) => Some(value.clone()),
+        Value::Object(object) => object.values().find_map(|v| nested_object(v, key)),
+        Value::Array(items) => items.iter().find_map(|v| nested_object(v, key)),
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|v| nested_object(&v, key)),
+        _ => None,
+    }
+}
+
+fn named_tool(tools: &Value, suffix: &str) -> Option<(String, String)> {
+    tools.as_array()?.iter().find_map(|namespace| {
+        let tool = namespace["tools"]
+            .as_array()?
+            .iter()
+            .find(|tool| tool["name"].as_str().is_some_and(|n| n.ends_with(suffix)))?;
+        Some((
+            namespace["name"].as_str()?.to_owned(),
+            tool["name"].as_str()?.to_owned(),
+        ))
+    })
+}
+
 async fn mount_provider(provider: &MockServer, source: std::path::PathBuf) {
     Mock::given(method("POST")).and(path("/v1/responses")).respond_with(move |request: &wiremock::Request| {
         let body: Value = serde_json::from_slice(&request.body).expect("provider JSON");
@@ -280,10 +313,31 @@ async fn mount_provider(provider: &MockServer, source: std::path::PathBuf) {
                 vec![responses::ev_function_call_with_namespace("source-read", "audex_source", "read", r#"{"path":"example.rs","offset":0,"max_bytes":64}"#), responses::ev_completed("review-read")]
             }
         } else if text.contains("Explain the fixture finding") {
-            assert!(text.contains("Retained audit summary"));
-            assert!(text.contains("Fixture finding"));
             assert!(text.contains("audex_audit_result"));
-            vec![responses::ev_assistant_message("discussion", "The finding cites the immutable snapshot; a correction can be proposed in this operator conversation."), responses::ev_completed("discussed")]
+            let run = nested_object(&body["input"], "runId").expect("retained run reference");
+            let output_for = |id: &str| body["input"].as_array().unwrap().iter().any(|v| v["type"] == "function_call_output" && v["call_id"] == id);
+            let (id, suffix, args) = if !output_for("retained-reviewers") {
+                assert!(!text.contains("Fixture mechanism"), "full report must not be attached");
+                ("retained-reviewers", "audit_read", json!({"runId":run["runId"]}))
+            } else if !output_for("retained-findings") {
+                let reviewer = nested_object(&body["input"], "reviewerId").expect("retrieved attribution");
+                ("retained-findings", "audit_read", json!({"runId":run["runId"],"view":"findings","reviewer":reviewer["reviewerId"]}))
+            } else if !output_for("retained-finding") {
+                let reviewer = nested_object(&body["input"], "reviewerId").unwrap();
+                ("retained-finding", "audit_read", json!({"runId":run["runId"],"view":"finding","reviewer":reviewer["reviewerId"],"number":1}))
+            } else if !output_for("retained-source") {
+                assert!(text.contains("Fixture mechanism"));
+                let individual = nested_object(&body["input"], "finding").expect("individual finding output");
+                assert_eq!(individual["finding"]["mechanism"], "Fixture mechanism");
+                assert!(individual.get("content").is_none(), "model-visible finding is represented once");
+                ("retained-source", "audit_source", json!({"runId":run["runId"],"snapshot":run["snapshotId"],"path":"example.rs","offset":0,"maxBytes":64}))
+            } else {
+                assert!(text.contains("fn main()"));
+                assert!(!text.contains("CHANGED_LIVE_SOURCE"));
+                return ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").insert_header("OpenAI-Model",body["model"].as_str().unwrap()).set_body_string(responses::sse(vec![responses::ev_assistant_message("discussion", "The retrieved finding cites the original sealed source."), responses::ev_completed("discussed")]));
+            };
+            let (namespace, tool) = named_tool(&body["tools"], suffix).expect("retrieval tool exposed after restart");
+            vec![responses::ev_function_call_with_namespace(id, &namespace, &tool, &args.to_string()), responses::ev_completed(id)]
         } else if text.contains("function_call_output") {
             vec![responses::ev_assistant_message("submitted", "The audit is running independently; this conversation is still available."), responses::ev_completed("operator-continued")]
         } else {
@@ -533,6 +587,21 @@ async fn conversational_scenario() -> Result<()> {
     );
     session.shutdown().await?;
     let mut reopened = boxed_future!(crate::start_embedded_app_server_for_picker(&config)).await?;
+    std::fs::write(&source, "CHANGED_LIVE_SOURCE")?;
+    let bridge = DynamicToolMcpServer::start(
+        reopened.request_handle(),
+        Default::default(),
+        config.features.get().clone(),
+        events_tx.clone(),
+        tokio::sync::broadcast::channel(16).0,
+        None,
+        ToolServices {
+            audits: true,
+            worktrees: None,
+        },
+    )
+    .await?;
+    reopened = reopened.with_thread_tool_transport(ThreadToolTransport::Mcp(Arc::new(bridge)));
     let settings = crate::local_settings::LocalSettings::from(&config);
     boxed_future!(reopened.resume_thread(
         &settings,
@@ -547,7 +616,7 @@ async fn conversational_scenario() -> Result<()> {
     assert_eq!(retained.report, view.report);
     assert_eq!(provider.received_requests().await.unwrap().len(), 4);
     // No operator message was sent before exit. /audit read reloads the durable
-    // report, and only the next deliberate turn persists it as untrusted context.
+    // reference, and only the next deliberate turn persists it as untrusted context.
     let action = parse_command(&format!("read {}", view.run_id))
         .unwrap()
         .action(config.cwd.as_path())
@@ -576,8 +645,8 @@ async fn conversational_scenario() -> Result<()> {
     }).await?;
     assert_eq!(
         provider.received_requests().await.unwrap().len(),
-        5,
-        "discussion is a separate operator request, not another audit sample"
+        9,
+        "discussion retrieves reviewers, findings, finding and source without another audit sample"
     );
     contexts.acknowledged(thread);
     reopened.shutdown().await?;
@@ -589,8 +658,8 @@ async fn conversational_scenario() -> Result<()> {
         ResumeModelSettings::RestoreFromThread
     ))
     .await?;
-    assert_eq!(provider.received_requests().await.unwrap().len(), 5);
-    // The report is now ordinary retained Codex context, without another read or attachment.
+    assert_eq!(provider.received_requests().await.unwrap().len(), 9);
+    // Retrieved evidence is now retained Codex context, without another attachment.
     turn(
         &mut resumed,
         thread,
@@ -604,7 +673,7 @@ async fn conversational_scenario() -> Result<()> {
             if matches!(event.event, AppServerEvent::ServerNotification(ref n) if matches!(n.as_ref(), ServerNotification::TurnCompleted(c) if c.thread_id == thread.to_string())) { break; }
         }
     }).await?;
-    assert_eq!(provider.received_requests().await.unwrap().len(), 6);
+    assert_eq!(provider.received_requests().await.unwrap().len(), 10);
     resumed.shutdown().await?;
     Ok(())
 }

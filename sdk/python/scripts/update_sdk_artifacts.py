@@ -338,6 +338,10 @@ def _variant_definition_name(base: str, variant: dict[str, Any]) -> str | None:
     # datamodel-code-generator invents numbered helper names for inline union
     # branches unless they carry a stable, unique title up front. We derive
     # those titles from the branch discriminator or other identifying shape.
+    # Audit evidence pins its existing SDK names when optional selectors make
+    # multiple views share the same required-field shape.
+    if base == "AuditEvidenceQuery" and isinstance(variant.get("title"), str):
+        return variant["title"]
     props = variant.get("properties")
     if isinstance(props, dict):
         for key in DISCRIMINATOR_KEYS:
