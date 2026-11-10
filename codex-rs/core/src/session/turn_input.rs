@@ -291,6 +291,7 @@ pub(super) async fn handle(
                 submission_id,
                 kind,
                 /*expected_previous_turn_id*/ None,
+                None,
             )
             .await
         }
@@ -311,6 +312,7 @@ pub(super) async fn handle(
                 submission_id,
                 TurnStartKind::Recovery,
                 Some(expected_previous_turn_id),
+                None,
             )
             .await
         }
@@ -356,12 +358,30 @@ pub(super) async fn handle_recovery(
         submission_id,
         TurnStartKind::Recovery,
         /*expected_previous_turn_id*/ None,
+        None,
     )
     .await;
     if let Ok(TurnInputSubmission::Started { turn_id, .. }) = &result {
         tracing::Span::current().record("turn.id", turn_id);
     }
     result
+}
+
+pub(super) async fn handle_external(
+    session: &Arc<Session>,
+    request: TurnInputRequest,
+    execution: codex_protocol::protocol::ExternalConversationExecution,
+    submission_id: String,
+) -> CodexResult<TurnInputSubmission> {
+    start_if_idle(
+        session,
+        request.into(),
+        submission_id,
+        TurnStartKind::User,
+        None,
+        Some(crate::tasks::external_conversation::ExternalConversationTask::new(execution)),
+    )
+    .await
 }
 
 fn user_input_metadata(request: &TurnInputRequest) -> UserInputMetadata {
@@ -514,6 +534,7 @@ async fn start_if_idle(
     submission_id: String,
     kind: TurnStartKind,
     expected_previous_turn_id: Option<String>,
+    external: Option<crate::tasks::external_conversation::ExternalConversationTask>,
 ) -> CodexResult<TurnInputSubmission> {
     let WithTurnExtensionData {
         request,
@@ -668,9 +689,15 @@ async fn start_if_idle(
             }
         }
     }
-    session
-        .start_task(Arc::clone(&turn_context), task_input, RegularTask::new())
-        .await;
+    if let Some(task) = external {
+        session
+            .start_task(Arc::clone(&turn_context), task_input, task)
+            .await;
+    } else {
+        session
+            .start_task(Arc::clone(&turn_context), task_input, RegularTask::new())
+            .await;
+    }
     Ok(TurnInputSubmission::Started {
         turn_id: submission_id,
         root_turn_id: turn_context.root_turn_id(),
@@ -929,6 +956,11 @@ impl Session {
         }
 
         match active_task.kind {
+            crate::state::TaskKind::ExternalConversation => {
+                return Err(NotSubmittedReason::ActiveTurnNotSteerable {
+                    turn_kind: NonSteerableTurnKind::ExternalConversation,
+                });
+            }
             crate::state::TaskKind::Regular => {}
             crate::state::TaskKind::Review => {
                 return Err(NotSubmittedReason::ActiveTurnNotSteerable {

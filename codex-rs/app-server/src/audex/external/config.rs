@@ -196,37 +196,9 @@ async fn prepare_files(
     file.write_all(&serde_json::to_vec(&mcp)?)?;
     file.sync_all()?;
     std::fs::File::open(directory)?.sync_all()?;
-    let mut environment: BTreeMap<String, String> = BTreeMap::from([
-        ("PATH".into(), "/usr/bin:/bin".into()),
-        ("USER".into(), "audex-reviewer".into()),
-        ("LANG".into(), "C.UTF-8".into()),
-        ("TERM".into(), "dumb".into()),
-        ("HOME".into(), directory.join("home").display().to_string()),
-        ("TMPDIR".into(), directory.join("tmp").display().to_string()),
-        (
-            "CLAUDE_CONFIG_DIR".into(),
-            policy
-                .as_ref()
-                .map(|p| p.profile.clone())
-                .unwrap_or_else(|| directory.join("profile"))
-                .display()
-                .to_string(),
-        ),
-    ]);
-    for (key, value) in [
-        ("CLAUDE_CODE_MAX_RETRIES", "0"),
-        ("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK", "1"),
-        ("CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES", "0"),
-        ("CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK", "1"),
-        ("CLAUDE_CODE_DISABLE_REFUSAL_RETRY", "1"),
-        ("DISABLE_COMPACT", "1"),
-        ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
-        ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1"),
-        ("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1"),
-        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
-    ] {
-        environment.insert(key.into(), value.into());
-    }
+    let environment = isolated_environment(directory, policy.as_ref());
+    #[cfg(test)]
+    let mut environment = environment;
     let mut args: Vec<String> = [
         "-p",
         "--input-format",
@@ -356,4 +328,41 @@ async fn prepare_files(
         billing_source,
         mcp_digest: sha256_hex(&serde_json::to_vec(&mcp)?),
     })
+}
+
+pub(super) fn isolated_environment(
+    directory: &Path,
+    policy: Option<&super::policy::Policy>,
+) -> BTreeMap<String, String> {
+    let mut environment: BTreeMap<String, String> = BTreeMap::from([
+        ("PATH".into(), "/usr/bin:/bin".into()),
+        ("USER".into(), "audex-reviewer".into()),
+        ("LANG".into(), "C.UTF-8".into()),
+        ("TERM".into(), "dumb".into()),
+        ("HOME".into(), directory.join("home").display().to_string()),
+        ("TMPDIR".into(), directory.join("tmp").display().to_string()),
+        (
+            "CLAUDE_CONFIG_DIR".into(),
+            policy
+                .map(|p| p.profile.clone())
+                .unwrap_or_else(|| directory.join("profile"))
+                .display()
+                .to_string(),
+        ),
+    ]);
+    for (key, value) in [
+        ("CLAUDE_CODE_MAX_RETRIES", "0"),
+        ("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK", "1"),
+        ("CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES", "0"),
+        ("CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK", "1"),
+        ("CLAUDE_CODE_DISABLE_REFUSAL_RETRY", "1"),
+        ("DISABLE_COMPACT", "1"),
+        ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
+        ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1"),
+        ("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1"),
+        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+    ] {
+        environment.insert(key.into(), value.into());
+    }
+    environment
 }

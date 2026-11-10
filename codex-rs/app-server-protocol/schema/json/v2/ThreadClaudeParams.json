@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Start one subscription-backed Claude conversation turn in an idle Codex thread.",
+  "properties": {
+    "message": {
+      "type": "string"
+    },
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "message",
+    "threadId"
+  ],
+  "title": "ThreadClaudeParams",
+  "type": "object"
+}

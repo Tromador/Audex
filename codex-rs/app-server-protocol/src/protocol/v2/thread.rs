@@ -2294,3 +2294,21 @@ pub struct ContextCompactedNotification {
     pub thread_id: String,
     pub turn_id: String,
 }
+
+/// Start one subscription-backed Claude conversation turn in an idle Codex thread.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadClaudeParams {
+    pub thread_id: String,
+    pub message: String,
+    pub model: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadClaudeResponse {
+    pub turn_id: String,
+    pub model: String,
+}

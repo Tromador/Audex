@@ -16,7 +16,7 @@ use tokio::io::unix::AsyncFd;
 mod repair;
 
 type Result<T> = std::result::Result<T, &'static str>;
-const MAX_RECORD: usize = 2 * 1024 * 1024;
+pub(super) const MAX_RECORD: usize = 2 * 1024 * 1024;
 const MAX_STREAM: usize = 64 * 1024 * 1024;
 const MAX_RECORDS: usize = 65_536;
 const MAX_IDENTITIES: usize = 4096;
@@ -126,6 +126,25 @@ impl Message {
     }
 }
 
+/// Shared completion evidence for audit and conversation capture.
+pub(super) fn require_finished(
+    last: Option<&str>,
+    message: &str,
+    observed: Option<&str>,
+    terminal_stop: &Value,
+) -> Result<()> {
+    let terminal = terminal_stop.as_str();
+    if last != Some(message)
+        || (!terminal_stop.is_null() && terminal.is_none())
+        || observed.is_some_and(|stop| stop != "end_turn")
+        || terminal.is_some_and(|stop| stop != "end_turn")
+        || (observed.is_none() && terminal.is_none())
+    {
+        return Err("external_final_generation_incomplete");
+    }
+    Ok(())
+}
+
 fn identifier(v: &Value) -> Result<&str> {
     v.as_str()
         .filter(|s| {
@@ -146,7 +165,7 @@ fn usage(v: &Value) -> ClientUsage {
     }
 }
 
-async fn read_pipe<T: Read + AsRawFd>(
+pub(super) async fn read_pipe<T: Read + AsRawFd>(
     pipe: &mut AsyncFd<T>,
     bytes: &mut [u8],
 ) -> std::io::Result<usize> {

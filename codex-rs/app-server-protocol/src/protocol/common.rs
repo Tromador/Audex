@@ -990,6 +990,12 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadGuardianReviewResponse,
     },
+    /// Start an operator-directed Claude subscription conversation turn.
+    ThreadClaude => "thread/claude" {
+        params: v2::ThreadClaudeParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadClaudeResponse,
+    },
     /// Append raw Responses API items to the thread history without starting a user turn.
     ThreadInjectItems => "thread/inject_items" {
         params: v2::ThreadInjectItemsParams,

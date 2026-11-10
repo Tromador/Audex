@@ -568,6 +568,15 @@ pub(super) async fn spawn_websocket_server_with_args(
     listen_url: &str,
     extra_args: &[String],
 ) -> Result<(Child, SocketAddr)> {
+    spawn_websocket_server_with_env(codex_home, listen_url, extra_args, &[]).await
+}
+
+pub(super) async fn spawn_websocket_server_with_env(
+    codex_home: &Path,
+    listen_url: &str,
+    extra_args: &[String],
+    environment: &[(&str, &str)],
+) -> Result<(Child, SocketAddr)> {
     let program = codex_utils_cargo_bin::cargo_bin("codex-app-server")
         .context("should find app-server binary")?;
     let mut cmd = Command::new(program);
@@ -578,6 +587,7 @@ pub(super) async fn spawn_websocket_server_with_args(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .envs(environment.iter().copied())
         .env("CODEX_HOME", codex_home)
         .env("RUST_LOG", "warn")
         .env("OTEL_METRIC_EXPORT_INTERVAL", "200");

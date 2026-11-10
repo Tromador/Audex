@@ -62,6 +62,7 @@ pub(super) const fn default_enabled() -> bool {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub enum NonSteerableTurnKind {
+    ExternalConversation,
     Review,
     Compact,
 }
@@ -199,6 +200,7 @@ impl From<CoreCodexErrorInfo> for CodexErrorInfo {
 impl From<CoreNonSteerableTurnKind> for NonSteerableTurnKind {
     fn from(value: CoreNonSteerableTurnKind) -> Self {
         match value {
+            CoreNonSteerableTurnKind::ExternalConversation => Self::ExternalConversation,
             CoreNonSteerableTurnKind::Review => Self::Review,
             CoreNonSteerableTurnKind::Compact => Self::Compact,
         }

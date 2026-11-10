@@ -148,7 +148,10 @@ impl ChatWidget {
         cmd: SlashCommand,
         source: SlashCommandDispatchSource,
     ) -> bool {
-        if source == SlashCommandDispatchSource::Live && cmd.requires_dispatch_validation() {
+        if source == SlashCommandDispatchSource::Live
+            && cmd.requires_dispatch_validation()
+            && cmd != SlashCommand::Claude
+        {
             return self.is_user_turn_pending_or_running()
                 || (cmd == SlashCommand::Review
                     && self.input_queue.has_queued_follow_up_messages());
@@ -198,13 +201,17 @@ impl ChatWidget {
             return;
         }
 
-        if source == SlashCommandDispatchSource::Live && cmd.requires_dispatch_validation() {
+        if source == SlashCommandDispatchSource::Live
+            && cmd.requires_dispatch_validation()
+            && cmd != SlashCommand::Claude
+        {
             self.bottom_pane
                 .set_composer_text(String::new(), Vec::new(), Vec::new());
             self.bottom_pane.drain_pending_submission_state();
         }
 
         match cmd {
+            SlashCommand::Claude => self.add_info_message(crate::claude::USAGE.into(), None),
             SlashCommand::Audit => self.request_audit_command("list".to_owned()),
             SlashCommand::Daybreak => {
                 if !self.config.features.enabled(Feature::CliDaybreak) {
@@ -707,6 +714,20 @@ impl ChatWidget {
             return;
         }
 
+        if cmd == SlashCommand::Claude {
+            if !self.bottom_pane.composer_local_images().is_empty()
+                || !self.bottom_pane.remote_image_urls().is_empty()
+            {
+                self.add_error_message("Claude conversation currently accepts text only. Remove the image attachment before sending.".into());
+                return;
+            }
+            // Validate before consuming the rich draft. Large pasted text is expanded below.
+            if let Err(error) = crate::claude::parse(&args) {
+                self.add_error_message(error);
+                return;
+            }
+        }
+
         if cmd == SlashCommand::Goal {
             self.dispatch_prepared_command_with_args(
                 cmd,
@@ -813,6 +834,15 @@ impl ChatWidget {
             return;
         }
         match cmd {
+            SlashCommand::Claude => match crate::claude::parse(&args) {
+                Ok((model, message)) => {
+                    if source == SlashCommandDispatchSource::Live {
+                        self.bottom_pane.drain_pending_submission_state();
+                    }
+                    self.submit_op(AppCommand::ClaudeTurn { message, model });
+                }
+                Err(error) => self.add_error_message(error),
+            },
             SlashCommand::Audit => self.request_audit_command(trimmed.to_owned()),
             SlashCommand::Model if !trimmed.is_empty() => {
                 self.handle_model_command_args(trimmed);
@@ -1336,6 +1366,7 @@ impl ChatWidget {
                 }
             }
             SlashCommand::Feedback
+            | SlashCommand::Claude
             | SlashCommand::Audit
             | SlashCommand::Warnings
             | SlashCommand::Export

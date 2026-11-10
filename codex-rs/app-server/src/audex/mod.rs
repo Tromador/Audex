@@ -4,7 +4,7 @@ pub(crate) mod capture;
 pub(crate) mod controller;
 mod dispatch;
 #[cfg(target_os = "linux")]
-mod external;
+pub(crate) mod external;
 mod lifecycle;
 mod report;
 mod result;

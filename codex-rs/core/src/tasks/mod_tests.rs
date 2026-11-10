@@ -804,3 +804,89 @@ async fn turn_critical_path_metrics_count_each_capture_once() {
         }
     }
 }
+
+#[tokio::test]
+async fn external_conversation_retains_complete_attributed_evidence_without_sampling() {
+    let (session, ctx, events) = make_session_and_context_with_rx().await;
+    let (ready, started) = tokio::sync::oneshot::channel();
+    let (answer, response) = tokio::sync::oneshot::channel();
+    let task = super::external_conversation::ExternalConversationTask::new(
+        codex_protocol::protocol::ExternalConversationExecution {
+            attribution: "Claude (fixture-model)".into(),
+            ready,
+            response,
+        },
+    );
+    session
+        .spawn_task(
+            Arc::clone(&ctx),
+            vec![TurnInput::UserInput {
+                content: vec![UserInput::Text {
+                    text: "/claude question".into(),
+                    text_elements: vec![],
+                }],
+                client_id: None,
+                metadata: Default::default(),
+            }],
+            task,
+        )
+        .await;
+    started.await.unwrap();
+    let text = format!(
+        "{}MIDDLE_SENTINEL{}",
+        "before ".repeat(12_000),
+        " after".repeat(12_000)
+    );
+    answer.send(Ok(text.clone())).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if matches!(events.recv().await.unwrap().msg, EventMsg::TurnComplete(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let history = session.clone_history().await;
+    let evidence = history
+        .raw_items()
+        .find_map(|item| match item {
+            ResponseItem::FunctionCallOutput {
+                name: Some(name),
+                output,
+                ..
+            } if name == "claude_conversation" => output.text_content(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(evidence, format!("**Claude (fixture-model)**\n\n{text}"));
+}
+
+#[tokio::test]
+async fn external_conversation_interrupt_closes_host_response_without_sampling() {
+    let (session, ctx, events) = make_session_and_context_with_rx().await;
+    let (ready, started) = tokio::sync::oneshot::channel();
+    let (mut answer, response) = tokio::sync::oneshot::channel();
+    session
+        .spawn_task(
+            Arc::clone(&ctx),
+            vec![],
+            super::external_conversation::ExternalConversationTask::new(
+                codex_protocol::protocol::ExternalConversationExecution {
+                    attribution: "Claude (fixture)".into(),
+                    ready,
+                    response,
+                },
+            ),
+        )
+        .await;
+    started.await.unwrap();
+    session.interrupt_task().await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), answer.closed())
+        .await
+        .unwrap();
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .any(|e| matches!(e.msg, EventMsg::TurnAborted(_)))
+    );
+}

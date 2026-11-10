@@ -8,6 +8,8 @@ use std::path::Path;
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(super) struct BackendSettings {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_conversation_model: Option<String>,
     pub claude_subscription: Option<ClaudeSubscription>,
     pub claude_api: Option<ClaudeApi>,
     pub ollama_local: Option<OllamaLocal>,
@@ -59,6 +61,7 @@ impl Default for BackendSettings {
     fn default() -> Self {
         Self {
             version: 1,
+            claude_conversation_model: None,
             claude_subscription: None,
             claude_api: None,
             ollama_local: None,
@@ -110,6 +113,9 @@ impl BackendSettings {
             self.version == 1,
             "unsupported reviewer-backends.json version"
         );
+        if let Some(model) = &self.claude_conversation_model {
+            bounded(model)?;
+        }
         if let Some(c) = &self.claude_subscription {
             absolute(&c.executable)?;
             bounded(&c.client_version)?;

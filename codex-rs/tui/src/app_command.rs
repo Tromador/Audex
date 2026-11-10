@@ -123,6 +123,10 @@ pub(crate) enum AppCommand {
         delivery_id: u64,
         text: RealtimeSpeechText,
     },
+    ClaudeTurn {
+        message: String,
+        model: Option<String>,
+    },
     RunUserShellCommand {
         command: String,
     },

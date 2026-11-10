@@ -11,6 +11,7 @@ use strum_macros::IntoStaticStr;
 #[strum(serialize_all = "kebab-case")]
 pub enum SlashCommand {
     Audit,
+    Claude,
     // DO NOT ALPHA-SORT! Enum order is presentation order in the popup, so
     // more frequently used commands should be listed first.
     Model,
@@ -94,6 +95,7 @@ impl SlashCommand {
     pub fn description(self) -> &'static str {
         match self {
             SlashCommand::Audit => "start or retrieve a durable isolated source audit",
+            SlashCommand::Claude => "talk to Claude in this conversation; optionally --model MODEL",
             SlashCommand::Config => "configure Codex preferences",
             SlashCommand::Feedback => "send logs to maintainers",
             SlashCommand::New => "start a new chat during a conversation",
@@ -175,6 +177,7 @@ impl SlashCommand {
         matches!(
             self,
             SlashCommand::Review
+                | SlashCommand::Claude
                 | SlashCommand::Audit
                 | SlashCommand::Model
                 | SlashCommand::Permissions
@@ -224,7 +227,10 @@ impl SlashCommand {
     /// Whether dispatch needs thread state to validate this command before consuming its draft.
     /// The composer must defer busy-state rejection and draft clearing for these commands.
     pub(crate) fn requires_dispatch_validation(self) -> bool {
-        matches!(self, SlashCommand::Fork | SlashCommand::Review)
+        matches!(
+            self,
+            SlashCommand::Fork | SlashCommand::Review | SlashCommand::Claude
+        )
     }
 
     /// Commands that do not require a writable current thread. The server must still be connected.
@@ -251,7 +257,8 @@ impl SlashCommand {
     /// Whether this command can be run while a task is in progress.
     pub fn available_during_task(self) -> bool {
         match self {
-            SlashCommand::New
+            SlashCommand::Claude
+            | SlashCommand::New
             | SlashCommand::Delete
             | SlashCommand::Fork
             | SlashCommand::Worktree

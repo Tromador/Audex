@@ -19,6 +19,46 @@ pub(super) async fn qualify(
     store: &AuditStore,
     identity: &AdmissionIdentity,
 ) -> anyhow::Result<Spawned> {
+    qualify_inner(
+        child,
+        policy,
+        model,
+        billing_source,
+        client_version,
+        &identity.execution_id,
+        Some((store, identity)),
+    )
+    .await
+}
+
+pub(super) async fn qualify_conversation(
+    child: Spawned,
+    policy: &mut Policy,
+    model: &str,
+    client_version: &str,
+    execution_id: &str,
+) -> anyhow::Result<Spawned> {
+    qualify_inner(
+        child,
+        policy,
+        model,
+        "none",
+        client_version,
+        execution_id,
+        None,
+    )
+    .await
+}
+
+async fn qualify_inner(
+    child: Spawned,
+    policy: &mut Policy,
+    model: &str,
+    billing_source: &str,
+    client_version: &str,
+    execution_id: &str,
+    audit: Option<(&AuditStore, &AdmissionIdentity)>,
+) -> anyhow::Result<Spawned> {
     let Spawned {
         owned,
         stdin,
@@ -39,7 +79,7 @@ pub(super) async fn qualify(
         .into_iter()
         .enumerate()
         {
-            let request_id = format!("audex-policy-{}-{number}", identity.execution_id);
+            let request_id = format!("audex-policy-{execution_id}-{number}");
             let mut control = json!({"subtype":subtype});
             if subtype == "get_usage" {
                 // Read only the client's tier/session usage; do not scan transcripts.
@@ -115,7 +155,9 @@ pub(super) async fn qualify(
         loop {
             tokio::select! {
                 _ = tick.tick() => {
-                    anyhow::ensure!(store.renew_execution_lease(identity, chrono::Utc::now().timestamp_millis()).await?, "policy qualification authority stopped");
+                    if let Some((store, identity)) = audit {
+                        anyhow::ensure!(store.renew_execution_lease(identity, chrono::Utc::now().timestamp_millis()).await?, "policy qualification authority stopped");
+                    }
                 }
                 ready = stderr.readable_mut(), if stderr_open => {
                     let mut ready = ready?;

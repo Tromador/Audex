@@ -542,6 +542,17 @@ pub(super) async fn submission_loop(
         let dispatch_span = submission_dispatch_span(&sub);
         let should_exit = async {
             match sub.op {
+                Op::ExternalConversation {
+                    request,
+                    execution,
+                    reply,
+                } => {
+                    let result =
+                        turn_input::handle_external(&sess, *request, execution, sub.id.clone())
+                            .await;
+                    let _ = reply.send(result);
+                    false
+                }
                 Op::Interrupt => {
                     interrupt(&sess).await;
                     false

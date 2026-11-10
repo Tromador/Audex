@@ -1984,6 +1984,28 @@ impl AppServerSession {
         Ok(())
     }
 
+    pub(crate) async fn thread_claude(
+        &mut self,
+        thread_id: ThreadId,
+        message: String,
+        model: Option<String>,
+    ) -> Result<()> {
+        let request_id = self.next_request_id();
+        let _: codex_app_server_protocol::ThreadClaudeResponse = self
+            .request_handle
+            .request_typed(ClientRequest::ThreadClaude {
+                request_id,
+                params: codex_app_server_protocol::ThreadClaudeParams {
+                    thread_id: thread_id.to_string(),
+                    message,
+                    model,
+                },
+            })
+            .await
+            .wrap_err("Claude conversation failed")?;
+        Ok(())
+    }
+
     pub(crate) async fn thread_shell_command(
         &mut self,
         thread_id: ThreadId,

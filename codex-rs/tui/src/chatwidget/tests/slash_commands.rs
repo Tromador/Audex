@@ -3921,3 +3921,57 @@ async fn owned_copy_guard_defers_queued_input_until_released() {
         assert!(chat.input_queue.queued_user_messages.is_empty());
     }
 }
+
+#[tokio::test]
+async fn slash_claude_routes_literal_text_without_codex_user_turn() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.codex_op_target = CodexOpTarget::AppEvent;
+    chat.dispatch_command_with_args(
+        SlashCommand::Claude,
+        "--model claude-sonnet-5-5 Isn't Codex's answer wrong?\n  Check again.".into(),
+        vec![],
+    );
+    assert!(chat.input_queue.user_turn_pending_start);
+    let op = std::iter::from_fn(|| rx.try_recv().ok())
+        .find_map(|event| match event {
+            AppEvent::CodexOp(op) => Some(op),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        op,
+        AppCommand::ClaudeTurn {
+            model: Some("claude-sonnet-5-5".into()),
+            message: "Isn't Codex's answer wrong?\n  Check again.".into()
+        }
+    );
+    assert!(op_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn slash_claude_invalid_or_busy_does_not_submit() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.dispatch_command_with_args(SlashCommand::Claude, "--model".into(), vec![]);
+    chat.bottom_pane.set_task_running(true);
+    chat.dispatch_command_with_args(SlashCommand::Claude, "ask while busy".into(), vec![]);
+    assert!(!std::iter::from_fn(|| rx.try_recv().ok()).any(|e| matches!(e, AppEvent::CodexOp(_))));
+    assert!(op_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn slash_claude_rejection_preserves_draft_and_attachments() {
+    let (mut chat, mut rx, _) = make_chatwidget_manual(None).await;
+    chat.bottom_pane
+        .set_composer_text("/claude --model".into(), vec![], vec![]);
+    chat.dispatch_command_with_args(SlashCommand::Claude, "--model".into(), vec![]);
+    assert_eq!(chat.bottom_pane.composer_text(), "/claude --model");
+    chat.bottom_pane
+        .set_composer_text("/claude explain this".into(), vec![], vec![]);
+    chat.bottom_pane
+        .attach_image(std::path::PathBuf::from("/not-read-by-claude.png"));
+    let draft = chat.bottom_pane.composer_text();
+    chat.dispatch_command_with_args(SlashCommand::Claude, "explain this".into(), vec![]);
+    assert_eq!(chat.bottom_pane.composer_text(), draft);
+    assert_eq!(chat.bottom_pane.composer_local_images().len(), 1);
+    assert!(!std::iter::from_fn(|| rx.try_recv().ok()).any(|e| matches!(e, AppEvent::CodexOp(_))));
+}

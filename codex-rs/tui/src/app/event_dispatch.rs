@@ -1425,6 +1425,7 @@ impl App {
                     self.chat_widget
                         .apply_reserve_fallback_to_pending_turn(&mut op);
                 }
+                let is_claude_turn = matches!(&op, AppCommand::ClaudeTurn { .. });
                 let is_user_turn = matches!(&op, AppCommand::UserTurn { .. });
                 let is_realtime_stop = matches!(&op, AppCommand::RealtimeConversationStop { .. });
                 let realtime_stop_thread_id = match &op {
@@ -1530,6 +1531,9 @@ impl App {
                             );
                         }
                         tracing::error!(error = ?err, "realtime conversation request failed");
+                    } else if is_claude_turn {
+                        chat_widget.clear_external_conversation_pending();
+                        chat_widget.add_error_message(format!("Claude conversation: {err:#}"));
                     } else if handled {
                         tracing::error!(error = ?err, "failed to start turn through app server");
                     } else {

@@ -1017,6 +1017,10 @@ async fn steer_only_enforces_expected_turn_id() {
 #[tokio::test]
 async fn rejects_non_regular_turns() {
     for (task_kind, turn_kind) in [
+        (
+            TaskKind::ExternalConversation,
+            NonSteerableTurnKind::ExternalConversation,
+        ),
         (TaskKind::Review, NonSteerableTurnKind::Review),
         (TaskKind::Compact, NonSteerableTurnKind::Compact),
     ] {

@@ -5539,6 +5539,28 @@
       ],
       "type": "object"
     },
+    "ThreadClaudeParams": {
+      "description": "Start one subscription-backed Claude conversation turn in an idle Codex thread.",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ThreadCompactStartParams": {
       "properties": {
         "threadId": {
@@ -8383,6 +8405,31 @@
         "params"
       ],
       "title": "Thread/items/listRequest",
+      "type": "object"
+    },
+    {
+      "description": "Start an operator-directed Claude subscription conversation turn.",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/claude"
+          ],
+          "title": "Thread/claudeRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadClaudeParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/claudeRequest",
       "type": "object"
     },
     {

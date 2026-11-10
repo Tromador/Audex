@@ -3645,7 +3645,7 @@ impl ThreadRequestProcessor {
 
     // Older clients expect full `thread.turns` from resume and `thread/read(includeTurns=true)`.
     // Keep this slow compatibility path until all clients page history directly.
-    async fn paginated_thread_full_turns(
+    pub(super) async fn paginated_thread_full_turns(
         &self,
         thread_id: ThreadId,
     ) -> Result<Vec<Turn>, JSONRPCErrorError> {

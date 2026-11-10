@@ -145,6 +145,7 @@ pub use custom_terminal::Terminal;
 mod assistant_directives;
 mod audit;
 mod auto_review_denials;
+mod claude;
 mod cwd_prompt;
 mod debug_config;
 mod diff_model;

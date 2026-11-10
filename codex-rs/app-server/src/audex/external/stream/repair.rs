@@ -76,16 +76,7 @@ impl Tracker {
     /// conflicting terminal stop. Missing evidence is not a completed opinion.
     pub(super) fn require_finished(&self, message: &str, terminal_stop: &Value) -> Result<()> {
         let observed = self.messages.get(message).and_then(|g| g.stop.as_deref());
-        let terminal = terminal_stop.as_str();
-        if self.last.as_deref() != Some(message)
-            || (!terminal_stop.is_null() && terminal.is_none())
-            || observed.is_some_and(|stop| stop != "end_turn")
-            || terminal.is_some_and(|stop| stop != "end_turn")
-            || (observed.is_none() && terminal.is_none())
-        {
-            return Err("external_final_generation_incomplete");
-        }
-        Ok(())
+        super::require_finished(self.last.as_deref(), message, observed, terminal_stop)
     }
 
     pub(super) fn has_cutoff_continuation(&self) -> bool {

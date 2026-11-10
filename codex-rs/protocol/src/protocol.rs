@@ -697,12 +697,27 @@ impl AdditionalContextEntry {
     }
 }
 
+/// One operator-directed external response. The host runs the client only after
+/// Core records the prompt; dropping the response receiver cancels host execution.
+#[derive(Debug)]
+pub struct ExternalConversationExecution {
+    pub attribution: String,
+    pub ready: oneshot::Sender<()>,
+    pub response: oneshot::Receiver<std::result::Result<String, String>>,
+}
+
 /// Submission operation
 // Keep diagnostic fields explicit so new payload fields do not enter logs by default.
 #[derive(derive_more::Debug)]
 #[allow(clippy::large_enum_variant)]
 #[non_exhaustive]
 pub enum Op {
+    #[debug("ExternalConversation")]
+    ExternalConversation {
+        request: Box<crate::turn_input::TurnInputRequest>,
+        execution: ExternalConversationExecution,
+        reply: oneshot::Sender<CodexResult<crate::turn_input::TurnInputSubmission>>,
+    },
     /// Abort current task without terminating background terminal processes.
     /// This server sends [`EventMsg::TurnAborted`] in response.
     Interrupt,
@@ -1142,6 +1157,7 @@ impl Op {
             Self::ApproveGuardianDeniedAction { .. } => "approve_guardian_denied_action",
             Self::Shutdown => "shutdown",
             Self::RunUserShellCommand { .. } => "run_user_shell_command",
+            Self::ExternalConversation { .. } => "external_conversation",
         }
     }
 }
@@ -2074,6 +2090,7 @@ pub enum AgentStatus {
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
 pub enum NonSteerableTurnKind {
+    ExternalConversation,
     Review,
     Compact,
 }

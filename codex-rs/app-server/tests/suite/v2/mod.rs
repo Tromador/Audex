@@ -22,6 +22,8 @@ mod bedrock_gov_cloud;
 #[path = "bedrock_service_tier_tests.rs"]
 mod bedrock_service_tier;
 mod bedrock_setup;
+#[cfg(target_os = "linux")]
+mod claude_conversation;
 mod client_metadata;
 mod code_mode_host;
 mod collaboration_mode_list;

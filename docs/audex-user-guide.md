@@ -97,6 +97,25 @@ By default, TUI audits use the **current operator conversation's model and provi
 
 For singular native selections, the reviewer's reasoning effort is taken from the conversation's current selection. Repeated `--reviewer` selections preserve their explicit order and keep duplicate reviewers independent. Native shorthand remains `PROVIDER:MODEL`; JSON provides the typed route and optional served-model binding.
 
+### Conversation with Claude
+
+Use `/claude <message>` in the ordinary conversation to address Claude explicitly. Plain messages continue to the Codex model selected in the TUI.
+
+```text
+/claude Challenge the assumptions in Codex's answer.
+/claude --model claude-sonnet-5-5 Respond to Codex's latest argument.
+```
+
+The default is `claude-haiku-5-5`. An optional top-level `claudeConversationModel` in `$CODEX_HOME/audex/reviewer-backends.json` changes that default. A per-turn `--model MODEL` takes precedence. Use the client's full model identifier: Audex checks the requested identity against the applied client configuration and served response, and fails visibly if they disagree. It does not substitute a fallback model.
+
+This uses the existing `claudeSubscription` executable, version, profile and runtime configuration described below. Replies are labelled **Claude (MODEL)** in the same conversation. Subsequent Codex turns can read them; further Claude turns receive the preceding visible operator and assistant discussion from the same persisted thread, including after resume. Hidden instructions, reasoning, tool records and workspace files are excluded. Text pasted into the conversation is included. Image attachments are rejected without consuming the draft.
+
+The conversational profile has no workspace tools or MCP servers. It does not create an audit, reserve a reviewer or start an automatic exchange between models. Finish or cancel an active turn before submitting `/claude`. Cancellation uses the normal turn interrupt. A client reconnect observes the daemon-owned turn; failures and daemon restarts do not automatically replay Claude requests. As with the existing subscription route, stopping a local process does not establish whether remote quota has already been consumed.
+
+Audex adds no message-count or token ceiling to this dialogue. The official client's context management remains enabled. The existing 2 MiB JSON-record capture safeguard still applies. The response is displayed when a complete, matching terminal result has been received. An incomplete or failed response is reported as an error.
+
+Effort is left at the official client's default. The inspected 2.1.319 configured client and 2.1.321 PATH client advertise `--effort low|medium|high|xhigh|max`; M3 does not expose an effort override. See Anthropic's [CLI reference](https://code.claude.com/docs/en/cli-reference) and [model configuration](https://code.claude.com/docs/en/model-config). Client-help inspection establishes the available option syntax, not live model availability or an accepted M3 demonstration.
+
 ### Claude subscription reviewers
 
 Audex supports `claude_subscription` through the official Claude client. `claude_api` and `ollama_local` remain unavailable.

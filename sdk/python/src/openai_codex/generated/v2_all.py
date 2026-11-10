@@ -3504,6 +3504,7 @@ class NetworkUnixSocketPermission(Enum):
 
 
 class NonSteerableTurnKind(Enum):
+    external_conversation = "externalConversation"
     review = "review"
     compact = "compact"
 
@@ -5880,6 +5881,23 @@ class ThreadAttachmentUpdatedNotification(BaseModel):
     identity_key: Annotated[str, Field(alias="identityKey")]
     operation: ThreadAttachmentOperation
     thread_id: Annotated[str, Field(alias="threadId")]
+
+
+class ThreadClaudeParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    message: str
+    model: str | None = None
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
+class ThreadClaudeResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    model: str
+    turn_id: Annotated[str, Field(alias="turnId")]
 
 
 class ThreadClosedNotification(BaseModel):
@@ -8285,6 +8303,15 @@ class ThreadItemsListRequest(BaseModel):
     id: RequestId
     method: Annotated[Literal["thread/items/list"], Field(title="Thread/items/listRequestMethod")]
     params: ThreadItemsListParams
+
+
+class ThreadClaudeRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["thread/claude"], Field(title="Thread/claudeRequestMethod")]
+    params: ThreadClaudeParams
 
 
 class ThreadInjectItemsRequest(BaseModel):
@@ -14564,6 +14591,7 @@ class ClientRequest(
         | ThreadReadRequest
         | ThreadTurnsListRequest
         | ThreadItemsListRequest
+        | ThreadClaudeRequest
         | ThreadInjectItemsRequest
         | SkillsListRequest
         | SkillsExtraRootsSetRequest
@@ -14687,6 +14715,7 @@ class ClientRequest(
         | ThreadReadRequest
         | ThreadTurnsListRequest
         | ThreadItemsListRequest
+        | ThreadClaudeRequest
         | ThreadInjectItemsRequest
         | SkillsListRequest
         | SkillsExtraRootsSetRequest

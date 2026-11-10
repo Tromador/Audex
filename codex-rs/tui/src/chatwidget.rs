@@ -1893,7 +1893,10 @@ impl ChatWidget {
         if self.blocks_direct_input
             && matches!(
                 &op,
-                AppCommand::UserTurn { .. } | AppCommand::Review { .. } | AppCommand::Compact
+                AppCommand::UserTurn { .. }
+                    | AppCommand::ClaudeTurn { .. }
+                    | AppCommand::Review { .. }
+                    | AppCommand::Compact
             )
         {
             self.add_error_message(if self.external_writer_view {
@@ -1936,10 +1939,15 @@ impl ChatWidget {
             .send(AppEvent::AppendMessageHistoryEntry { thread_id, text });
     }
 
+    pub(crate) fn clear_external_conversation_pending(&mut self) {
+        self.input_queue.user_turn_pending_start = false;
+    }
+
     pub(crate) fn prepare_local_op_submission(&mut self, op: &AppCommand) {
         if matches!(
             op,
             AppCommand::Compact
+                | AppCommand::ClaudeTurn { .. }
                 | AppCommand::Review { .. }
                 | AppCommand::RunUserShellCommand { .. }
         ) {

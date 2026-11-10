@@ -929,6 +929,7 @@
     },
     "NonSteerableTurnKind": {
       "enum": [
+        "externalConversation",
         "review",
         "compact"
       ],

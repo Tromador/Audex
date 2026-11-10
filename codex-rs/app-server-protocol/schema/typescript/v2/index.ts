@@ -570,6 +570,8 @@ export type { ThreadAttachmentOwnerListResponse } from "./ThreadAttachmentOwnerL
 export type { ThreadAttachmentRemoveParams } from "./ThreadAttachmentRemoveParams";
 export type { ThreadAttachmentRemoveResponse } from "./ThreadAttachmentRemoveResponse";
 export type { ThreadAttachmentUpdatedNotification } from "./ThreadAttachmentUpdatedNotification";
+export type { ThreadClaudeParams } from "./ThreadClaudeParams";
+export type { ThreadClaudeResponse } from "./ThreadClaudeResponse";
 export type { ThreadClosedNotification } from "./ThreadClosedNotification";
 export type { ThreadCompactStartParams } from "./ThreadCompactStartParams";
 export type { ThreadCompactStartResponse } from "./ThreadCompactStartResponse";

@@ -1,6 +1,7 @@
 //! Owned launch and captured terminal evidence; workflow acceptance stays in the controller.
 pub(super) mod commissioning;
 mod config;
+pub(crate) mod conversation;
 mod handshake;
 mod lifecycle;
 mod owner;

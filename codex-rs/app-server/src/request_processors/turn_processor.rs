@@ -1,3 +1,5 @@
+mod claude;
+
 use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use codex_app_server_protocol::ImageReference as V2ImageReference;
@@ -1160,13 +1162,17 @@ impl TurnRequestProcessor {
                     ),
                     NotSubmittedReason::ActiveTurnNotSteerable { turn_kind } => {
                         let (message, turn_steer_error) = match turn_kind {
+                            codex_protocol::protocol::NonSteerableTurnKind::ExternalConversation => (
+                                "cannot steer a Claude conversation turn; finish or cancel it first".to_string(),
+                                None,
+                            ),
                             codex_protocol::protocol::NonSteerableTurnKind::Review => (
                                 "cannot steer a review turn".to_string(),
-                                TurnSteerRequestError::NonSteerableReview,
+                                Some(TurnSteerRequestError::NonSteerableReview),
                             ),
                             codex_protocol::protocol::NonSteerableTurnKind::Compact => (
                                 "cannot steer a compact turn".to_string(),
-                                TurnSteerRequestError::NonSteerableCompact,
+                                Some(TurnSteerRequestError::NonSteerableCompact),
                             ),
                         };
                         let error = TurnError {
@@ -1190,7 +1196,7 @@ impl TurnRequestProcessor {
                         (
                             message,
                             data,
-                            Some(AnalyticsJsonRpcError::TurnSteer(turn_steer_error)),
+                            turn_steer_error.map(AnalyticsJsonRpcError::TurnSteer),
                         )
                     }
                     NotSubmittedReason::EmptyInput => (

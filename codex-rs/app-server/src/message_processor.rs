@@ -1095,6 +1095,7 @@ impl MessageProcessor {
             ClientRequest::AuditStart { .. }
             | ClientRequest::ThreadSample { .. }
             | ClientRequest::ThreadGuardianReview { .. }
+            | ClientRequest::ThreadClaude { .. }
             | ClientRequest::TurnStart { .. }
             | ClientRequest::TurnSteer { .. }
             | ClientRequest::ReviewStart { .. }
@@ -1793,6 +1794,11 @@ impl MessageProcessor {
                         app_server_client_name.clone(),
                         client_version.clone(),
                     )
+                    .await
+            }
+            ClientRequest::ThreadClaude { params, .. } => {
+                self.turn_processor
+                    .thread_claude(&request_id, params, self.thread_processor.clone())
                     .await
             }
             ClientRequest::ThreadGuardianReview { params, .. } => {

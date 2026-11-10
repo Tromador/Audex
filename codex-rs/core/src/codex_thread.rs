@@ -547,6 +547,23 @@ impl CodexThread {
             .await
     }
 
+    /// Runs one host-owned external conversation through the ordinary turn lifecycle.
+    /// Core never samples or grants its tools to the external client.
+    pub async fn start_external_conversation(
+        &self,
+        request: TurnInputRequest,
+        execution: codex_protocol::protocol::ExternalConversationExecution,
+    ) -> CodexResult<TurnInputSubmission> {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.submit(Op::ExternalConversation {
+            request: Box::new(request),
+            execution,
+            reply,
+        })
+        .await?;
+        result.await.map_err(|_| CodexErr::InternalAgentDied)?
+    }
+
     /// Starts a regular turn only when the thread is idle.
     ///
     /// Core declines the input without recording or enqueueing it when idle

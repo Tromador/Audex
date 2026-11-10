@@ -1213,6 +1213,31 @@
           "type": "object"
         },
         {
+          "description": "Start an operator-directed Claude subscription conversation turn.",
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/claude"
+              ],
+              "title": "Thread/claudeRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadClaudeParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/claudeRequest",
+          "type": "object"
+        },
+        {
           "description": "Append raw Responses API items to the thread history without starting a user turn.",
           "properties": {
             "id": {
@@ -18952,6 +18977,7 @@
       },
       "NonSteerableTurnKind": {
         "enum": [
+          "externalConversation",
           "review",
           "compact"
         ],
@@ -24833,6 +24859,47 @@
           "threadId"
         ],
         "title": "ThreadAttachmentUpdatedNotification",
+        "type": "object"
+      },
+      "ThreadClaudeParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "Start one subscription-backed Claude conversation turn in an idle Codex thread.",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message",
+          "threadId"
+        ],
+        "title": "ThreadClaudeParams",
+        "type": "object"
+      },
+      "ThreadClaudeResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "turnId"
+        ],
+        "title": "ThreadClaudeResponse",
         "type": "object"
       },
       "ThreadClosedNotification": {
