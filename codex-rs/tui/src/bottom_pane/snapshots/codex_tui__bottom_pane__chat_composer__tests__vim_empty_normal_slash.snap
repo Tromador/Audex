@@ -4,9 +4,9 @@ expression: terminal.backend()
 ---
 "› /audit          start or retrieve a durable isolated      "
 "                  source audit                              "
+"  /claude         talk to Claude in this conversation;      "
+"                  optionally --model MODEL                  "
 "  /model          choose what model and reasoning effort to "
-"                  use                                       "
-"  /presets        run or save reusable prompts and slash    "
 "                                                            "
 "› /                                                         "
 "                                                            "
