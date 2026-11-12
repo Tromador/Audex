@@ -568,6 +568,9 @@ async fn follow_run(
                 Some(AppServerEvent::ServerNotification(notification)) => matches!(*notification,
                     ServerNotification::AuditProgress(progress) if progress.run_id == view.run_id && progress.revision > view.revision),
                 Some(AppServerEvent::Lagged {..}) => true,
+                // Cloud reply-stream events say nothing about a local audit run.
+                Some(AppServerEvent::ThreadStreamDisconnected(_)
+                    | AppServerEvent::ThreadStreamReconnected(_)) => false,
                 Some(AppServerEvent::ServerRequest(request)) => {
                     client.reject_server_request(request.id().clone(), JSONRPCErrorError {
                         code: -32601, message: "Audit CLI does not handle interactive server requests".to_string(), data: None,

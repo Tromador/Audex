@@ -383,6 +383,7 @@ async fn turn(
             None,
             None,
             None,
+            None,
         )
         .await?;
     Ok(())
@@ -520,7 +521,6 @@ async fn conversational_scenario() -> Result<()> {
         config.features.get().clone(),
         events_tx.clone(),
         tokio::sync::broadcast::channel(16).0,
-        None,
         ToolServices {
             audits: true,
             worktrees: None,
@@ -599,7 +599,6 @@ async fn conversational_scenario() -> Result<()> {
         config.features.get().clone(),
         events_tx.clone(),
         tokio::sync::broadcast::channel(16).0,
-        None,
         ToolServices {
             audits: true,
             worktrees: None,

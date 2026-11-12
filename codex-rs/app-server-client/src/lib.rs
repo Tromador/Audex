@@ -113,10 +113,18 @@ pub type RequestResult = std::result::Result<JsonRpcResult, JSONRPCErrorError>;
 
 #[derive(Debug, Clone)]
 pub enum AppServerEvent {
-    Lagged { skipped: usize },
+    Lagged {
+        skipped: usize,
+    },
     ServerNotification(Box<ServerNotification>),
     ServerRequest(Box<ServerRequest>),
-    Disconnected { message: String },
+    /// A native Cloud reply stream ended. The underlying thread can still be running.
+    ThreadStreamDisconnected(Box<codex_app_server_protocol::ErrorNotification>),
+    /// The Cloud worker is listening again on the same conversation.
+    ThreadStreamReconnected(String),
+    Disconnected {
+        message: String,
+    },
 }
 
 impl From<InProcessServerEvent> for AppServerEvent {

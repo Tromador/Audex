@@ -54,6 +54,7 @@ use crate::motion::MotionMode;
 use crate::motion::shimmer_text;
 use crate::onboarding::bedrock::BedrockState;
 use crate::onboarding::gateway::GatewayStep;
+use crate::onboarding::gateway::USE_CUSTOM_PROVIDER;
 use crate::onboarding::gcp::GcpState;
 use crate::onboarding::keys;
 use crate::onboarding::onboarding_screen::KeyboardHandler;
@@ -77,6 +78,7 @@ pub(crate) fn mark_url_hyperlink(buf: &mut Buffer, area: Rect, url: &str) {
 use super::onboarding_screen::StepState;
 
 mod headless_chatgpt_login;
+pub(super) use headless_chatgpt_login::render_device_code_prompt;
 
 #[derive(Clone)]
 pub(crate) enum SignInState {
@@ -276,6 +278,13 @@ impl KeyboardHandler for AuthModeWidget {
     }
 
     fn handle_paste(&mut self, pasted: String) {
+        if let Some(wizard) = &mut self.gateway {
+            if let Some(input) = wizard.active_input_mut() {
+                input.paste(&pasted);
+                self.request_frame.schedule_frame();
+            }
+            return;
+        }
         let mut state = self.sign_in_state.write().unwrap();
         let input = match &mut *state {
             SignInState::Bedrock(state) => state.active_input_mut(),
@@ -363,6 +372,9 @@ impl AuthModeWidget {
 
     /// Returns whether the auth flow is currently accepting text input.
     pub(crate) fn is_text_entry_active(&self) -> bool {
+        if let Some(wizard) = &self.gateway {
+            return wizard.is_text_entry_active();
+        }
         self.sign_in_state.read().is_ok_and(|guard| match &*guard {
             SignInState::ApiKeyEntry(_) => true,
             SignInState::Bedrock(state) => state.is_text_entry_active(),
@@ -376,6 +388,9 @@ impl AuthModeWidget {
     /// OpenAI API-key entry keeps its existing empty-field quit behavior, while
     /// Cloud setup fields accept printable input from their first character.
     pub(crate) fn should_suppress_printable_quit(&self) -> bool {
+        if let Some(wizard) = &self.gateway {
+            return wizard.is_text_entry_active();
+        }
         self.sign_in_state.read().is_ok_and(|guard| match &*guard {
             SignInState::ApiKeyEntry(state) => !state.value.is_empty(),
             SignInState::Bedrock(state) => state.is_text_entry_active(),
@@ -653,8 +668,8 @@ impl AuthModeWidget {
                     lines.extend(create_mode_item(
                         idx,
                         option,
-                        "Use a custom gateway",
-                        "Choose a saved gateway",
+                        USE_CUSTOM_PROVIDER,
+                        "Choose a saved configuration or create a new one",
                     ));
                 }
             }
@@ -1248,9 +1263,12 @@ impl WidgetRef for AuthModeWidget {
                 state.render(area, buf, self.error_message());
             }
             SignInState::GatewayOAuth { url, .. } => {
-                let mut lines = vec![Line::from(
-                    "Finish signing in to your gateway in the browser.".bold(),
-                )];
+                let title = if url.is_some() {
+                    "Finish signing in to your gateway in the browser."
+                } else {
+                    "Starting gateway sign-in…"
+                };
+                let mut lines = vec![Line::from(title.bold())];
                 if let Some(url) = url {
                     lines.push(Line::from(url.clone().cyan().underlined()));
                 }
@@ -1271,7 +1289,7 @@ impl WidgetRef for AuthModeWidget {
                 .render(area, buf);
             }
             SignInState::GatewaySelected(_) | SignInState::GatewayConfigured => {
-                Paragraph::new("✓ Custom gateway configured".green())
+                Paragraph::new("✓ Custom provider configured".green())
                     .wrap(Wrap { trim: false })
                     .render(area, buf);
             }
@@ -1421,6 +1439,7 @@ mod tests {
         // Embedded startup can refresh cloud config using the host's workload identity.
         let loader_overrides = LoaderOverrides {
             ignore_managed_requirements: true,
+            managed_config_path: Some(codex_home_path.join("managed_config.toml")),
             ..LoaderOverrides::without_managed_config_for_tests()
         };
         let config = ConfigBuilder::default()

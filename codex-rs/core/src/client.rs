@@ -1349,7 +1349,11 @@ impl ModelClient {
 
     fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
         for item in input {
-            if item.id().is_some_and(|id| !id.is_prefixed()) {
+            // A provider can echo a bare reserved prefix or return an opaque ID.
+            if item
+                .id()
+                .is_some_and(|id| id.allocation().is_none() && !id.is_prefixed())
+            {
                 item.set_id(/*new_id*/ None);
             }
             if !self.state.content_item_kinds_enabled {
@@ -2108,6 +2112,14 @@ impl ResponsesHttpExecutor<'_> {
             let kind = codex_extension_api::ModelRequestKind::Generation;
             crate::model_request::check_budget(&self.client.request_contributors, &thread_id, kind)
                 .await?;
+            // An account switch during the check requires fresh request setup.
+            if client_setup
+                .auth_owner
+                .as_ref()
+                .is_some_and(|owner| !owner.is_current())
+            {
+                continue;
+            }
             let interceptors = crate::model_request::prepare(
                 &self.client.request_contributors,
                 &thread_id,
@@ -2343,7 +2355,12 @@ impl ModelClientSession {
                 )
                 .await?;
                 // An account switch during the check requires fresh request setup and a new socket.
-                if self.websocket_session.auth_owner != self.client.auth_owner() {
+                if self
+                    .websocket_session
+                    .auth_owner
+                    .as_ref()
+                    .is_some_and(|owner| !owner.is_current())
+                {
                     continue;
                 }
             }
@@ -2607,6 +2624,10 @@ impl ModelClientSession {
                 while let Some(event) = stream.next().await {
                     match event {
                         Ok(ResponseEvent::Completed { .. }) => break,
+                        Err(err) if err.requires_http_fallback() => {
+                            self.try_switch_fallback_transport(session_telemetry, model_info);
+                            break;
+                        }
                         Err(err) => return Err(err),
                         _ => {}
                     }
@@ -2805,9 +2826,10 @@ fn map_response_stream(
     let routing_affinity = api_stream.routing_affinity.take();
     let upstream_request_id = api_stream.upstream_request_id.take();
     let interrupt = api_stream.interrupt.take();
+    let events = crate::model_request::intercept_stream(Box::pin(api_stream), interceptors);
     let mut stream = map_response_events(
         upstream_request_id,
-        crate::model_request::intercept_stream(Box::pin(api_stream), interceptors),
+        events,
         session_telemetry,
         inference_trace_attempt,
         client,
@@ -2928,6 +2950,7 @@ where
                     response_id,
                     token_usage,
                     usage_metadata,
+                    reasoning_removals,
                     end_turn,
                 }) => {
                     completed = true;
@@ -2953,6 +2976,7 @@ where
                             response_id,
                             token_usage,
                             usage_metadata,
+                            reasoning_removals,
                             end_turn,
                         }))
                         .await

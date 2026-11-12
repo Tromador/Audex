@@ -250,12 +250,13 @@ impl McpManager {
     }
 
     /// Resolves only plugins from this step's ready roots, independent of shared MCP refresh.
-    pub(crate) async fn selected_plugins_for_step(
+    pub(crate) async fn selected_plugins_for_step<'a>(
         &self,
-        context: McpServerContributionContext<'_, Config>,
+        context: McpServerContributionContext<'a, Config>,
         plugins_config: &PluginsConfigToml,
-        disabled_plugin_ids: &[String],
+        disabled_plugin_ids: &'a [String],
     ) -> SelectedPluginSnapshot {
+        let context = context.with_disabled_plugin_ids(disabled_plugin_ids);
         let mut selected = SelectedPluginSnapshot {
             disabled_plugin_ids: disabled_plugin_ids.to_vec(),
             ..Default::default()
@@ -536,7 +537,8 @@ impl McpManager {
         });
         for conflict in catalog.conflicts() {
             tracing::warn!(
-                server = conflict.name,
+                server = conflict.server_key.name(),
+                environment_id = conflict.server_key.scoped_environment_id(),
                 outcome = ?conflict.outcome,
                 contenders = ?conflict.contenders,
                 "conflicting MCP server actions; using resolved catalog outcome"
@@ -572,7 +574,7 @@ impl McpManager {
         &self,
         config: &Config,
         auth: Option<&CodexAuth>,
-    ) -> HashMap<String, EffectiveMcpServer> {
+    ) -> HashMap<codex_mcp::McpServerKey, EffectiveMcpServer> {
         let mcp_config = self.runtime_config(config).await;
         effective_mcp_servers(&mcp_config, auth)
     }

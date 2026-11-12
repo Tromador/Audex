@@ -2515,6 +2515,7 @@ fn websocket_error_detail(err: &ApiError) -> String {
         }
         // These variants format fixed text; retry metadata is typed and never printed.
         ApiError::ContentFilter
+        | ApiError::WebsocketMessageTooLarge
         | ApiError::ContextWindowExceeded
         | ApiError::QuotaExceeded
         | ApiError::UsageNotIncluded
@@ -2537,6 +2538,15 @@ fn websocket_error_detail(err: &ApiError) -> String {
             "handshake error: model not found: [redacted]".to_string()
         }
         ApiError::InvalidPrompt { .. } => "handshake error: invalid prompt: [redacted]".to_string(),
+        ApiError::InferenceHookDenied { .. } => {
+            "handshake error: inference hook denied: [redacted]".to_string()
+        }
+        ApiError::ContentPolicyViolation { .. } => {
+            "handshake error: content policy violation".to_string()
+        }
+        ApiError::AccessProgramNotEnabled { .. } => {
+            "handshake error: access program not enabled".to_string()
+        }
         ApiError::CyberPolicy { .. } => "handshake error: cyber policy: [redacted]".to_string(),
         ApiError::BioPolicy { .. } => "handshake error: bio policy: [redacted]".to_string(),
         ApiError::MisalignmentPolicyViolation { .. } => {
@@ -3380,6 +3390,11 @@ mod tests {
                 status: Some(http::StatusCode::NOT_FOUND),
             },
             ApiError::InvalidPrompt { message: message() },
+            ApiError::ContentPolicyViolation {
+                message: message(),
+                status: None,
+            },
+            ApiError::AccessProgramNotEnabled { message: message() },
             ApiError::CyberPolicy { message: message() },
             ApiError::BioPolicy { message: message() },
             ApiError::MisalignmentPolicyViolation {
@@ -3406,6 +3421,8 @@ mod tests {
                 "handshake error: invalid audio input: [redacted]",
                 "handshake error: model not found: [redacted]",
                 "handshake error: invalid prompt: [redacted]",
+                "handshake error: content policy violation",
+                "handshake error: access program not enabled",
                 "handshake error: cyber policy: [redacted]",
                 "handshake error: bio policy: [redacted]",
                 "handshake error: misalignment policy violation: [redacted]",

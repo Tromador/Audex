@@ -310,9 +310,13 @@ impl ChatWidget {
             UserMessageSource::Prompt | UserMessageSource::InternalFollowUp => {
                 (CloudSubmissionIntent::StartIfIdle, source)
             }
-            UserMessageSource::QuestionAnswer | UserMessageSource::SafetyRecourse => {
-                (CloudSubmissionIntent::UseKnownTurn, source)
-            }
+            UserMessageSource::QuestionAnswer => (
+                CloudSubmissionIntent::QuestionAnswer {
+                    during_turn: !render_in_history,
+                },
+                source,
+            ),
+            UserMessageSource::SafetyRecourse => (CloudSubmissionIntent::UseKnownTurn, source),
         };
         if !text.is_empty() {
             items.push(UserInput::Text {

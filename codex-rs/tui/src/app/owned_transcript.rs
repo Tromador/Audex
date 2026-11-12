@@ -14,6 +14,7 @@ use crate::bottom_pane::CommandPopupPlacement;
 use crate::bottom_pane::ComposerRenderOptions;
 use crate::custom_terminal::Frame;
 use crate::empty_state_animation::ComposerState;
+#[cfg(test)]
 use crate::history_cell::HistoryRenderMode;
 use crate::keymap::KeymapContext;
 use crate::keymap::bindings_for_action;
@@ -36,19 +37,14 @@ pub(super) struct ConversationFrame {
     inset: Option<Rect>,
     pub(super) sidebar: Option<sidebar::SidebarLayout>,
     pub(super) chat_strip: Option<Rect>,
-    pub(super) sidebar_input: Option<(usize, Option<ThreadId>, usize)>,
-    pub(super) leader_hud: Option<Rect>,
+    pub(super) sidebar_input: Option<sidebar::SidebarInputState>,
+    pub(super) close_buttons: [Rect; 2],
     /// A dialog can obscure neighboring content in the terminal's completed buffer.
     behind_dialog: Option<ratatui::buffer::Buffer>,
     caller_images: Vec<ImagePlacement>,
 }
 
 impl ConversationFrame {
-    pub(super) fn hud_contains(&self, mouse: crossterm::event::MouseEvent) -> bool {
-        self.leader_hud
-            .is_some_and(|area| area.contains((mouse.column, mouse.row).into()))
-    }
-
     pub(super) fn has_caller_inset(&self) -> bool {
         self.inset.is_some() && self.sidebar.is_none() && self.chat_strip.is_none()
     }
@@ -216,17 +212,24 @@ impl App {
             self.local_settings.tui.copy_on_select_clear_selection;
         view.set_keymap_bindings(&self.keymap);
         view.set_presentation(view.is_detailed(), chat_widget.history_render_mode());
+        let active = chat_widget.active_activity_cell();
+        let (live_summary, expanded) = view.sync_live_tool_summary(
+            &self.transcript_cells,
+            self.local_settings.tui.collapse_turn_details,
+            active,
+        );
         let active_key = chat_widget.active_cell_transcript_key();
         let detailed = view.is_detailed();
-        let active_ids = chat_widget.active_activity_ids();
-        let expanded = view.sync_live_activity(&self.transcript_cells, active_ids)
-            && chat_widget.history_render_mode() == HistoryRenderMode::Rich;
         let search_changed = view.sync_search_live_tail(transcript_width, active_key, |width| {
             chat_widget.active_cell_transcript_hyperlink_lines(width)
         });
         let changed = if detailed {
             view.sync_live_tail(transcript_width, active_key, |width| {
                 chat_widget.active_cell_transcript_hyperlink_lines(width)
+            })
+        } else if let Some(row) = live_summary {
+            view.sync_live_layout(transcript_width, active_key, |width| {
+                Some(row.layout(width, expanded, chat_widget.active_auxiliary_lines(width)))
             })
         } else {
             view.sync_live_activity_tail(transcript_width, active_key, expanded, |width| {
@@ -249,6 +252,12 @@ impl App {
             self.conversation_frame = ConversationFrame::default();
         }
         let caller_inset = self.conversation_frame.inset;
+        let parent = self.sidebar_parent();
+        if !self.conversation_focus_available(tui)
+            && let Some(pane) = self.sidebars.get_mut(&parent)
+        {
+            pane.close = None;
+        }
         let layout = sidebar::paint_layout(self, tui, screen_size.into());
         let displayed = self.current_displayed_thread_id();
         let chat = match displayed.and_then(|id| self.side_pair_key(id)) {
@@ -288,7 +297,7 @@ impl App {
         }
         let highlight_divider =
             self.pane_resize.is_some() || tui.link_hover.shape == tui::PointerShape::Resize;
-        let hovered_tab = self.hovered_sidebar_tab(tui.link_hover.position());
+        let hovered_target = self.hovered_sidebar_target(tui.link_hover.position());
         // An input refresh opens a fresh terminal buffer. Carry the outer owner's
         // completed cells through it when only the conversation is being redrawn.
         let backdrop = caller_inset.map(|_| {
@@ -297,10 +306,13 @@ impl App {
                 .take()
                 .unwrap_or_else(|| tui.terminal.previous_buffer().clone())
         });
-        let hud = self.workspace_hud(tui, screen_size.into());
+        let mut hud = self.workspace_hud(tui, screen_size.into());
+        if let Some(hud) = &mut hud {
+            hud.viewport = caller_inset;
+        }
         prepared.floating_shortcuts = hud.is_some();
         let mut painted = PaintedConversation::default();
-        tui.draw(screen_size.height, |frame| {
+        tui.draw_with_shortcut_hud(screen_size.height, hud, |frame| {
             if let Some(backdrop) = backdrop {
                 let viewport = frame.area();
                 frame.image_placements.extend(
@@ -322,7 +334,12 @@ impl App {
                 Some(sidebar::SidebarLayout::Chat(panes)) => {
                     if let Some(companion) = self.side_companions.get_mut(&panes.passive_thread) {
                         companion.view.image_protocol = self.transcript_view.image_protocol;
-                        panes.paint_companion(companion, frame, &frames);
+                        panes.paint_companion(
+                            companion,
+                            frame,
+                            self.local_settings.tui.collapse_turn_details,
+                            &frames,
+                        );
                     }
                 }
                 Some(sidebar::SidebarLayout::Chooser { sidebar, focus, .. }) => {
@@ -370,9 +387,15 @@ impl App {
                             let row = crate::sidebar_chooser::body_row(*sidebar, sidebar.y);
                             crate::sidebar_chooser::resize_hint(hint, row.width)
                         } else {
-                            crate::sidebar_chooser::footer(&self.keymap, *sidebar, pane.choice)
-                                .0
-                                .line
+                            crate::sidebar_chooser::footer(
+                                &self.keymap,
+                                *sidebar,
+                                pane.choice,
+                                pane.chat_tabs(),
+                                self.chat_widget.side_chat_creation_state(),
+                            )
+                            .0
+                            .line
                         };
                         crate::sidebar_chooser::paint(
                             focused,
@@ -381,7 +404,14 @@ impl App {
                             footer,
                             pane.chat_tabs(),
                             pane.choice,
-                            self.local_settings.tui.status_line_use_colors,
+                            &crate::sidebar_chooser::SidebarStyle {
+                                new_chat: self.chat_widget.side_chat_creation_state(),
+                                use_theme_colors: self.local_settings.tui.status_line_use_colors,
+                                motion: MotionMode::from_animations_enabled(
+                                    self.local_settings.tui.animations,
+                                ),
+                                frames: &frames,
+                            },
                         );
                         let chooser = if focused {
                             TabState::Active
@@ -393,7 +423,7 @@ impl App {
                             chooser,
                             TabState::Absent,
                             pane.chat_tabs(),
-                            hovered_tab,
+                            hovered_target,
                             frame.buffer,
                         );
                     }
@@ -414,24 +444,35 @@ impl App {
                     TabState::Absent,
                     chat,
                     pane.chat_tabs(),
-                    hovered_tab,
+                    hovered_target,
                     frame.buffer,
                 );
             }
             if let Some(divider) = divider {
                 side_pane::paint_divider(frame, divider.x, self.divider_drag, highlight_divider);
             }
-            self.paint_centered_dialog(frame);
-            self.conversation_frame.leader_hud = hud.map(|hud| {
-                let area = hud.render_overlay(frame.area(), frame.buffer);
-                if frame.cursor_position.is_some_and(|pos| area.contains(pos)) {
-                    frame.cursor_position = None;
-                }
+            self.conversation_frame.close_buttons = Default::default();
+            if let Some(close) = self.sidebar().and_then(|pane| pane.close.as_ref()) {
+                // A resize can collapse an unfocused sidebar while its confirmation is open.
+                let viewport = frame.area();
+                let column = self
+                    .conversation_frame
+                    .chooser_area()
+                    .or(strip)
+                    .unwrap_or(viewport);
+                let area = Rect {
+                    x: column.x,
+                    width: column.width,
+                    ..viewport
+                };
+                let buttons = close.paint(area, frame.buffer);
                 frame
                     .image_placements
                     .retain(|image| !area.intersects(image.area));
-                area
-            });
+                frame.cursor_position = None;
+                self.conversation_frame.close_buttons = buttons;
+            }
+            self.paint_centered_dialog(frame);
         })?;
         self.finish_conversation(tui, painted)
     }
@@ -540,10 +581,7 @@ impl App {
         // Painting those rows tells us whether newer activity is still hidden,
         // which can change the footer hint and the composer's measured height.
         let footer = view.footer_with_navigation(footer_width, motion, latest_navigation);
-        // Allow up to two-thirds of the pane, or eight rows on short panes when they fit.
-        let max_composer_height = ((u32::from(area.height) * 2 / 3) as u16)
-            .max(8)
-            .min(area.height);
+        let max_composer_height = side_pane::composer_height_limit(area.height);
         let unfocused = matches!(
             self.conversation_frame.sidebar,
             Some(sidebar::SidebarLayout::Chooser {
@@ -610,17 +648,8 @@ impl App {
                 && view.composer_gap_has_content(transcript_width, prepared.composer_hint.as_ref(), now);
         }
         // Refresh the hint using the rows just painted.
-        let mut footer = prompt_footer
+        let footer = prompt_footer
             .or_else(|| view.footer_with_navigation(footer_width, motion, latest_navigation));
-        if let Some(footer) = footer.as_mut().filter(|footer| footer.is_interactive)
-            && self.key_chord_matcher.workspace_leader().is_none()
-            && let Some(items) = self
-                .key_chord_matcher
-                .pending_hint_items(&self.keymap.chords, footer_width)
-            && let Some(progress) = footer.text.lines.last_mut()
-        {
-            *progress = crate::bottom_pane::footer_hint_items_line(&items);
-        }
         let bottom = chat_widget.bottom_pane_renderable(ComposerRenderOptions {
             footer: footer.as_ref(),
             composer_gap: composer_gap.as_ref(),

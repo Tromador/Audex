@@ -53,13 +53,13 @@ async fn attachment_probe_allows_absence_but_rejects_invalid_identity_and_io() -
         } else {
             ThreadId::from_string(&stored_id)?
         };
-        let mut builder = codex_state::ThreadMetadataBuilder::new(
+        let builder = codex_state::ThreadMetadataBuilder::new(
             requested_id,
             path.clone(),
             chrono::Utc::now(),
             codex_protocol::protocol::SessionSource::Cli,
-        );
-        builder.cwd = home.path().to_path_buf();
+        )
+        .with_cwd(home.path().to_path_buf());
         runtime
             .upsert_thread(&builder.build("mock_provider"))
             .await?;

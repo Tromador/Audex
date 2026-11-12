@@ -36,6 +36,7 @@ use crate::with_chatgpt_cloudflare_cookie_store;
 pub struct HttpClientBuilder {
     http2_prior_knowledge: bool,
     pub(crate) generation_admission: Option<crate::GenerationRequest>,
+    http2_keep_alive: Option<(Duration, Duration)>,
     disable_pool_idle_timeout: bool,
     pub(crate) default_headers: Option<HeaderMap>,
     follow_redirects: bool,
@@ -160,6 +161,12 @@ impl HttpClientBuilder {
 
     pub(crate) fn with_rustls_tls(mut self) -> Self {
         self.tls_backend = TlsBackend::Rustls;
+        self
+    }
+
+    /// Sends HTTP/2 keepalive pings while a request stream is open.
+    pub fn http2_keep_alive(mut self, interval: Duration, timeout: Duration) -> Self {
+        self.http2_keep_alive = Some((interval, timeout));
         self
     }
 
@@ -415,6 +422,11 @@ impl HttpClientBuilder {
         if self.http2_prior_knowledge {
             builder = builder.http2_prior_knowledge();
         }
+        if let Some((interval, timeout)) = self.http2_keep_alive {
+            builder = builder
+                .http2_keep_alive_interval(interval)
+                .http2_keep_alive_timeout(timeout);
+        }
         if self.tls_backend == TlsBackend::Rustls || self.tls.client_identity.is_some() {
             ensure_rustls_crypto_provider();
             builder = builder.use_rustls_tls();
@@ -453,6 +465,7 @@ impl Default for HttpClientBuilder {
         Self {
             http2_prior_knowledge: false,
             generation_admission: None,
+            http2_keep_alive: None,
             disable_pool_idle_timeout: false,
             default_headers: None,
             follow_redirects: true,

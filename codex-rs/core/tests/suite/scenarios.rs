@@ -3,6 +3,9 @@
 #[path = "scenarios_turn_input_agent_message.rs"]
 mod turn_input_agent_message;
 
+#[path = "scenarios_multi_environment_mcp.rs"]
+mod multi_environment_mcp;
+
 use super::image_rollout::RecordingFileAttachmentStore;
 use super::permissions_messages::PermissionPathScenario;
 use codex_attachment_store::AttachmentStoreErrorKind;
@@ -125,6 +128,8 @@ mod audio_file;
 #[path = "scenarios_retained_tool_outputs.rs"]
 mod retained_tool_outputs;
 
+#[path = "scenarios_exec_tools.rs"]
+mod exec_tools;
 #[path = "scenarios_incremental_tools.rs"]
 mod incremental_tools;
 #[path = "scenarios_incremental_tools_resume.rs"]
@@ -508,13 +513,11 @@ async fn gif_generation_preserves_animation_and_replays_a_still_preview() -> Res
 async fn admitted_prompt_id_reaches_responses() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
-    let test = test_codex()
-        .with_config(|config| {
-            configure_scenario_catalog(config);
-            config.include_environment_context = false;
-        })
-        .build_with_auto_env(&server)
-        .await?;
+    let mut builder = test_codex().with_config(|config| {
+        configure_scenario_catalog(config);
+        config.include_environment_context = false;
+    });
+    let test = builder.build_with_auto_env(&server).await?;
     let mock = mount_sse_sequence(
         &server,
         vec![
@@ -570,10 +573,12 @@ async fn additional_context_tool_outputs(tool_outputs: bool) -> Result<()> {
         .with_config(move |config| {
             configure_scenario_catalog(config);
             config.include_environment_context = false;
-            config
-                .features
-                .set_enabled(Feature::UntrustedAsToolOutput, tool_outputs)
-                .expect("test config should allow feature update");
+            if !tool_outputs {
+                config
+                    .features
+                    .disable(Feature::UntrustedAsToolOutput)
+                    .expect("test config should allow feature update");
+            }
         })
         .build_with_auto_env(&server)
         .await?;
@@ -865,6 +870,30 @@ async fn unavailable_images_are_rechecked_without_rewriting_history() -> Result<
     insta::assert_snapshot!(context_snapshot::format_request_history_snapshot(
         "Available file references pass through. A later request replaces missing files, preserves references on backend errors, rechecks each distinct ID once, and keeps canonical history intact.",
         &requests,
+        &ContextSnapshotOptions::default().rewrite_known_segments(),
+    ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_forwards_mixed_mcp_content() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(Ok(()), "requires a Windows test_stdio_server binary");
+    let server = start_mock_server().await;
+    let (_test, response) = super::code_mode::run_code_mode_turn_with_rmcp_model(
+        &server,
+        "Show the caption and image from the MCP image tool.",
+        r#"const result = await tools.mcp__rmcp__image_scenario({scenario: "text_then_image", caption: "sample"});
+content(result.content);"#,
+        "gpt-5.5",
+    )
+    .await?;
+    let output = response.single_request().custom_tool_call_output("call-1");
+    assert_eq!(output["output"][1]["text"], "sample");
+    assert_eq!(output["output"][2]["type"], "input_image");
+    insta::assert_snapshot!(context_snapshot::format_request_history_snapshot(
+        "Code Mode forwards MCP text and image blocks to the model in their original order.",
+        &core_test_support::responses::received_responses_requests(&server).await,
         &ContextSnapshotOptions::default().rewrite_known_segments(),
     ));
     Ok(())
@@ -3008,6 +3037,7 @@ async fn guardian_elastic_budgeting_request_history() -> Result<()> {
     const SECTION_TOKENS: usize = ENTRY_TOKENS * TRANSCRIPT_ENTRIES_PER_SECTION;
     const DEFAULT_SECTION_TOKENS: usize = 900;
     const REPEATS: usize = 64;
+    const SELECTED_EXEC_TOKENS: usize = 256;
     skip_if_no_network!(Ok(()));
     let server = responses::start_mock_server().await;
     let commentary = "Untrusted assistant evidence. ".repeat(REPEATS);
@@ -3025,6 +3055,20 @@ async fn guardian_elastic_budgeting_request_history() -> Result<()> {
     let mock = responses::mount_sse_sequence(
         &server,
         vec![
+            sse(vec![
+                ev_custom_tool_call(
+                    "selected", "exec",
+                    r#"await tools.update_plan({plan:[{step:"Inspect",status:"in_progress"}]}); text("selected-" + "x".repeat(640) + "-end");"#,
+                ),
+                ev_completed("lookup"),
+            ]),
+            sse(vec![
+                ev_custom_tool_call(
+                    "unselected", "exec",
+                    r#"text("ordinary-" + "y".repeat(640) + "-end");"#,
+                ),
+                ev_completed("ordinary"),
+            ]),
             sse(vec![
                 earlier_event,
                 commentary_event,
@@ -3047,23 +3091,40 @@ async fn guardian_elastic_budgeting_request_history() -> Result<()> {
     .await;
     let entry_limits = codex_guardian_context::ElasticSectionLimits::new;
     let mut policy = codex_guardian_context::ElasticBudgetConfig {
-        sections: [(
-            codex_guardian_context::ElasticSection::TranscriptMessages,
-            entry_limits(ENTRY_TOKENS, ENTRY_TOKENS)?
-                .with_max_total_section_tokens(SECTION_TOKENS)?,
-        )]
+        sections: [
+            (
+                codex_guardian_context::ElasticSection::TranscriptMessages,
+                entry_limits(ENTRY_TOKENS, ENTRY_TOKENS)?
+                    .with_max_total_section_tokens(SECTION_TOKENS)?,
+            ),
+            (
+                codex_guardian_context::ElasticSection::TranscriptTools,
+                entry_limits(ENTRY_TOKENS, ENTRY_TOKENS)?
+                    .with_max_total_section_tokens(SECTION_TOKENS)?,
+            ),
+        ]
         .into(),
+        ..Default::default()
     };
     // Skills are absent in sync requests and release their entire reservation.
     let skills_minimum = codex_guardian_context::DEFAULT_MAX_INPUT_TOKENS
         - usize::try_from(policy.total_minimum_tokens())?
-        + DEFAULT_SECTION_TOKENS;
+        + DEFAULT_SECTION_TOKENS
+        - SELECTED_EXEC_TOKENS;
     policy.sections.insert(
         codex_guardian_context::ElasticSection::TrustedSkills,
         entry_limits(skills_minimum, DEFAULT_SECTION_TOKENS)?,
     );
     let settings = format!(
-        "[features.guardianv2]\nsync_elastic_budgeting = true\n{}",
+        r#"[features.guardianv2]
+sync_elastic_budgeting = true
+{}
+[features.guardianv2.sync_elastic_sections.transcript_selected_exec_results]
+nested_tool_names = ["update_plan"]
+min_total_section_tokens = {SELECTED_EXEC_TOKENS}
+max_section_entry_tokens = {SELECTED_EXEC_TOKENS}
+max_total_section_tokens = {SELECTED_EXEC_TOKENS}
+"#,
         toml::to_string(&policy)?
             .replace("[sections.", "[features.guardianv2.sync_elastic_sections.")
     );
@@ -3073,6 +3134,12 @@ async fn guardian_elastic_budgeting_request_history() -> Result<()> {
         )
         .with_config(|config| {
             configure_scenario_catalog(config);
+            config.features.enable(Feature::CodeMode).unwrap();
+            config
+                .features
+                .enable(Feature::ExecutedToolCallMetadata)
+                .unwrap();
+            config.update_plan_enabled = true;
             config
                 .features
                 .enable(Feature::GuardianReuseParentCompaction)
@@ -3085,7 +3152,7 @@ async fn guardian_elastic_budgeting_request_history() -> Result<()> {
         .await?;
     test.submit_text_turn(&user_request).await?;
     let requests = mock.requests();
-    let guardian_text = requests[1].message_input_texts("user").join("\n");
+    let guardian_text = requests[3].message_input_texts("user").join("\n");
     assert!(guardian_text.contains(&user_request));
     let transcript = guardian_text
         .split_once(">>> TRANSCRIPT START")
@@ -3096,17 +3163,24 @@ async fn guardian_elastic_budgeting_request_history() -> Result<()> {
         .0;
     assert!(!transcript.contains("Earlier untrusted"));
     assert!(transcript.contains("Untrusted assistant evidence"));
+    let selected = format!("selected-{}-end", "x".repeat(640));
+    assert!(transcript.contains(&selected), "{transcript}");
+    assert!(!transcript.contains(&format!("ordinary-{}-end", "y".repeat(640))));
     assert!(
         requests.last().unwrap().body_json()["input"]
             .to_string()
             .contains(&earlier_commentary)
     );
     let mut snapshot = context_snapshot::format_request_history_snapshot(
-        "Elastic sync budgeting caps entries before deduplication, keeps complete retained instructions, and limits Optional transcript evidence by section.",
+        "Elastic sync budgeting keeps retained instructions, caps ordinary tool evidence, and reserves space for the exec output that ran the configured nested tool.",
         &requests,
         &ContextSnapshotOptions::default().rewrite_known_segments(),
     );
     for (pattern, replacement) in [
+        (
+            r"(?m)^(\s*Wall time) [0-9]+(?:\.[0-9]+)? seconds$",
+            "$1 <DURATION> seconds",
+        ),
         (r#"(?m)^(\s*"cwd": )"[^"]*""#, "$1\"<CWD>\""),
         (
             r#""command": \[\s*(?:"[^"]*",\s*)*("[^\n]*)\n\s*\]"#,
@@ -4021,6 +4095,298 @@ async fn astra_async_compaction_keeps_work_added_after_its_snapshot(
             .expect("retained tool output");
         assert!(tool < assistant && assistant < call && call < output);
     }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ExecCatalogRefresh {
+    Hybrid,
+    Metadata,
+}
+
+#[test_case::test_case(ExecCatalogRefresh::Hybrid; "hybrid mode")]
+#[test_case::test_case(ExecCatalogRefresh::Metadata; "exec metadata refresh")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn astra_async_compaction_preserves_exec_catalog(change: ExecCatalogRefresh) -> Result<()> {
+    use codex_models_manager::manager::RefreshStrategy;
+    use core_test_support::responses::mount_models_once_with_etag;
+
+    skip_if_no_network!(Ok(()));
+    let (release_background, background_gate) = oneshot::channel();
+    let (release_foreground, foreground_gate) = oneshot::channel();
+    let (streaming, _completions) = start_streaming_sse_server(vec![
+        vec![compaction_chunk(
+            /*gate*/ None,
+            vec![
+                ev_assistant_message("draft", "I drafted the launch notes."),
+                ev_completed_with_tokens("draft-response", /*total_tokens*/ 70_000),
+            ],
+        )],
+        vec![compaction_chunk(
+            Some(background_gate),
+            vec![
+                compaction_output("ASYNC_LAUNCH_CHECKPOINT"),
+                ev_completed_with_tokens("compact-response", /*total_tokens*/ 3_000),
+            ],
+        )],
+        vec![
+            compaction_chunk(
+                /*gate*/ None,
+                vec![
+                    ev_response_created("team-response"),
+                    ev_assistant_message("team-check", "I will check who is available."),
+                ],
+            ),
+            compaction_chunk(
+                Some(foreground_gate),
+                vec![
+                    ev_function_call_with_namespace("team", "collaboration", "list_agents", "{}"),
+                    ev_completed_with_tokens("team-response", /*total_tokens*/ 75_000),
+                ],
+            ),
+        ],
+        vec![compaction_chunk(
+            /*gate*/ None,
+            vec![
+                ev_assistant_message("answer", "I can finish the notes myself."),
+                ev_completed_with_tokens("answer-response", /*total_tokens*/ 3_000),
+            ],
+        )],
+    ])
+    .await;
+    let model_server = wiremock::MockServer::start().await;
+    let mut catalog = bundled_models_response()?;
+    let model = catalog
+        .models
+        .iter_mut()
+        .find(|model| model.slug == "gpt-6-astra")
+        .expect("bundled Astra model");
+    model.tool_mode = Some(ToolMode::CodeModeOnly);
+    model.supports_image_detail_original = false;
+    mount_models_once_with_etag(&model_server, catalog.clone(), "\"exec-mode-v1\"").await;
+    let model_catalog_url = format!("{}/models", model_server.uri());
+    let (_config_server, test) = async_compaction_test(
+        test_codex(),
+        streaming.uri(),
+        vec![
+            Feature::IncrementalTools,
+            Feature::IncrementalExecTools,
+            Feature::ViewImage,
+        ],
+        move |config| {
+            config
+                .features
+                .disable(Feature::UnifiedImageBudget)
+                .expect("use the model's image detail capability");
+            config.model_catalog = None;
+            config.model_provider.model_catalog_url = Some(model_catalog_url.clone().into());
+            config.code_mode.disable_in_process_fallback = true;
+        },
+    )
+    .await?;
+    test.codex.ensure_rollout_materialized().await;
+
+    test.submit_text_turn("Draft the launch notes.").await?;
+    let timeout = Duration::from_secs(/*secs*/ 20);
+    tokio::time::timeout(timeout, streaming.wait_for_request_count(/*count*/ 2)).await?;
+    // Refresh the same model while the prepared result is still pending.
+    let model = catalog
+        .models
+        .iter_mut()
+        .find(|model| model.slug == "gpt-6-astra")
+        .expect("bundled Astra model");
+    match change {
+        ExecCatalogRefresh::Hybrid => model.tool_mode = Some(ToolMode::CodeMode),
+        ExecCatalogRefresh::Metadata => {
+            model.supports_image_detail_original = true;
+            let messages = model
+                .model_messages
+                .get_or_insert_default()
+                .tools
+                .get_or_insert_default()
+                .code_mode
+                .get_or_insert_default();
+            messages.exec.get_or_insert_default().description =
+                Some("Previous exec instructions.".to_string());
+            messages.mcp_typescript_preamble = Some("type PreviousResult = string;".to_string());
+        }
+    }
+    mount_models_once_with_etag(&model_server, catalog.clone(), "\"exec-mode-v2\"").await;
+    test.thread_manager
+        .get_models_manager()
+        .list_models(
+            RefreshStrategy::Online,
+            codex_core::test_support::default_http_client_factory(),
+        )
+        .await;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![text(
+            "Check who can finish the notes.",
+        )]))
+        .await?;
+    tokio::time::timeout(timeout, streaming.wait_for_request_count(/*count*/ 3)).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ItemCompleted(event)
+        if matches!(&event.item, TurnItem::AgentMessage(message) if message.id == "team-check"))
+    })
+    .await;
+    release_background
+        .send(())
+        .expect("release background compaction");
+    // Keep foreground work gated until the prepared result is available for optional adoption.
+    tokio::time::timeout(
+        timeout,
+        test.codex.wait_for_background_compaction_for_test(),
+    )
+    .await?;
+    release_foreground
+        .send(())
+        .expect("release foreground work");
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    tokio::time::timeout(
+        timeout,
+        test.codex.wait_for_background_compaction_for_test(),
+    )
+    .await?;
+    let requests = streaming
+        .requests()
+        .await
+        .iter()
+        .map(|body| serde_json::from_slice::<serde_json::Value>(body))
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    assert_eq!(requests.len(), 4);
+    let history = test
+        .codex
+        .load_history(/*include_archived*/ false)
+        .await?
+        .items;
+    let input = requests[3]["input"].as_array().expect("request input");
+    let compaction = input
+        .iter()
+        .position(|item| item["encrypted_content"] == "ASYNC_LAUNCH_CHECKPOINT")
+        .expect("prepared summary was adopted");
+    let user = input
+        .iter()
+        .position(|item| {
+            item["role"] == "user"
+                && item["content"][0]["text"] == "Check who can finish the notes."
+        })
+        .expect("retained user message");
+    let assistant = input
+        .iter()
+        .position(|item| {
+            item["role"] == "assistant"
+                && item["content"][0]["text"] == "I will check who is available."
+        })
+        .expect("retained assistant message");
+    let call = input
+        .iter()
+        .position(|item| item["type"] == "function_call" && item["call_id"] == "team")
+        .expect("retained tool call");
+    let output = input
+        .iter()
+        .position(|item| item["type"] == "function_call_output" && item["call_id"] == "team")
+        .expect("retained tool output");
+    assert!(user < assistant && assistant < call && call < output);
+    let [before_adoption, after_adoption] = [&requests[2], &requests[3]].map(|request| {
+        request["input"]
+            .as_array()
+            .expect("request input")
+            .iter()
+            .filter(|item| item["type"] == "additional_tools")
+            .map(|item| item["tools"].clone())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(after_adoption, before_adoption);
+    let (exec_positions, exec_declarations): (Vec<_>, Vec<_>) = input
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            core_test_support::responses::namespace_child_tool(item, "functions", "exec")
+                .map(|declaration| (index, declaration))
+        })
+        .unzip();
+    let (adoption_index, adopted) = history
+        .windows(2)
+        .enumerate()
+        .find_map(|(index, pair)| match pair {
+            [RolloutItem::Compacted(_), RolloutItem::WorldState(baseline)] if baseline.full => {
+                Some((index, &baseline.state["top_level_tools"]))
+            }
+            _ => None,
+        })
+        .expect("adopted full checkpoint");
+    let changed_hashes: &[&str] = match change {
+        ExecCatalogRefresh::Hybrid => &["/functions.exec"],
+        ExecCatalogRefresh::Metadata => &["/tools/functions.exec", "/exec/Tool: tools.view_image"],
+    };
+    for path in changed_hashes {
+        let live = history[..adoption_index]
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                RolloutItem::WorldState(patch) if !patch.full => {
+                    patch.state.get("top_level_tools")?.pointer(path)
+                }
+                _ => None,
+            })
+            .and_then(serde_json::Value::as_str)
+            .expect("live exec update before adoption");
+        assert_eq!(
+            adopted.pointer(path).and_then(serde_json::Value::as_str),
+            Some(live),
+            "{path}"
+        );
+    }
+    if matches!(change, ExecCatalogRefresh::Metadata) {
+        let initial_exec = requests[0]["input"]
+            .as_array()
+            .expect("initial input")
+            .iter()
+            .find_map(|item| {
+                core_test_support::responses::namespace_child_tool(item, "functions", "exec")
+            })
+            .expect("initial exec declaration");
+        assert_eq!(exec_declarations, vec![initial_exec]);
+        assert!(exec_positions[0] < compaction && compaction < user);
+        let is_view_image_update = |item: &&serde_json::Value| {
+            item["role"] == "developer"
+                && item["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.lines().any(|line| line == "### `view_image`"))
+        };
+        let live_update = requests[2]["input"]
+            .as_array()
+            .expect("input before adoption")
+            .iter()
+            .find(is_view_image_update)
+            .expect("view_image redefinition during background compaction");
+        assert!(
+            live_update["content"][0]["text"]
+                .as_str()
+                .expect("view_image update text")
+                .contains("detail?: \"high\" | \"original\"")
+        );
+        assert_eq!(
+            input
+                .iter()
+                .filter(is_view_image_update)
+                .collect::<Vec<_>>(),
+            vec![live_update]
+        );
+        assert!(input[compaction + 1..].contains(live_update));
+        return Ok(());
+    }
+    assert_eq!(exec_declarations.len(), 2);
+    assert_ne!(exec_declarations[0], exec_declarations[1]);
+    assert!(
+        exec_positions[0] < compaction
+            && compaction < exec_positions[1]
+            && exec_positions[1] < user
+    );
     Ok(())
 }
 

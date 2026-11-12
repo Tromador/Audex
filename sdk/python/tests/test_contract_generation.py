@@ -165,3 +165,37 @@ def test_audit_evidence_keeps_sdk_names_and_supports_complete_collections():
         parsed = AuditEvidenceParams.model_validate(payload)
         assert isinstance(parsed.query.root, expected_type)
         assert parsed.model_dump(by_alias=True, exclude_unset=True) == payload
+
+
+def test_answer_display_is_read_in_thread_history_and_notifications():
+    from openai_codex.generated.v2_all import ItemCompletedNotification, ThreadItemsListResponse
+
+    display = {
+        "version": 1,
+        "mode": "show",
+        "trustedContacts": "check",
+        "annotation": {"kind": "wellbeingHelpline", "subject": "answer"},
+    }
+    item = {
+        "id": "a",
+        "type": "agentMessage",
+        "text": "answer",
+        "moderation": {"moderated": True, "display": {**display, "additionalV1Field": True}},
+    }
+    history = ThreadItemsListResponse.model_validate({"data": [{"turnId": "u", "item": item}]})
+    event = ItemCompletedNotification.model_validate(
+        {"threadId": "t", "turnId": "u", "completedAtMs": 1, "item": item}
+    )
+    for envelope in (history.data[0].item, event.item):
+        assert (
+            envelope.root.moderation.display.model_dump(
+                mode="json", by_alias=True, exclude_none=True
+            )
+            == display
+        )
+    item["moderation"] = {"moderated": False, "display": {"version": 2, "mode": "new"}}
+    moderated = ItemCompletedNotification.model_validate(
+        {"threadId": "t", "turnId": "u", "completedAtMs": 1, "item": item}
+    ).item.root.moderation
+    assert moderated.moderated is True
+    assert moderated.display is None

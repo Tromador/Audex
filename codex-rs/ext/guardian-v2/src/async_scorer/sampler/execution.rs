@@ -114,6 +114,7 @@ impl SamplingExecution {
                 ApiError::Retryable { .. }
                 | ApiError::RateLimitExceeded { .. }
                 | ApiError::Stream(_)
+                | ApiError::WebsocketMessageTooLarge
                 | ApiError::ContentFilter
                 | ApiError::ServerOverloaded { .. }
                 | ApiError::PolicyCapacityUnavailable { .. }
@@ -164,6 +165,9 @@ impl SamplingExecution {
                 | ApiError::InvalidAudioInput { .. }
                 | ApiError::ModelNotFound { .. }
                 | ApiError::InvalidPrompt { .. }
+                | ApiError::InferenceHookDenied { .. }
+                | ApiError::AccessProgramNotEnabled { .. }
+                | ApiError::ContentPolicyViolation { .. }
                 | ApiError::MisalignmentPolicyViolation { .. }
                 | ApiError::CyberPolicy { .. }
                 | ApiError::BioPolicy { .. },

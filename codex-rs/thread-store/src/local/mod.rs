@@ -187,8 +187,8 @@ struct LiveWriterLocks {
 
 #[derive(Default)]
 struct ThreadCoordination {
-    // Serialize writes and capture consistent fork snapshots.
-    writer: Arc<Mutex<()>>,
+    // Serializes writes and holds the next item ordinal observed in this writer’s rollout.
+    writer: Arc<Mutex<u64>>,
     // Forks hold a shared lease until their child reference is durable; deletion, archive, and
     // unarchive require exclusive access. Keeping this separate from `writer` lets the source
     // accept writes during child initialization, including MCP startup that can take 30 seconds.
@@ -206,7 +206,7 @@ impl LiveWriterLocks {
             .clone()
     }
 
-    async fn lock(&self, thread_id: ThreadId) -> OwnedMutexGuard<()> {
+    async fn lock(&self, thread_id: ThreadId) -> OwnedMutexGuard<u64> {
         self.coordination(thread_id)
             .await
             .writer
@@ -1072,14 +1072,14 @@ mod tests {
         tokio::fs::write(&stale_rollout_path, "malformed session metadata\n")
             .await
             .expect("write stale rollout");
-        let mut builder = codex_state::ThreadMetadataBuilder::new(
+        let builder = codex_state::ThreadMetadataBuilder::new(
             thread_id,
             stale_rollout_path,
             chrono::Utc::now(),
             SessionSource::Cli,
-        );
-        builder.history_mode = ThreadHistoryMode::Paginated;
-        builder.cwd = home.path().to_path_buf();
+        )
+        .with_history_mode(ThreadHistoryMode::Paginated)
+        .with_cwd(home.path().to_path_buf());
         let mut metadata = builder.build("test-provider");
         metadata.preview = Some("original user message".to_string());
         metadata.first_user_message = Some("original user message".to_string());
@@ -1784,14 +1784,14 @@ mod tests {
             .await
             .expect("shutdown initial writer");
 
-        let mut builder = codex_state::ThreadMetadataBuilder::new(
+        let builder = codex_state::ThreadMetadataBuilder::new(
             thread_id,
             home.path().join("missing-rollout.jsonl"),
             chrono::Utc::now(),
             SessionSource::Exec,
-        );
-        builder.history_mode = ThreadHistoryMode::Legacy;
-        builder.cwd = home.path().to_path_buf();
+        )
+        .with_history_mode(ThreadHistoryMode::Legacy)
+        .with_cwd(home.path().to_path_buf());
         let metadata = builder.build("test-provider");
         runtime
             .upsert_thread(&metadata)
@@ -2406,7 +2406,7 @@ mod tests {
             history_mode: ThreadHistoryMode::Legacy,
             history_base: None,
             subagent_history_start_ordinal: None,
-            initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7().to_string(),
+            initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: thread_metadata(),
         }

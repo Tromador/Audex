@@ -1,5 +1,6 @@
 pub(crate) mod startup;
 
+use crate::McpRefreshReason;
 use crate::PromptCacheKey;
 use crate::WithTurnExtensionData;
 use crate::runtime_auth::RuntimeAuthSlot;
@@ -252,6 +253,7 @@ pub(crate) mod async_compaction;
 pub(crate) mod file_audio;
 pub(crate) use file_audio::FileAudioDurations;
 
+mod approved_plan;
 mod code_mode_warning;
 mod config_refresh;
 pub(crate) mod context_window;
@@ -272,6 +274,7 @@ mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
 mod model_catalog_settings;
+mod model_ids;
 pub(crate) mod multi_agents;
 mod plugin_selection;
 mod realtime_history;
@@ -599,6 +602,21 @@ pub(crate) fn assign_missing_item_id(
 }
 
 impl Session {
+    fn compaction_resume_metadata(&self, state: &SessionState) -> CompactionResumeMetadata {
+        CompactionResumeMetadata {
+            next_item_ordinal: None,
+            rejected_audio_file_ids: state.history.rejected_audio_file_ids(),
+            dynamic_tools: Some(Box::new(DynamicToolsSnapshot {
+                thread_id: self.thread_id(),
+                tools: state.persisted_dynamic_tools.to_vec(),
+            })),
+            multi_agent_version: self.multi_agent_version(),
+            last_started_turn_id: state.last_started_turn_id.clone(),
+            turn_attribution: state.turn_attribution.clone(),
+            previous_turn_settings: state.previous_turn_settings(),
+        }
+    }
+
     pub(crate) async fn resolve_startup_model(
         models_manager: &dyn ModelsManager,
         config: &Config,
@@ -842,12 +860,9 @@ impl Session {
             let permission_profile = config.permissions.effective_permission_profile();
             if permission_profile.enforcement() != SandboxEnforcement::External
                 && permission_profile.network_sandbox_policy().is_enabled()
-                && {
-                    let file_system = permission_profile.file_system_sandbox_policy();
-                    file_system.has_full_disk_write_access()
-                        // Preserve the legacy fallback for writable URIs that cannot be projected locally.
-                        && file_system.entries.iter().all(|entry| entry.legacy_writable_path().is_ok())
-                }
+                && permission_profile
+                    .file_system_sandbox_policy()
+                    .has_legacy_full_disk_write_access()
             {
                 let config = Arc::make_mut(&mut config);
                 let permission_profile = PermissionProfile::workspace_write();
@@ -2039,6 +2054,7 @@ impl Session {
                 reference_context_item,
                 HistoryReplacement::Reset,
             );
+            state.history.restored_through_sequence = state.history.input_sequence();
             state
                 .history
                 .restore_rejected_audio_file_ids(rejected_audio_file_ids);
@@ -2153,6 +2169,8 @@ impl Session {
     ///
     /// The predicate must be fast and side-effect-free. It must not block, acquire
     /// other locks, or call back into `Session`.
+    ///
+    /// Returns any host receipt for the caller to await when it needs acknowledgment.
     async fn update_settings_if(
         &self,
         updates: SessionSettingsUpdate,
@@ -2160,7 +2178,6 @@ impl Session {
     ) -> ConstraintResult<Option<SessionSettingsCommit>> {
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
         let windows_sandbox_changed;
-        let mut tier_acceptance = None;
         let (
             commit,
             previous_config,
@@ -2210,7 +2227,7 @@ impl Session {
                     != updated.step_settings.service_tier;
             let mcp_inputs_changed = self.mcp_inputs_differ(&state.session_configuration, &updated);
             if mcp_inputs_changed {
-                self.mark_mcp_runtime_dirty();
+                self.mark_mcp_runtime_dirty(McpRefreshReason::SessionMcpInputsChanged);
             }
             // Save new environment defaults for future turns. The running turn keeps its own.
             windows_sandbox_changed =
@@ -2224,7 +2241,17 @@ impl Session {
                     .update_configured_selections(&updated.environments);
             }
             state.session_configuration = updated;
-            if root_service_tier_changed && !state.shared_service_tier_pending {
+            let explicit_service_tier = updates.step_settings.service_tier.is_some();
+            let retry_failed_handoff = updates.host_acceptance_in_reply
+                && explicit_service_tier
+                && state
+                    .service_tier_acceptance
+                    .as_ref()
+                    .and_then(futures::future::Shared::peek)
+                    .is_some_and(Result::is_err);
+            if (root_service_tier_changed || retry_failed_handoff)
+                && !state.shared_service_tier_pending
+            {
                 state.service_tier_acceptance = crate::agent::host::propagate_config_update(
                     self,
                     AgentConfigUpdate::ServiceTier(
@@ -2236,9 +2263,11 @@ impl Session {
                     ),
                 );
             }
-            if root_service_tier_changed || updates.step_settings.service_tier.is_some() {
-                tier_acceptance = state.service_tier_acceptance.clone();
-            }
+            let host_acceptance = if root_service_tier_changed || explicit_service_tier {
+                state.service_tier_acceptance.clone()
+            } else {
+                None
+            };
             let new_config = notify_config_contributors
                 .then(|| self.build_effective_session_config(&state.session_configuration));
             let commit = SessionSettingsCommit {
@@ -2246,6 +2275,7 @@ impl Session {
                 snapshot: state
                     .session_configuration
                     .thread_settings_snapshot(&state.session_configuration.environments),
+                host_acceptance,
             };
             (
                 commit,
@@ -2280,9 +2310,6 @@ impl Session {
         }
         if mcp_inputs_changed {
             self.schedule_mcp_prewarm();
-        }
-        if let Some(accepted) = tier_acceptance {
-            accepted.await;
         }
         Ok(Some(commit))
     }
@@ -2382,7 +2409,6 @@ impl Session {
         &self,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
-        mcp_elicitations_auto_deny: bool,
     ) -> ConstraintResult<()> {
         self.update_settings(SessionSettingsUpdate {
             app_server_client_name,
@@ -2390,9 +2416,6 @@ impl Session {
             ..Default::default()
         })
         .await?;
-        self.services
-            .mcp_runtime
-            .set_elicitations_auto_deny(mcp_elicitations_auto_deny);
         Ok(())
     }
 
@@ -2464,6 +2487,18 @@ impl Session {
             configuration.windows_sandbox_level,
             environments,
             reasoning_effort_pin,
+        )
+    }
+
+    pub(crate) async fn thread_ready_config(
+        &self,
+    ) -> (Arc<Config>, HistoryInitialization, ThreadHistoryMode) {
+        let state = self.state.lock().await;
+        let config = &state.session_configuration;
+        (
+            Arc::clone(&config.original_config_do_not_use),
+            self.history_initialization,
+            config.history_mode,
         )
     }
 
@@ -3816,6 +3851,7 @@ impl Session {
                     environment_id,
                     response.permissions.clone().into(),
                 );
+                self.mark_mcp_runtime_dirty(McpRefreshReason::SessionPermissionsGranted);
             }
         }
     }
@@ -4365,7 +4401,11 @@ impl Session {
             let ready_selected_capability_roots =
                 Self::ready_selected_capability_roots(&selected_capability_roots);
             let (executor_capability_discovery_v2, inventory_changed) = self
-                .executor_capability_discovery_for_step_v2(&turn_context.config, &environments)
+                .executor_capability_discovery_for_step_v2(
+                    &turn_context.config,
+                    &environments,
+                    /*skill_turn*/ None,
+                )
                 .await;
             let v2_snapshots = executor_capability_discovery_v2.as_ref();
             let (executor_capability_discovery, discovery_recovered) = if v2_snapshots.is_some() {
@@ -4376,11 +4416,15 @@ impl Session {
                     &selected_capability_roots,
                     &environments,
                     executor_capability_discovery_v2.as_deref(),
+                    /*skill_turn*/ None,
                 )
                 .await
             };
-            if inventory_changed || discovery_recovered {
-                self.mark_mcp_runtime_dirty();
+            if inventory_changed {
+                self.mark_mcp_runtime_dirty(McpRefreshReason::ExecutorCapabilityInventoryChanged);
+            }
+            if discovery_recovered {
+                self.mark_mcp_runtime_dirty(McpRefreshReason::ExecutorCapabilityDiscoveryRecovered);
             }
             let extension_data =
                 codex_extension_api::ExtensionData::new(turn_context.sub_id.clone());
@@ -4392,14 +4436,37 @@ impl Session {
                 self.host_skills_for_step(&turn_context, &environments)
                     .await,
             );
-            if turn_context
-                .config
-                .features
-                .enabled(Feature::SkillCatalogDeltas)
-                && let Some(grants) = turn_context.turn_skill_filesystem_grants(&environments)
-            {
-                extension_data.insert(grants);
-            }
+            // Only skill discovery may use a turn's temporary file access. Plugin servers and
+            // hooks use the session inventory above because they can outlive the step.
+            let turn_skill_discovery =
+                if let Some(grants) = turn_context.turn_skill_filesystem_grants(&environments) {
+                    if turn_context
+                        .config
+                        .features
+                        .enabled(Feature::SkillCatalogDeltas)
+                    {
+                        extension_data.insert(grants);
+                    }
+                    let (v2, _) = self
+                        .executor_capability_discovery_for_step_v2(
+                            &turn_context.config,
+                            &environments,
+                            Some(&turn_context),
+                        )
+                        .await;
+                    let (v1, _) = self
+                        .executor_capability_discovery_for_step(
+                            &turn_context.config,
+                            &selected_capability_roots,
+                            &environments,
+                            v2.as_deref(),
+                            Some(&turn_context),
+                        )
+                        .await;
+                    Some((v1, v2))
+                } else {
+                    None
+                };
             if let Some(messages) = settings
                 .model_info
                 .model_messages
@@ -4462,28 +4529,53 @@ impl Session {
                 mcp
             };
             extension_data.insert(selected_capability_roots);
-            // A step keeps the plugins from the environments it captured, even if shared MCP
-            // moves on to another environment. Its skill tools and the model use this same copy.
-            // Policy follows this step's MCP binding, which may have refreshed mid-turn.
-            let selected_plugins = self
-                .services
-                .mcp_manager
-                .selected_plugins_for_step(
+            let selected_environments = environments.all_selections();
+            let select_plugins = |discovery, discovery_v2| {
+                self.services.mcp_manager.selected_plugins_for_step(
                     codex_extension_api::McpServerContributionContext::for_step(
                         turn_context.config.as_ref(),
                         &self.services.mcp_thread_init,
                         &self.services.thread_extension_data,
                         &turn_context.originator,
                         &ready_selected_capability_roots,
-                        executor_capability_discovery.as_deref(),
-                        executor_capability_discovery_v2.as_deref(),
+                        discovery,
+                        discovery_v2,
                     )
                     .with_session_source(&turn_context.session_source)
-                    .with_selected_environments(&environments.all_selections()),
+                    .with_selected_environments(&selected_environments),
                     &mcp.config().plugins,
                     &turn_context.disabled_plugin_ids,
                 )
-                .await;
+            };
+            // Resolve skill ownership from the same inventory as skill discovery.
+            let (skill_discovery, skill_discovery_v2) = match &turn_skill_discovery {
+                Some((v1, v2)) => (v1.as_deref(), v2.as_deref()),
+                None => (
+                    executor_capability_discovery.as_deref(),
+                    executor_capability_discovery_v2.as_deref(),
+                ),
+            };
+            let selected_plugins = select_plugins(skill_discovery, skill_discovery_v2).await;
+            // V2 hooks match accepted installations from the session inventory. V1 hooks
+            // only need the explicit disabled IDs, already present in selected_plugins.
+            let session_plugins =
+                if turn_skill_discovery.is_some() && executor_capability_discovery_v2.is_some() {
+                    Some(
+                        select_plugins(
+                            executor_capability_discovery.as_deref(),
+                            executor_capability_discovery_v2.as_deref(),
+                        )
+                        .await,
+                    )
+                } else {
+                    None
+                };
+            let executor_hook_sources = crate::hook_runtime::prepare_executor_hook_sources(
+                &mcp,
+                session_plugins.as_ref().unwrap_or(&selected_plugins),
+                executor_capability_discovery.as_deref(),
+                executor_capability_discovery_v2.as_deref(),
+            );
             let mut filesystem_access = HashMap::new();
             for environment in environments.turn_environments() {
                 let environment_id = &environment.selection.environment_id;
@@ -4508,9 +4600,8 @@ impl Session {
                     .prepare_for_step(codex_extension_api::StepPreparationInput {
                         turn_id: &turn_context.sub_id,
                         ready_selected_capability_roots: &accessed_roots,
-                        executor_capability_discovery: executor_capability_discovery.as_deref(),
-                        executor_capability_discovery_v2: executor_capability_discovery_v2
-                            .as_deref(),
+                        executor_capability_discovery: skill_discovery,
+                        executor_capability_discovery_v2: skill_discovery_v2,
                         selected_plugins: &selected_plugins,
                         session_store: &self.services.session_extension_data,
                         thread_store: &self.services.thread_extension_data,
@@ -4520,12 +4611,6 @@ impl Session {
                     .or_cancel(cancellation_token)
                     .await?;
             }
-            let executor_hook_sources = crate::hook_runtime::prepare_executor_hook_sources(
-                &mcp,
-                &selected_plugins,
-                executor_capability_discovery.as_deref(),
-                executor_capability_discovery_v2.as_deref(),
-            );
             extension_data.insert(selected_plugins);
             let tool_router = turn::built_tools(
                 self.as_ref(),
@@ -4884,25 +4969,12 @@ impl Session {
                 retained_context: Some(state.history.retained_context().clone()),
                 mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
                 window_number: Some(metadata.window_number),
-                first_window_id: Some(metadata.window_ids.first_window_id.to_string()),
-                previous_window_id: metadata
-                    .window_ids
-                    .previous_window_id
-                    .map(|id| id.to_string()),
-                window_id: Some(metadata.window_ids.window_id.to_string()),
+                first_window_id: Some(metadata.window_ids.first_window_id),
+                previous_window_id: metadata.window_ids.previous_window_id,
+                window_id: Some(metadata.window_ids.window_id),
                 compaction_response_id: metadata.compaction_response_id,
                 latest_token_usage_record: state.latest_token_usage_record.clone(),
-                resume_metadata: Some(CompactionResumeMetadata {
-                    rejected_audio_file_ids: state.history.rejected_audio_file_ids(),
-                    dynamic_tools: Some(Box::new(DynamicToolsSnapshot {
-                        thread_id: self.thread_id(),
-                        tools: state.persisted_dynamic_tools.to_vec(),
-                    })),
-                    multi_agent_version: self.multi_agent_version(),
-                    last_started_turn_id: state.last_started_turn_id.clone(),
-                    turn_attribution: state.turn_attribution.clone(),
-                    previous_turn_settings: state.previous_turn_settings(),
-                }),
+                resume_metadata: Some(self.compaction_resume_metadata(&state)),
             };
             (compacted_item, started_item)
         };

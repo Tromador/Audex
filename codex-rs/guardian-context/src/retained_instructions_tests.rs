@@ -141,7 +141,7 @@ fn ordinary_exchanges_keep_roles_and_drop_assistant_context_before_restrictions(
                 ),
             }],
         }
-        .compose(
+        .compose_prepared(
             presentation,
             crate::PreparedTranscript {
                 items: vec![],
@@ -286,17 +286,17 @@ fn legacy_verified_answers_keep_distinct_source_order() {
     assert!(!old.complete);
     let [actual, expected] =
         [raw, old.fragments.into_iter().map(Into::into).collect()].map(|items| {
-            crate::CollectedContext {
-                sections: vec![ContextSection::TrustedUserAnswers { items }],
-            }
-            .compose(
+            crate::prepare_context(
+                std::borrow::Cow::Owned(crate::CollectedContext {
+                    sections: vec![ContextSection::TrustedUserAnswers { items }],
+                }),
+                &crate::ContextProfile::synchronous(),
+                /*entry_number_offset*/ 0,
                 crate::ContextPresentation::SyncFull {
                     session_id: "worker",
                 },
-                crate::ContextProfile::synchronous().prepare_transcript(
-                    /*transcript_entries*/ &[],
-                    /*entry_number_offset*/ 0,
-                ),
+                crate::ContextBudgeting::Fixed,
+                &[],
             )
             .unwrap()
             .into_messages()
@@ -345,6 +345,7 @@ fn delivery_uses_source_revision_and_complete_host_metadata() {
             crate::ElasticSection::RetainedUserInstructions,
             crate::ElasticSectionLimits::new(ENTRY_TOKENS, ENTRY_TOKENS).unwrap(),
         )]),
+        ..Default::default()
     });
     let capped = original.clone().prepare_elastic_entries(&config).unwrap();
     assert!(!capped.context.truncations.is_empty());
@@ -477,6 +478,7 @@ fn transcript_context(
             target: profile.target,
             history,
             transcript: &profile.transcript,
+            is_selected_exec_output: None,
             root_conversation: &[],
             root_conversation_candidates: None,
             trusted_user_answers: &answers
@@ -493,17 +495,21 @@ fn transcript_context(
             node_repl: None,
         })
         .unwrap();
-    let transcript = profile.prepare_transcript(
-        collected.transcript_entries(),
-        /*entry_number_offset*/ 0,
-    );
     let presentation = match profile.target {
         crate::ContextTarget::Sync => crate::ContextPresentation::SyncFull {
             session_id: "parent",
         },
         crate::ContextTarget::Async => crate::ContextPresentation::Async,
     };
-    collected.compose(presentation, transcript).unwrap()
+    crate::prepare_context(
+        std::borrow::Cow::Owned(collected),
+        profile,
+        /*entry_number_offset*/ 0,
+        presentation,
+        crate::ContextBudgeting::Fixed,
+        &[],
+    )
+    .unwrap()
 }
 
 #[test]
@@ -639,6 +645,7 @@ fn transcript_original_requires_complete_source_proof_and_survives_budgeting() {
             (crate::ElasticSection::RetainedUserInstructions, limits),
         ]
         .into(),
+        ..Default::default()
     });
     let prepared = transcript_context(&history, &profile)
         .prepare_elastic_entries(&config)
@@ -742,6 +749,7 @@ fn transcript_original_requires_complete_source_proof_and_survives_budgeting() {
                 ),
             ]
             .into(),
+            ..Default::default()
         });
         let prepared = transcript_context(&history, &profile)
             .prepare_elastic_entries(&config)

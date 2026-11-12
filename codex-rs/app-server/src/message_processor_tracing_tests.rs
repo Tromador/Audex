@@ -525,7 +525,8 @@ async fn read_response_skips_errors_for_other_connections_and_requests() {
                 crate::outgoing_message::OutgoingResponse {
                     id: RequestId::Integer(3),
                     result: Box::new(
-                        codex_app_server_protocol::GatewayOAuthLoginResponse {}.into(),
+                        codex_app_server_protocol::GatewayOAuthLoginResponse { prompt: None }
+                            .into(),
                     ),
                 },
             ),
@@ -541,7 +542,7 @@ async fn read_response_skips_errors_for_other_connections_and_requests() {
         read_response(&mut outgoing_rx, /*request_id*/ 3).await;
     assert_eq!(
         response,
-        codex_app_server_protocol::GatewayOAuthLoginResponse {}
+        codex_app_server_protocol::GatewayOAuthLoginResponse { prompt: None }
     );
 }
 
