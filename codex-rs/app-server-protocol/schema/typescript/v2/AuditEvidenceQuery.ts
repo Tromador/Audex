@@ -22,4 +22,16 @@ maxBytes: number | null, } | { "view": "source", snapshot: string, path: string,
 /**
  * Optional byte range; omission reads through EOF. No Audex size ceiling.
  */
+maxBytes: number | null, } | { "view": "diagnostics", offset: number,
+/**
+ * Optional UTF-8 byte page of the complete immutable report.
+ */
+maxBytes: number | null, } | { "view": "guidance", snapshot: string,
+/**
+ * Omit to list captured documents; otherwise use a listed logical path.
+ */
+path: string | null, offset: number,
+/**
+ * Optional lossless UTF-8 byte page of the original captured document.
+ */
 maxBytes: number | null, };

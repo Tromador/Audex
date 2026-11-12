@@ -1989,6 +1989,7 @@ impl AppServerSession {
         thread_id: ThreadId,
         message: String,
         model: Option<String>,
+        audit: Option<String>,
     ) -> Result<()> {
         let request_id = self.next_request_id();
         let _: codex_app_server_protocol::ThreadClaudeResponse = self
@@ -1996,6 +1997,7 @@ impl AppServerSession {
             .request_typed(ClientRequest::ThreadClaude {
                 request_id,
                 params: codex_app_server_protocol::ThreadClaudeParams {
+                    audit,
                     thread_id: thread_id.to_string(),
                     message,
                     model,

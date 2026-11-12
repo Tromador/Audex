@@ -128,7 +128,7 @@ impl RunPhase {
         }
     }
 
-    fn is_terminal(self) -> bool {
+    pub(in crate::audex) fn is_terminal(self) -> bool {
         matches!(
             self,
             Self::Completed | Self::CompletedWithFailures | Self::Failed | Self::Cancelled
@@ -1478,6 +1478,17 @@ impl AuditStore {
         Ok(Self {
             root,
             database_path,
+            pool,
+            #[cfg(test)]
+            transition_barrier: Default::default(),
+        })
+    }
+
+    pub(in crate::audex) async fn open_read_only(root: AbsolutePathBuf) -> anyhow::Result<Self> {
+        let pool = source::read_only_pool(&root).await?;
+        Ok(Self {
+            database_path: root.join(DATABASE_FILENAME).into_path_buf(),
+            root,
             pool,
             #[cfg(test)]
             transition_barrier: Default::default(),

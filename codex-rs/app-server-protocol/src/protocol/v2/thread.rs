@@ -2300,6 +2300,8 @@ pub struct ContextCompactedNotification {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadClaudeParams {
+    /// Select retained evidence; omission inherits this thread's last explicit selection.
+    pub audit: Option<String>,
     pub thread_id: String,
     pub message: String,
     pub model: Option<String>,

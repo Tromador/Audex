@@ -5,4 +5,8 @@
 /**
  * Start one subscription-backed Claude conversation turn in an idle Codex thread.
  */
-export type ThreadClaudeParams = { threadId: string, message: string, model: string | null, };
+export type ThreadClaudeParams = {
+/**
+ * Select retained evidence; omission inherits this thread's last explicit selection.
+ */
+audit: string | null, threadId: string, message: string, model: string | null, };

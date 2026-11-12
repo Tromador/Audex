@@ -615,12 +615,63 @@ class AuditEvidenceQuery3(BaseModel):
     view: Literal["source"]
 
 
+class DiagnosticsAuditEvidenceQuery(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    max_bytes: Annotated[
+        int | None,
+        Field(
+            alias="maxBytes",
+            description="Optional UTF-8 byte page of the complete immutable report.",
+            ge=0,
+        ),
+    ] = None
+    offset: Annotated[int | None, Field(ge=0)] = 0
+    view: Literal["diagnostics"]
+
+
+class GuidanceAuditEvidenceQuery(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    max_bytes: Annotated[
+        int | None,
+        Field(
+            alias="maxBytes",
+            description="Optional lossless UTF-8 byte page of the original captured document.",
+            ge=0,
+        ),
+    ] = None
+    offset: Annotated[int | None, Field(ge=0)] = 0
+    path: Annotated[
+        str | None,
+        Field(description="Omit to list captured documents; otherwise use a listed logical path."),
+    ] = None
+    snapshot: str
+    view: Literal["guidance"]
+
+
 class AuditEvidenceQuery(
     RootModel[
-        ViewAuditEvidenceQuery | AuditEvidenceQuery1 | AuditEvidenceQuery2 | AuditEvidenceQuery3
+        ViewAuditEvidenceQuery
+        | AuditEvidenceQuery1
+        | AuditEvidenceQuery2
+        | AuditEvidenceQuery3
+        | DiagnosticsAuditEvidenceQuery
+        | GuidanceAuditEvidenceQuery
     ]
 ):
-    root: ViewAuditEvidenceQuery | AuditEvidenceQuery1 | AuditEvidenceQuery2 | AuditEvidenceQuery3
+    root: (
+        ViewAuditEvidenceQuery
+        | AuditEvidenceQuery1
+        | AuditEvidenceQuery2
+        | AuditEvidenceQuery3
+        | DiagnosticsAuditEvidenceQuery
+        | GuidanceAuditEvidenceQuery
+    )
 
 
 class AuditEvidenceResponse(BaseModel):
@@ -5887,6 +5938,12 @@ class ThreadClaudeParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    audit: Annotated[
+        str | None,
+        Field(
+            description="Select retained evidence; omission inherits this thread's last explicit selection."
+        ),
+    ] = None
     message: str
     model: str | None = None
     thread_id: Annotated[str, Field(alias="threadId")]

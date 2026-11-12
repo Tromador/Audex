@@ -2245,6 +2245,79 @@
             "view"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "maxBytes": {
+              "description": "Optional UTF-8 byte page of the complete immutable report.",
+              "format": "uint",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "default": 0,
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "view": {
+              "enum": [
+                "diagnostics"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "view"
+          ],
+          "title": "DiagnosticsAuditEvidenceQuery",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "maxBytes": {
+              "description": "Optional lossless UTF-8 byte page of the original captured document.",
+              "format": "uint",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "default": 0,
+              "format": "uint",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "path": {
+              "description": "Omit to list captured documents; otherwise use a listed logical path.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "snapshot": {
+              "type": "string"
+            },
+            "view": {
+              "enum": [
+                "guidance"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "snapshot",
+            "view"
+          ],
+          "title": "GuidanceAuditEvidenceQuery",
+          "type": "object"
         }
       ]
     },
@@ -22568,6 +22641,13 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "description": "Start one subscription-backed Claude conversation turn in an idle Codex thread.",
       "properties": {
+        "audit": {
+          "description": "Select retained evidence; omission inherits this thread's last explicit selection.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "message": {
           "type": "string"
         },

@@ -19,28 +19,7 @@ impl ReadOnlySource {
         snapshot: String,
         manifest: String,
     ) -> anyhow::Result<Arc<Self>> {
-        let sqlite =
-            codex_state::SqliteConfig::from_sqlite_home_with_nfs_enforcement(root.clone(), false);
-        let pool = sqlite
-            .open_read_only_pool(&root.join(DATABASE_FILENAME), Some(BUSY_TIMEOUT))
-            .await?;
-        let applied: Vec<(i64, bool, Vec<u8>)> = sqlx::query_as(
-            "SELECT version,success,checksum FROM _sqlx_migrations ORDER BY version",
-        )
-        .fetch_all(&pool)
-        .await?;
-        anyhow::ensure!(
-            applied.len() == AUDEX_MIGRATOR.iter().count(),
-            "unsupported audit schema"
-        );
-        for ((version, success, checksum), expected) in applied.iter().zip(AUDEX_MIGRATOR.iter()) {
-            anyhow::ensure!(
-                *success
-                    && *version == expected.version
-                    && checksum.as_slice() == expected.checksum.as_ref(),
-                "unsupported audit schema"
-            );
-        }
+        let pool = read_only_pool(root).await?;
         let authority = Arc::new(Self {
             pool,
             identity,
@@ -129,4 +108,30 @@ impl SourceAuthority for ReadOnlySource {
     fn allowed(&self) -> BoxFuture<'_, bool> {
         Box::pin(async { matches!(self.check().await, Ok(true)) })
     }
+}
+
+// Shared by both bridge profiles; never creates, migrates or repairs a database.
+pub(super) async fn read_only_pool(root: &AbsolutePathBuf) -> anyhow::Result<SqlitePool> {
+    let sqlite =
+        codex_state::SqliteConfig::from_sqlite_home_with_nfs_enforcement(root.clone(), false);
+    let pool = sqlite
+        .open_read_only_pool(&root.join(DATABASE_FILENAME), Some(BUSY_TIMEOUT))
+        .await?;
+    let applied: Vec<(i64, bool, Vec<u8>)> =
+        sqlx::query_as("SELECT version,success,checksum FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&pool)
+            .await?;
+    anyhow::ensure!(
+        applied.len() == AUDEX_MIGRATOR.iter().count(),
+        "unsupported audit schema"
+    );
+    for ((version, success, checksum), expected) in applied.iter().zip(AUDEX_MIGRATOR.iter()) {
+        anyhow::ensure!(
+            *success
+                && *version == expected.version
+                && checksum.as_slice() == expected.checksum.as_ref(),
+            "unsupported audit schema"
+        );
+    }
+    Ok(pool)
 }

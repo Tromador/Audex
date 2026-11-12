@@ -6,180 +6,293 @@ use serde_json::{Value, json};
 impl AuditController {
     pub(super) async fn evidence(&self, params: AuditEvidenceParams) -> anyhow::Result<Value> {
         let store = self.store().await?;
-        let run = store.load_run_metadata(&params.run_id).await?;
-        let (_, _, _, manifest_digest) = store.attempt_input(&run.operation_id).await?;
-        let identity = json!({"runId":run.run_id,"snapshotId":run.snapshot_id,"manifestDigest":manifest_digest});
-        if let AuditEvidenceQuery::Source {
-            snapshot,
-            path,
+        retained_evidence(store, &self.snapshots(), params).await
+    }
+}
+
+pub(in crate::audex) async fn retained_evidence(
+    store: &AuditStore,
+    snapshots: &SnapshotStore,
+    params: AuditEvidenceParams,
+) -> anyhow::Result<Value> {
+    let run = store.load_run_metadata(&params.run_id).await?;
+    let (_, _, _, manifest_digest) = store.attempt_input(&run.operation_id).await?;
+    let identity =
+        json!({"runId":run.run_id,"snapshotId":run.snapshot_id,"manifestDigest":manifest_digest});
+    if let AuditEvidenceQuery::Guidance {
+        snapshot,
+        path,
+        offset,
+        max_bytes,
+    } = params.query
+    {
+        anyhow::ensure!(
+            snapshot == run.snapshot_id,
+            "snapshot does not belong to this run"
+        );
+        let snapshot = snapshots.open(&SnapshotId::parse(snapshot)?).await?;
+        anyhow::ensure!(
+            sha256_hex(&snapshot.manifest().to_pretty_bytes()?) == manifest_digest,
+            "snapshot manifest binding mismatch"
+        );
+        // Use the same captured-object reader as reviewer admission. It checks
+        // object type, size and digest again before disclosure, without live paths.
+        let documents = snapshot.context_documents().await?;
+        let records = &snapshot.manifest().identity.context_documents;
+        let Some(path) = path else {
+            anyhow::ensure!(
+                offset == 0 && max_bytes.is_none(),
+                "guidance pagination requires a captured document path"
+            );
+            return Ok(json!({"identity":identity,"documents":records,"total":records.len()}));
+        };
+        let record = records
+            .iter()
+            .find(|record| record.path.as_str() == path)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "guidance document not captured in this audit; list view=guidance without path"
+                )
+            })?;
+        let (_, _, bytes) = documents
+            .iter()
+            .find(|(name, _, _)| name == &path)
+            .ok_or_else(|| anyhow::anyhow!("captured guidance object unavailable"))?;
+        // Public capture accepts UTF-8 strings. Preserve all original bytes,
+        // including CRLF/BOM, and reuse the established lossless text paginator.
+        let mut result = diagnostic_page(
+            &run.run_id,
+            &run.snapshot_id,
+            std::str::from_utf8(bytes)?,
             offset,
             max_bytes,
-        } = params.query
-        {
-            anyhow::ensure!(
-                snapshot == run.snapshot_id,
-                "snapshot does not belong to this run"
-            );
-            anyhow::ensure!(max_bytes != Some(0), "maxBytes must be positive");
-            let snapshot = self.snapshots().open(&SnapshotId::parse(snapshot)?).await?;
-            anyhow::ensure!(
-                sha256_hex(&snapshot.manifest().to_pretty_bytes()?) == manifest_digest,
-                "snapshot manifest binding mismatch"
-            );
-            let path = SnapshotPath::new(path)?;
-            let access = snapshot.access(super::super::snapshot::AccessLimits::default());
-            // Reuse the existing whole-file hash verification, including manifest-only paths.
-            let bytes = access.verified_content(&path).await?;
-            let start = usize::try_from(offset)?;
-            anyhow::ensure!(start <= bytes.len(), "source offset exceeds file size");
-            let end = max_bytes
-                .map(|size| start.saturating_add(size).min(bytes.len()))
-                .unwrap_or(bytes.len());
-            let part = &bytes[start..end];
-            let (encoding, content) = match std::str::from_utf8(part) {
-                Ok(text) => ("utf8", text.to_owned()),
-                Err(_) => (
-                    "base64",
-                    base64::engine::general_purpose::STANDARD.encode(part),
-                ),
-            };
-            let line = |offset: usize| 1 + bytes[..offset].iter().filter(|b| **b == b'\n').count();
-            return Ok(
-                json!({"identity":identity,"path":path,"sha256":sha256_hex(&bytes),
+        )?;
+        result["identity"] = identity;
+        result["document"] = serde_json::to_value(record)?;
+        return Ok(result);
+    }
+    if let AuditEvidenceQuery::Diagnostics { offset, max_bytes } = params.query {
+        // Reuse the published-selection and immutable-artefact checks used by audit/read.
+        // Never regenerate a report or substitute findings for reviewer-level prose.
+        let retained = store.load_run(&params.run_id).await?;
+        let report = retained
+            .report
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("diagnostics are not yet published"))?;
+        let snapshot = snapshots
+            .open(&SnapshotId::parse(run.snapshot_id.clone())?)
+            .await?;
+        anyhow::ensure!(
+            sha256_hex(&snapshot.manifest().to_pretty_bytes()?) == manifest_digest,
+            "snapshot manifest binding mismatch"
+        );
+        let text = String::from_utf8(store.read_report(report)?)?;
+        let mut result = diagnostic_page(&run.run_id, &run.snapshot_id, &text, offset, max_bytes)?;
+        result["identity"] = identity;
+        return Ok(result);
+    }
+    if let AuditEvidenceQuery::Source {
+        snapshot,
+        path,
+        offset,
+        max_bytes,
+    } = params.query
+    {
+        anyhow::ensure!(
+            snapshot == run.snapshot_id,
+            "snapshot does not belong to this run"
+        );
+        anyhow::ensure!(max_bytes != Some(0), "maxBytes must be positive");
+        let snapshot = snapshots.open(&SnapshotId::parse(snapshot)?).await?;
+        anyhow::ensure!(
+            sha256_hex(&snapshot.manifest().to_pretty_bytes()?) == manifest_digest,
+            "snapshot manifest binding mismatch"
+        );
+        let path = SnapshotPath::new(path)?;
+        let access = snapshot.access(super::super::snapshot::AccessLimits::default());
+        // Reuse the existing whole-file hash verification, including manifest-only paths.
+        let bytes = access.verified_content(&path).await?;
+        let start = usize::try_from(offset)?;
+        anyhow::ensure!(start <= bytes.len(), "source offset exceeds file size");
+        let end = max_bytes
+            .map(|size| start.saturating_add(size).min(bytes.len()))
+            .unwrap_or(bytes.len());
+        let part = &bytes[start..end];
+        let (encoding, content) = match std::str::from_utf8(part) {
+            Ok(text) => ("utf8", text.to_owned()),
+            Err(_) => (
+                "base64",
+                base64::engine::general_purpose::STANDARD.encode(part),
+            ),
+        };
+        let line = |offset: usize| 1 + bytes[..offset].iter().filter(|b| **b == b'\n').count();
+        return Ok(
+            json!({"identity":identity,"path":path,"sha256":sha256_hex(&bytes),
                 "offset":start,"endOffset":end,"totalBytes":bytes.len(),"eof":end==bytes.len(),"encoding":encoding,"content":content,
                 "startLine":line(start),"endLine":if end>start {Some(line(end-1))} else {None},"linesVerified":true}),
-            );
-        }
-        // Preserve conversational progress reads while the immutable collection is pending.
-        if matches!(params.query, AuditEvidenceQuery::Reviewers { .. })
-            && !matches!(
-                run.phase,
-                RunPhase::Completed
-                    | RunPhase::CompletedWithFailures
-                    | RunPhase::Failed
-                    | RunPhase::Cancelled
-            )
-        {
-            return Ok(
-                json!({"identity":identity,"phase":phase(run.phase),"findingsAvailable":false,
-                "status":"Audit still in progress; retained findings become available after publication. This read starts no inference."}),
-            );
-        }
-        anyhow::ensure!(
-            matches!(
-                run.phase,
-                RunPhase::Completed
-                    | RunPhase::CompletedWithFailures
-                    | RunPhase::Failed
-                    | RunPhase::Cancelled
-            ),
-            "retained findings are not yet published; use audit_list to check progress"
         );
-        let mut reviewers = Vec::new();
-        if let Some(selection) = store.conversation_selection(&run.run_id).await? {
-            anyhow::ensure!(
-                selection.run_id == run.run_id
-                    && selection.snapshot_id == run.snapshot_id
-                    && selection.manifest_digest == manifest_digest,
-                "retained selection identity mismatch"
-            );
-            for reviewer in selection.reviewers {
-                let findings = reviewer
-                    .completed
-                    .as_ref()
-                    .map(|c| serde_json::to_value(&c.findings))
-                    .transpose()?
-                    .unwrap_or(json!([]));
-                reviewers.push((json!({"reviewerId":reviewer.reviewer_id,"assignmentId":reviewer.assignment_id,
+    }
+    // Preserve conversational progress reads while the immutable collection is pending.
+    if matches!(params.query, AuditEvidenceQuery::Reviewers { .. })
+        && !matches!(
+            run.phase,
+            RunPhase::Completed
+                | RunPhase::CompletedWithFailures
+                | RunPhase::Failed
+                | RunPhase::Cancelled
+        )
+    {
+        return Ok(
+            json!({"identity":identity,"phase":phase(run.phase),"findingsAvailable":false,
+                "status":"Audit still in progress; retained findings become available after publication. This read starts no inference."}),
+        );
+    }
+    anyhow::ensure!(
+        matches!(
+            run.phase,
+            RunPhase::Completed
+                | RunPhase::CompletedWithFailures
+                | RunPhase::Failed
+                | RunPhase::Cancelled
+        ),
+        "retained findings are not yet published; use audit_list to check progress"
+    );
+    let mut reviewers = Vec::new();
+    if let Some(selection) = store.conversation_selection(&run.run_id).await? {
+        anyhow::ensure!(
+            selection.run_id == run.run_id
+                && selection.snapshot_id == run.snapshot_id
+                && selection.manifest_digest == manifest_digest,
+            "retained selection identity mismatch"
+        );
+        for reviewer in selection.reviewers {
+            let findings = reviewer
+                .completed
+                .as_ref()
+                .map(|c| serde_json::to_value(&c.findings))
+                .transpose()?
+                .unwrap_or(json!([]));
+            reviewers.push((json!({"reviewerId":reviewer.reviewer_id,"assignmentId":reviewer.assignment_id,
                     "number":reviewer.reviewer_ordinal+1,"provider":reviewer.provider,"model":reviewer.resolved_model,
                     "requestedModel":reviewer.requested_model,"observedModel":reviewer.observed_model,"modelIdentityVerified":reviewer.observation_verified,
                     "state":reviewer.assignment_state,"disposition":reviewer.disposition,
                     "findingCount":findings.as_array().unwrap().len(),
                     "structuredFindingsAvailable":reviewer.completed.is_some(),
                     "opinionAvailable":reviewer.opinion.is_some()}), findings));
-            }
-        } else {
-            // Older single-review reports predate frozen collection selections.
-            let retained = store.load_run(&run.run_id).await?;
-            reviewers.push((json!({"reviewerId":retained.reviewer_id,"assignmentId":retained.assignment_id,
+        }
+    } else {
+        // Older single-review reports predate frozen collection selections.
+        let retained = store.load_run(&run.run_id).await?;
+        reviewers.push((json!({"reviewerId":retained.reviewer_id,"assignmentId":retained.assignment_id,
                 "number":1,"provider":retained.provider,"model":retained.model,"state":format!("{:?}",retained.assignment_state),
                 "findingCount":retained.findings.len(),"structuredFindingsAvailable":retained.assignment_state == AssignmentState::Succeeded}),serde_json::to_value(retained.findings)?));
-        }
-        match params.query {
-            AuditEvidenceQuery::Reviewers { offset, limit } => page(
-                identity,
-                reviewers.into_iter().map(|(r, _)| r).collect(),
-                offset,
-                limit,
-            ),
-            AuditEvidenceQuery::Findings {
-                reviewer,
-                offset,
-                limit,
-            } => {
-                let selected = match reviewer.as_deref() {
-                    Some(id) => vec![select(&reviewers, id)?],
-                    None => reviewers.iter().collect(),
-                };
-                let items = selected
-                    .iter()
-                    .flat_map(|(attribution, findings)| {
-                        findings.as_array().unwrap().iter().map(move |finding| {
-                            let mut item = finding.clone();
-                            item["number"] = json!(finding["ordinal"].as_i64().unwrap() + 1);
-                            item["reviewerId"] = attribution["reviewerId"].clone();
-                            item["assignmentId"] = attribution["assignmentId"].clone();
-                            item
-                        })
+    }
+    match params.query {
+        AuditEvidenceQuery::Reviewers { offset, limit } => page(
+            identity,
+            reviewers.into_iter().map(|(r, _)| r).collect(),
+            offset,
+            limit,
+        ),
+        AuditEvidenceQuery::Findings {
+            reviewer,
+            offset,
+            limit,
+        } => {
+            let selected = match reviewer.as_deref() {
+                Some(id) => vec![select(&reviewers, id)?],
+                None => reviewers.iter().collect(),
+            };
+            let items = selected
+                .iter()
+                .flat_map(|(attribution, findings)| {
+                    findings.as_array().unwrap().iter().map(move |finding| {
+                        let mut item = finding.clone();
+                        item["number"] = json!(finding["ordinal"].as_i64().unwrap() + 1);
+                        item["reviewerId"] = attribution["reviewerId"].clone();
+                        item["assignmentId"] = attribution["assignmentId"].clone();
+                        item
                     })
-                    .collect();
-                let mut result = page(identity, items, offset, limit)?;
-                if reviewer.is_some() {
-                    result["reviewer"] = selected[0].0.clone();
-                } else {
-                    // Include empty/failed reviewers as well as those contributing findings.
-                    result["reviewers"] =
-                        json!(selected.iter().map(|(r, _)| r).collect::<Vec<_>>());
-                }
-                Ok(result)
+                })
+                .collect();
+            let mut result = page(identity, items, offset, limit)?;
+            if reviewer.is_some() {
+                result["reviewer"] = selected[0].0.clone();
+            } else {
+                // Include empty/failed reviewers as well as those contributing findings.
+                result["reviewers"] = json!(selected.iter().map(|(r, _)| r).collect::<Vec<_>>());
             }
-            AuditEvidenceQuery::Finding {
-                reviewer,
-                number,
-                offset,
-                max_bytes,
-            } => {
-                let (attribution, findings) = select(&reviewers, &reviewer)?;
-                let finding = number
-                    .checked_sub(1)
-                    .and_then(|i| findings.as_array().unwrap().get(i))
-                    .ok_or_else(|| anyhow::anyhow!("finding number is out of range (one based)"))?;
-                let text = serde_json::to_string(finding)?;
-                anyhow::ensure!(
-                    offset <= text.len() && text.is_char_boundary(offset),
-                    "invalid finding continuation offset"
-                );
-                anyhow::ensure!(max_bytes != Some(0), "maxBytes must be positive");
-                let mut end = max_bytes
-                    .map(|size| offset.saturating_add(size).min(text.len()))
-                    .unwrap_or(text.len());
-                while !text.is_char_boundary(end) {
-                    end -= 1;
-                }
-                anyhow::ensure!(
-                    end > offset || offset == text.len(),
-                    "maxBytes does not fit the next UTF-8 character"
-                );
-                Ok(
-                    json!({"identity":identity,"reviewer":attribution,"number":number,"findingId":finding["id"],
+            Ok(result)
+        }
+        AuditEvidenceQuery::Finding {
+            reviewer,
+            number,
+            offset,
+            max_bytes,
+        } => {
+            let (attribution, findings) = select(&reviewers, &reviewer)?;
+            let finding = number
+                .checked_sub(1)
+                .and_then(|i| findings.as_array().unwrap().get(i))
+                .ok_or_else(|| anyhow::anyhow!("finding number is out of range (one based)"))?;
+            let text = serde_json::to_string(finding)?;
+            anyhow::ensure!(
+                offset <= text.len() && text.is_char_boundary(offset),
+                "invalid finding continuation offset"
+            );
+            anyhow::ensure!(max_bytes != Some(0), "maxBytes must be positive");
+            let mut end = max_bytes
+                .map(|size| offset.saturating_add(size).min(text.len()))
+                .unwrap_or(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            anyhow::ensure!(
+                end > offset || offset == text.len(),
+                "maxBytes does not fit the next UTF-8 character"
+            );
+            Ok(
+                json!({"identity":identity,"reviewer":attribution,"number":number,"findingId":finding["id"],
                     "finding":if offset==0 && end==text.len() {Some(finding)} else {None},
                     "encoding":"json-utf8","content":&text[offset..end],"offset":offset,"nextOffset":if end<text.len() {Some(end)} else {None},
                     "totalBytes":text.len(),"eof":end==text.len()}),
-                )
-            }
-            AuditEvidenceQuery::Source { .. } => unreachable!(),
+            )
+        }
+        AuditEvidenceQuery::Source { .. }
+        | AuditEvidenceQuery::Diagnostics { .. }
+        | AuditEvidenceQuery::Guidance { .. } => {
+            unreachable!()
         }
     }
+}
+
+// Moved from the TUI diagnostics route so both tool boundaries use identical,
+// lossless UTF-8 continuation semantics. Existing top-level identity fields remain.
+fn diagnostic_page(
+    run_id: &str,
+    snapshot_id: &str,
+    report: &str,
+    offset: usize,
+    max_bytes: Option<usize>,
+) -> anyhow::Result<Value> {
+    anyhow::ensure!(
+        offset <= report.len() && report.is_char_boundary(offset) && max_bytes != Some(0),
+        "invalid diagnostics byte range"
+    );
+    let mut end = max_bytes
+        .map(|size| offset.saturating_add(size).min(report.len()))
+        .unwrap_or(report.len());
+    while !report.is_char_boundary(end) {
+        end -= 1;
+    }
+    anyhow::ensure!(
+        end > offset || offset == report.len(),
+        "maxBytes does not fit the next UTF-8 character"
+    );
+    Ok(
+        json!({"runId":run_id,"snapshotId":snapshot_id,"encoding":"utf8","content":&report[offset..end],
+        "offset":offset,"nextOffset":if end < report.len() {Some(end)} else {None},"totalBytes":report.len(),"eof":end==report.len()}),
+    )
 }
 
 fn select<'a>(reviewers: &'a [(Value, Value)], id: &str) -> anyhow::Result<&'a (Value, Value)> {
@@ -212,6 +325,34 @@ fn page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostics_are_lossless_continuable_utf8() {
+        let report = "long receipt é 漢\n".repeat(600);
+        let mut offset = 0;
+        let mut restored = String::new();
+        loop {
+            let page = diagnostic_page("r", "s", &report, offset, Some(131)).unwrap();
+            restored.push_str(page["content"].as_str().unwrap());
+            if page["eof"] == true {
+                break;
+            }
+            offset = page["nextOffset"].as_u64().unwrap() as usize;
+        }
+        assert_eq!(restored, report);
+        assert_eq!(
+            diagnostic_page("r", "s", &report, 0, None).unwrap()["content"],
+            report
+        );
+        assert!(diagnostic_page("r", "s", "é", 1, None).is_err());
+        assert!(diagnostic_page("r", "s", "é", 0, Some(1)).is_err());
+        assert!(diagnostic_page("r", "s", "é", 0, Some(0)).is_err());
+        assert!(diagnostic_page("r", "s", "é", 3, None).is_err());
+        assert_eq!(
+            diagnostic_page("r", "s", "é", 2, None).unwrap()["eof"],
+            true
+        );
+    }
 
     #[test]
     fn caller_controls_paging_without_a_content_size_ceiling() {

@@ -13,7 +13,12 @@ if sys.argv[1:] == ["--version"]:
 args = sys.argv[1:]
 model = args[args.index("--model") + 1]
 assert args[args.index("--tools") + 1] == ""
-assert json.loads(Path(args[args.index("--mcp-config") + 1]).read_text()) == {"mcpServers": {}}
+mcp = json.loads(Path(args[args.index("--mcp-config") + 1]).read_text())
+evidence_enabled = bool(mcp["mcpServers"])
+tool_names = ["mcp__audex_source__" + name for name in ["list", "read", "search", "evidence"]] if evidence_enabled else []
+assert set(mcp["mcpServers"]) == ({"audex_source"} if evidence_enabled else set())
+if evidence_enabled:
+    assert args[args.index("--allowedTools") + 1].split(",") == tool_names
 assert args[args.index("--permission-mode") + 1] == "dontAsk"
 assert "--no-session-persistence" in args and "--disable-slash-commands" in args
 assert "--effort" not in args and "--fallback-model" not in args
@@ -50,10 +55,13 @@ session = "fixture-session"
 def emit(kind, **fields):
     print(json.dumps({"type":kind,"session_id":session,"uuid":kind,**fields}), flush=True)
 served = "claude-wrong-model" if mode == "wrong_model" else model
-emit("system", subtype="init", model=served, tools=["Bash"] if mode == "tools" else [], mcp_servers=[], permissionMode="dontAsk", apiKeySource="none")
+emit("system", subtype="init", model=served, tools=["Bash"] if mode == "tools" else tool_names, mcp_servers=[{"name":"audex_source","status":"connected","source":"dynamic"}] if evidence_enabled else [], permissionMode="dontAsk", apiKeySource="none")
 if mode == "rate_limit":
     emit("rate_limit_event", rate_limit_info={"status":"allowed"})
 text = "Claude fixture answer: " + prompt["operator_message"]
+if evidence_enabled:
+    exec((root / "evidence_fixture.py").read_text())
+    text += exercise_evidence()
 emit("stream_event", event={"type":"message_start","message":{"id":"answer","model":served,"content":[]}})
 if mode in ["text_blocks", "text_mismatch"]:
     # Official client sequence retained in cycle-6-3/pinned-stream-probe.json:

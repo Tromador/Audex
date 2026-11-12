@@ -1,6 +1,6 @@
 //! Process-owned workflow. Codex execution uses the same durable boundary as deterministic tests.
 mod attempts;
-mod evidence;
+pub(super) mod evidence;
 mod preflight;
 use super::reviewer;
 use super::snapshot::manifest::sha256_hex;

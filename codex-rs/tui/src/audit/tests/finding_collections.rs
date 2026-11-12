@@ -5,6 +5,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[path = "../../../../cli/tests/app_server_daemon/support.rs"]
 mod daemon_support;
 
+#[path = "../../../../cli/tests/audit/subscription_fixture.rs"]
+mod claude_fixture;
+
+const LUNA_SUMMARY: &str = "The captured AGENTS.md middle convention M2 matters: it says revision identifiers may be reused and every replace must invalidate the cached first item, so equal revisions do not establish equal contents. The implementation conditionally invalidates only when revisions differ, allowing a stale first item after a same-revision replacement.";
+
 #[test]
 fn managed_conversation_compares_complete_run_findings_without_individual_reads()
 -> anyhow::Result<()> {
@@ -62,6 +67,25 @@ async fn exercise(per_reviewer: bool, automatic: bool) -> anyhow::Result<()> {
     let provider = responses::start_mock_server().await;
     let daemon = daemon_support::TestDaemon::new()?;
     let home = daemon.home.path();
+    let claude_root = if automatic {
+        let root = claude_fixture::configure(home, "plain")?;
+        std::fs::write(
+            root.join("client"),
+            include_str!("../../../../app-server/tests/suite/v2/claude_fixture.py"),
+        )?;
+        std::fs::write(
+            root.join("evidence_fixture.py"),
+            include_str!("../../../../app-server/tests/suite/v2/claude_evidence_fixture.py"),
+        )?;
+        std::fs::write(root.join("mode"), "diagnostics_only")?;
+        let backend = home.join("audex/reviewer-backends.json");
+        let mut settings: Value = serde_json::from_slice(&std::fs::read(&backend)?)?;
+        settings["claudeSubscription"]["clientVersion"] = json!("2.1.319");
+        std::fs::write(backend, serde_json::to_vec(&settings)?)?;
+        Some(root)
+    } else {
+        None
+    };
     app_test_support::MockResponsesConfig::new(&provider.uri())
         .with_model("audit-test")
         .disable_feature(Feature::Plugins)
@@ -93,7 +117,7 @@ async fn exercise(per_reviewer: bool, automatic: bool) -> anyhow::Result<()> {
                 .find(|v| v.get("assignment_id").is_some()).unwrap();
             let events = if input.iter().any(|i| i["type"] == "function_call_output") {
                 let result = json!({"schema_version":1,"snapshot_id":assignment["snapshot_id"],"assignment_id":assignment["assignment_id"],
-                    "summary":"Independent fixture claims","findings":claims(body["model"].as_str().unwrap())});
+                    "summary":if body["model"] == "fixture-luna" { LUNA_SUMMARY } else { "Independent fixture claims" },"findings":claims(body["model"].as_str().unwrap())});
                 vec![responses::ev_assistant_message("result", &result.to_string()), responses::ev_completed("review-final")]
             } else {
                 vec![responses::ev_function_call_with_namespace("source-read", "audex_source", "read",
@@ -104,6 +128,10 @@ async fn exercise(per_reviewer: bool, automatic: bool) -> anyhow::Result<()> {
         }).mount(&provider).await;
     let reference = Arc::new(std::sync::Mutex::new(Value::Null));
     let model_reference = reference.clone();
+    let diagnostics = Arc::new(std::sync::Mutex::new(Value::Null));
+    let captured_diagnostics = diagnostics.clone();
+    let diagnostic_calls = Arc::new(AtomicUsize::new(0));
+    let requested_diagnostics = diagnostic_calls.clone();
     let operator_calls = Arc::new(AtomicUsize::new(0));
     let observed = operator_calls.clone();
     Mock::given(|r: &wiremock::Request| {
@@ -144,6 +172,33 @@ async fn exercise(per_reviewer: bool, automatic: bool) -> anyhow::Result<()> {
                 }
                 assert_eq!(found,3,"all complete claims before any individual finding request");
                 Some(("frozen-source".to_owned(),"audit_source",json!({"runId":run["runId"],"snapshot":run["snapshotId"],"path":"example.rs"})))
+            } else if automatic && index == collection_calls+1 {
+                // Preserve the normal model-output budget: retrieve every byte via
+                // the tool's existing caller-selected continuation mechanism.
+                requested_diagnostics.fetch_add(1, Ordering::SeqCst);
+                Some(("diagnostics-0".to_owned(),"audit_read",json!({"runId":run["runId"],"view":"diagnostics","maxBytes":1024})))
+            } else if automatic {
+                let page_number = index - collection_calls - 2;
+                let value = output(&body, &format!("diagnostics-{page_number}"));
+                assert_eq!(value["identity"]["runId"], run["runId"]);
+                assert_eq!(value["identity"]["snapshotId"], run["snapshotId"]);
+                let mut combined = captured_diagnostics.lock().unwrap();
+                if combined.is_null() {
+                    *combined = value.clone();
+                } else {
+                    assert_eq!(value["offset"], combined["nextOffset"]);
+                    combined["content"] = json!(format!("{}{}", combined["content"].as_str().unwrap(), value["content"].as_str().unwrap()));
+                    combined["nextOffset"] = value["nextOffset"].clone();
+                    combined["eof"] = value["eof"].clone();
+                }
+                if value["eof"] == true {
+                    assert!(combined["content"].as_str().unwrap().contains(LUNA_SUMMARY));
+                    assert_eq!(output(&body,"frozen-source")["content"],"fn main() {}\n");
+                    None
+                } else {
+                    requested_diagnostics.fetch_add(1, Ordering::SeqCst);
+                    Some((format!("diagnostics-{}",page_number+1),"audit_read",json!({"runId":run["runId"],"view":"diagnostics","offset":value["nextOffset"],"maxBytes":1024})))
+                }
             } else {
                 assert_eq!(index, collection_calls+1);
                 assert_eq!(output(&body,"frozen-source")["content"],"fn main() {}\n");
@@ -278,7 +333,11 @@ async fn exercise(per_reviewer: bool, automatic: bool) -> anyhow::Result<()> {
         }
     })
     .await?;
-    assert_eq!(reads, if per_reviewer { 3 } else { 1 });
+    assert_eq!(
+        reads,
+        (if per_reviewer { 3 } else { 1 }) + diagnostic_calls.load(Ordering::SeqCst)
+    );
+    assert_eq!(diagnostic_calls.load(Ordering::SeqCst) > 1, automatic);
     assert_eq!(sources, 1);
     assert_eq!(operator_calls.load(Ordering::SeqCst), reads + 2);
     assert_eq!(
@@ -310,6 +369,48 @@ async fn exercise(per_reviewer: bool, automatic: bool) -> anyhow::Result<()> {
             Some(AppEvent::AuditDiagnostics { .. })
         ));
         assert_eq!(reviewer_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(full, *diagnostics.lock().unwrap());
+        let root = claude_root.as_ref().unwrap();
+        std::fs::write(
+            root.join("expected-diagnostics.json"),
+            serde_json::to_vec(&full)?,
+        )?;
+        session
+            .thread_claude(
+                thread,
+                "Retrieve the complete retained reviewer summaries and diagnostics.".into(),
+                Some("claude-haiku-5-5".into()),
+                Some(retained.run_id.clone()),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while let Some(event) = session.next_event().await {
+                if let AppServerEvent::ServerNotification(notification) = event.event {
+                    if let ServerNotification::TurnCompleted(done) = notification.as_ref() {
+                        if done.thread_id == thread.to_string() {
+                            assert_eq!(
+                                done.turn.status,
+                                codex_app_server_protocol::TurnStatus::Completed,
+                                "{:?}",
+                                done.turn.error
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+            panic!("Claude turn did not complete");
+        })
+        .await?;
+        let claude: Value =
+            serde_json::from_slice(&std::fs::read(root.join("diagnostics-parity.json"))?)?;
+        assert_eq!(
+            claude, full,
+            "actual Codex dynamic tool and Claude MCP outputs match"
+        );
+        assert_eq!(reviewer_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(operator_calls.load(Ordering::SeqCst), reads + 2);
     }
     assert_eq!(
         audits.read(retained.run_id).await?.revision,

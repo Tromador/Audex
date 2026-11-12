@@ -464,6 +464,25 @@ pub enum AuditEvidenceQuery {
         #[serde(rename = "maxBytes")]
         max_bytes: Option<usize>,
     },
+    #[schemars(title = "DiagnosticsAuditEvidenceQuery")]
+    Diagnostics {
+        #[serde(default)]
+        offset: usize,
+        /// Optional UTF-8 byte page of the complete immutable report.
+        #[serde(rename = "maxBytes")]
+        max_bytes: Option<usize>,
+    },
+    #[schemars(title = "GuidanceAuditEvidenceQuery")]
+    Guidance {
+        snapshot: String,
+        /// Omit to list captured documents; otherwise use a listed logical path.
+        path: Option<String>,
+        #[serde(default)]
+        offset: usize,
+        /// Optional lossless UTF-8 byte page of the original captured document.
+        #[serde(rename = "maxBytes")]
+        max_bytes: Option<usize>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

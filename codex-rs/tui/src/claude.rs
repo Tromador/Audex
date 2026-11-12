@@ -1,31 +1,53 @@
-//! Parse only the leading model selection; the message remains literal conversation text.
-pub(crate) const USAGE: &str = "Usage: /claude [--model MODEL] <message> (default: configured Claude model, initially claude-haiku-5-5)";
+//! Parse leading route options only; the message remains literal conversation text.
+pub(crate) const USAGE: &str = "Usage: /claude [--model MODEL] [--audit RUN_ID] <message> (default model: configured Claude model, initially claude-haiku-5-5; audit selection continues in this thread)";
 
-pub(crate) fn parse(args: &str) -> Result<(Option<String>, String), String> {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Request {
+    pub model: Option<String>,
+    pub audit: Option<String>,
+    pub message: String,
+}
+
+pub(crate) fn parse(args: &str) -> Result<Request, String> {
     let mut message = args.trim();
     let mut model = None;
-    if let Some(rest) = message.strip_prefix("--model=") {
-        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-        model = Some(rest[..end].to_owned());
-        message = rest[end..].trim_start();
-    } else if message == "--model"
-        || message
-            .strip_prefix("--model")
-            .is_some_and(|s| s.starts_with(char::is_whitespace))
-    {
-        let rest = message[7..].trim_start();
-        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-        model = Some(rest[..end].to_owned());
-        message = rest[end..].trim_start();
+    let mut audit = None;
+    loop {
+        let end = message.find(char::is_whitespace).unwrap_or(message.len());
+        let token = &message[..end];
+        let (flag, inline) = token
+            .split_once('=')
+            .map_or((token, None), |(k, v)| (k, Some(v)));
+        let target = match flag {
+            "--model" => &mut model,
+            "--audit" => &mut audit,
+            _ => break,
+        };
+        if target.is_some() {
+            return Err(USAGE.into());
+        }
+        message = message[end..].trim_start();
+        let value = if let Some(value) = inline {
+            value
+        } else {
+            let end = message.find(char::is_whitespace).unwrap_or(message.len());
+            let value = &message[..end];
+            message = message[end..].trim_start();
+            value
+        };
+        if value.is_empty() || value.starts_with('-') {
+            return Err(USAGE.into());
+        }
+        *target = Some(value.to_owned());
     }
-    if message.is_empty()
-        || model
-            .as_ref()
-            .is_some_and(|m| m.is_empty() || m.starts_with('-'))
-    {
+    if message.is_empty() {
         return Err(USAGE.into());
     }
-    Ok((model, message.to_owned()))
+    Ok(Request {
+        model,
+        audit,
+        message: message.to_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -33,23 +55,39 @@ mod tests {
     use super::*;
     #[test]
     fn retains_literal_message_and_model() {
-        assert_eq!(
-            parse("Isn't Codex's answer wrong?\n  Check `x`.").unwrap(),
-            (None, "Isn't Codex's answer wrong?\n  Check `x`.".into())
-        );
-        assert_eq!(
-            parse("--model claude-sonnet-5-5 a  b\n--flag 'x'").unwrap(),
-            (Some("claude-sonnet-5-5".into()), "a  b\n--flag 'x'".into())
-        );
-        assert_eq!(
-            parse("--model=claude-haiku-5-5 hello")
-                .unwrap()
-                .0
-                .as_deref(),
-            Some("claude-haiku-5-5")
-        );
-        for args in ["", "--model", "--model x", "--model= hello"] {
-            assert!(parse(args).is_err());
+        let r = parse("Isn't Codex's answer wrong?\n  Check `x`.").unwrap();
+        assert_eq!(r.message, "Isn't Codex's answer wrong?\n  Check `x`.");
+        assert_eq!(r.model, None);
+        assert_eq!(r.audit, None);
+        let r = parse("--model claude-sonnet-5-5 a  b\n--flag 'x'").unwrap();
+        assert_eq!(r.model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(r.message, "a  b\n--flag 'x'");
+        for args in [
+            "",
+            "--model",
+            "--model x",
+            "--model= hello",
+            "--audit",
+            "--audit= x",
+            "--audit a --audit b x",
+        ] {
+            assert!(parse(args).is_err(), "{args}");
+        }
+    }
+    #[test]
+    fn explicit_audit_and_model_options_in_either_order() {
+        for args in [
+            "--audit run-a --model=claude-sonnet-5-5 check --audit literal",
+            "--model claude-sonnet-5-5 --audit=run-a check --audit literal",
+        ] {
+            assert_eq!(
+                parse(args).unwrap(),
+                Request {
+                    model: Some("claude-sonnet-5-5".into()),
+                    audit: Some("run-a".into()),
+                    message: "check --audit literal".into()
+                }
+            );
         }
     }
 }

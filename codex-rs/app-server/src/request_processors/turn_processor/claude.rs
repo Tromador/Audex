@@ -1,5 +1,6 @@
 //! Explicit subscription conversation admission. Never enters audit execution.
 use super::*;
+use crate::audex::conversation_evidence::{ConversationEvidence, EvidenceIdentity};
 use codex_app_server_protocol::{ThreadClaudeParams, ThreadClaudeResponse, ThreadItemPayload};
 use codex_protocol::protocol::ExternalConversationExecution;
 use codex_protocol::turn_input::TurnInputSubmission;
@@ -22,7 +23,9 @@ impl TurnRequestProcessor {
         {
             use crate::audex::external::conversation;
             if params.message.trim().is_empty() {
-                return Err(invalid_request("Usage: /claude [--model MODEL] <message>"));
+                return Err(invalid_request(
+                    "Usage: /claude [--model MODEL] [--audit RUN_ID] <message>",
+                ));
             }
             let (thread_id, thread) = self.load_thread(&params.thread_id).await?;
             self.ensure_direct_input_allowed(request_id, thread.as_ref())
@@ -35,9 +38,25 @@ impl TurnRequestProcessor {
             let root = self.config.codex_home.join("audex");
             let model = conversation::selected_model(&root, params.model)
                 .map_err(|e| invalid_request(e.to_string()))?;
+            let evidence = if let Some(run) = params.audit.as_deref() {
+                let opened = ConversationEvidence::open(&root, run)
+                    .await
+                    .map_err(|e| invalid_request(format!("Retained audit: {e}")))?;
+                Some(opened.identity)
+            } else {
+                None
+            };
             // As with turn/start, thread start/resume owns the subscription.
             // Rejected input must not subscribe another connection as a side effect.
-            let display = format!("/claude --model {model} {}", params.message);
+            let display = match &evidence {
+                Some(identity) => format!(
+                    "/claude --model {model} --audit {} {}\n[Audex evidence identity: {}]",
+                    identity.run_id,
+                    params.message,
+                    serde_json::to_string(identity).expect("identity JSON")
+                ),
+                None => format!("/claude --model {model} {}", params.message),
+            };
             let request =
                 TurnInputRequest::user_input(vec![codex_protocol::user_input::UserInput::Text {
                     text: display,
@@ -72,7 +91,9 @@ impl TurnRequestProcessor {
                     started
                         .await
                         .map_err(|_| anyhow::anyhow!("Claude turn stopped before submission"))?;
-                    let turns = if thread.config_snapshot().await.history_mode
+                    // Preserve M3's post-start hydration: new threads have no durable
+                    // history until Core starts their first turn.
+                    let mut turns = if thread.config_snapshot().await.history_mode
                         == codex_protocol::protocol::ThreadHistoryMode::Paginated
                     {
                         history_reader
@@ -83,8 +104,31 @@ impl TurnRequestProcessor {
                         let history = thread.load_history(true).await?;
                         build_legacy_api_turns_from_rollout_items(&history.items)
                     };
+                    turns.retain(|turn| turn.id != execution_turn);
+                    let evidence = match evidence {
+                        Some(identity) => Some(identity),
+                        None => match inherited_evidence(&turns) {
+                            Some(identity) => {
+                                let opened =
+                                    ConversationEvidence::open(&root, &identity.run_id).await?;
+                                anyhow::ensure!(
+                                    opened.identity == identity,
+                                    "Retained audit identity changed; select the audit explicitly"
+                                );
+                                Some(identity)
+                            }
+                            None => None,
+                        },
+                    };
                     let discussion = visible_discussion(turns, &execution_turn);
-                    conversation::run(&root, &execution_model, discussion, &params.message).await
+                    conversation::run(
+                        &root,
+                        &execution_model,
+                        discussion,
+                        &params.message,
+                        evidence,
+                    )
+                    .await
                 };
                 tokio::select! {
                     biased;
@@ -95,6 +139,34 @@ impl TurnRequestProcessor {
             Ok(Some(ThreadClaudeResponse { turn_id, model }.into()))
         }
     }
+}
+
+// Selection lives in the existing operator turn, including its immutable identity.
+// Assistant claims, tool output and ordinary discussion cannot change it.
+fn inherited_evidence(turns: &[codex_app_server_protocol::Turn]) -> Option<EvidenceIdentity> {
+    turns
+        .iter()
+        .rev()
+        .flat_map(|turn| turn.items.iter().rev())
+        .find_map(|item| {
+            let ThreadItemPayload::UserMessage { content, .. } = &item.payload else {
+                return None;
+            };
+            content.iter().find_map(|input| {
+                let V2UserInput::Text { text, .. } = input else {
+                    return None;
+                };
+                if !text.starts_with("/claude --model ") {
+                    return None;
+                }
+                let identity = text
+                    .lines()
+                    .last()?
+                    .strip_prefix("[Audex evidence identity: ")?
+                    .strip_suffix(']')?;
+                serde_json::from_str(identity).ok()
+            })
+        })
 }
 
 fn visible_discussion(
@@ -136,6 +208,26 @@ fn visible_discussion(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn selection_comes_only_from_operator_route_identity() {
+        let identity = EvidenceIdentity {
+            run_id: "run-a".into(),
+            snapshot_id: "snapshot-a".into(),
+            manifest_digest: "digest-a".into(),
+        };
+        let text = format!(
+            "/claude --model m --audit run-a question\n[Audex evidence identity: {}]",
+            serde_json::to_string(&identity).unwrap()
+        );
+        let assistant = serde_json::from_value(json!({"id":"a","status":"completed","items":[
+            {"type":"agentMessage","id":"a","text":text}]}))
+        .unwrap();
+        assert_eq!(inherited_evidence(&[assistant]), None);
+        let user = serde_json::from_value(json!({"id":"u","status":"completed","items":[
+            {"type":"userMessage","id":"u","content":[{"type":"text","text":text,"text_elements":[]}]}]})).unwrap();
+        assert_eq!(inherited_evidence(&[user]), Some(identity));
+    }
 
     #[test]
     fn visible_discussion_preserves_long_dialogue_and_excludes_internal_items() {

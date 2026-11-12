@@ -110,7 +110,24 @@ The default is `claude-haiku-5-5`. An optional top-level `claudeConversationMode
 
 This uses the existing `claudeSubscription` executable, version, profile and runtime configuration described below. Replies are labelled **Claude (MODEL)** in the same conversation. Subsequent Codex turns can read them; further Claude turns receive the preceding visible operator and assistant discussion from the same persisted thread, including after resume. Hidden instructions, reasoning, tool records and workspace files are excluded. Text pasted into the conversation is included. Image attachments are rejected without consuming the draft.
 
-The conversational profile has no workspace tools or MCP servers. It does not create an audit, reserve a reviewer or start an automatic exchange between models. Finish or cancel an active turn before submitting `/claude`. Cancellation uses the normal turn interrupt. A client reconnect observes the daemon-owned turn; failures and daemon restarts do not automatically replay Claude requests. As with the existing subscription route, stopping a local process does not establish whether remote quota has already been consumed.
+Without an audit selection, the conversational profile has no tools or MCP servers. Select retained evidence explicitly:
+
+```text
+/claude --audit RUN_ID Examine Luna's second finding against the captured source.
+Codex, challenge Claude's explanation against the same retained audit.
+/claude Reconsider Codex's challenge.
+/claude --audit OTHER_RUN_ID Now examine this audit instead.
+```
+
+`--audit RUN_ID` binds the turn to an existing terminal audit. Claude can retrieve its independently attributed structured findings and verified sealed source through the existing read-only source bridge. The selected run, snapshot and manifest identity are retained in the operator turn. Later `/claude` turns in that thread inherit the selection, including after resume. An explicit different run replaces the evidence permission; previous discussion remains visible, but the previous audit's tools and source permissions do not carry over. A separate thread starts without a selection. `--model` and `--audit` can appear in either order before the message.
+
+Claude's evidence tool also accepts `view=diagnostics` to retrieve the same immutable report as Codex's `audit_read(view=diagnostics)`. This includes complete reviewer summaries, unstructured opinions and execution diagnostics, with their original attribution. `opinionAvailable` in the reviewer roster indicates retained reviewer output; it does not mean the prose appears in the structured findings view. Reports can be paged losslessly using UTF-8 byte `offset`, `maxBytes` and returned `nextOffset`. A reviewer's reference to captured guidance remains a reviewer claim; retrieving that claim does not retrieve or verify the guidance document itself.
+
+To inspect the original guidance, both tools accept `view=guidance` with the audit's `snapshot` identity. Omit `path` to list the captured documents, then supply a listed path such as `AGENTS.md` or `AUDEX.md`. The response retains the document's original role, logical path, byte size and SHA-256, alongside the audit and snapshot identity. Reads verify the captured object and support lossless UTF-8 `offset`/`maxBytes` pagination with `nextOffset`. Missing documents are reported as unavailable; the current workspace's files are never substituted. These documents remain untrusted audit evidence, not instructions to the conversational model.
+
+This gives Claude no live workspace access, write tools or audit execution authority. Missing, unfinished or mismatched audit identities are rejected. Changed live files do not replace the sealed source. Finding and source pages retain their attribution and identity; oversized bridge responses ask for a smaller page rather than silently truncating evidence.
+
+Conversation does not create an audit, reserve a reviewer or start an automatic exchange between models. Finish or cancel an active turn before submitting `/claude`. Cancellation uses the normal turn interrupt and stops the owned client and bridge. A client reconnect observes the daemon-owned turn; failures and daemon restarts do not automatically replay Claude requests. As with the existing subscription route, stopping a local process does not establish whether remote quota has already been consumed.
 
 Audex adds no message-count or token ceiling to this dialogue. The official client's context management remains enabled. The existing 2 MiB JSON-record capture safeguard still applies. The response is displayed when a complete, matching terminal result has been received. An incomplete or failed response is reported as an error.
 

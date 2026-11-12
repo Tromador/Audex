@@ -549,25 +549,5 @@ fn explicit_diagnostics_are_lossless_continuable_and_do_not_create_a_new_audit()
         )
         .is_err()
     );
-    let view: AuditRunView = serde_json::from_value(json!({"runId":"r","snapshotId":"s","assignmentId":"a","phase":"completed",
-        "operationState":"committed","observationPending":false,"capacityReleased":false,"revision":1,"cancellationRequested":false,
-        "outcome":null,"rawResult":null,"report":"diagnostics"})).unwrap();
-    let report = "long receipt é 漢\n".repeat(600);
-    let mut offset = 0;
-    let mut restored = String::new();
-    loop {
-        let page = diagnostic_page(&view, &report, offset, Some(131)).unwrap();
-        restored.push_str(page["content"].as_str().unwrap());
-        if page["eof"] == true {
-            break;
-        }
-        offset = page["nextOffset"].as_u64().unwrap() as usize;
-    }
-    assert_eq!(restored, report);
-    assert_eq!(
-        diagnostic_page(&view, &report, 0, None).unwrap()["content"],
-        report
-    );
-    assert!(diagnostic_page(&view, "é", 1, None).is_err());
-    assert!(diagnostic_page(&view, "é", 0, Some(1)).is_err());
+    // UTF-8 continuation assertions now live beside the shared app-server paginator.
 }

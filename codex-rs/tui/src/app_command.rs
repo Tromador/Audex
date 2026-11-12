@@ -124,6 +124,7 @@ pub(crate) enum AppCommand {
         text: RealtimeSpeechText,
     },
     ClaudeTurn {
+        audit: Option<String>,
         message: String,
         model: Option<String>,
     },

@@ -920,9 +920,13 @@ impl App {
                 self.chat_widget.accept_realtime_speech(*delivery_id);
                 Ok(true)
             }
-            AppCommand::ClaudeTurn { message, model } => {
+            AppCommand::ClaudeTurn {
+                message,
+                model,
+                audit,
+            } => {
                 app_server
-                    .thread_claude(thread_id, message.clone(), model.clone())
+                    .thread_claude(thread_id, message.clone(), model.clone(), audit.clone())
                     .await?;
                 Ok(true)
             }

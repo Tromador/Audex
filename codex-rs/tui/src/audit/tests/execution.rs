@@ -27,6 +27,10 @@ mod source_access;
 #[path = "finding_collections.rs"]
 mod finding_collections;
 
+#[cfg(unix)]
+#[path = "captured_guidance.rs"]
+mod captured_guidance;
+
 pub(super) struct Home(tempfile::TempDir);
 impl Home {
     fn new() -> Result<Self> {

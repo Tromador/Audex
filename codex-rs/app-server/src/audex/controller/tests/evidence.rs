@@ -1,5 +1,255 @@
 use super::*;
 
+#[path = "guidance.rs"]
+mod guidance;
+
+#[tokio::test]
+async fn retained_diagnostics_preserve_summaries_opinions_paging_and_integrity()
+-> anyhow::Result<()> {
+    use crate::audex::conversation_evidence::ConversationEvidence;
+    const LUNA: &str = "The captured AGENTS.md middle convention M2 matters: it says revision identifiers may be reused and every replace must invalidate the cached first item, so equal revisions do not establish equal contents. The implementation conditionally invalidates only when revisions differ, allowing a stale first item after a same-revision replacement.";
+    let temp = tempfile::tempdir()?;
+    let (controller, fake, _) = fixture(&temp).await;
+    let id = foundations::roster(&controller, "retained-diagnostics", 2).await?;
+    assert!(
+        read(&controller, &id, json!({"view":"diagnostics"}))
+            .await
+            .is_err()
+    );
+    let store = controller.store().await?;
+    let opinion = format!(
+        "Independent unstructured opinion: {} END_OPINION",
+        "é漢🙂".repeat(60_000)
+    );
+    for _ in 0..4 {
+        controller.tick().await?;
+        for attempt in store.attempts(&id).await? {
+            if attempt.assignment_state != AssignmentState::Running {
+                continue;
+            }
+            attest_fake_completion(store, &attempt).await?;
+            let bytes = if attempt.reviewer_ordinal == 0 {
+                let mut result: Value = serde_json::from_slice(&empty_result(&attempt))?;
+                result["summary"] = json!(LUNA);
+                serde_json::to_vec(&result)?
+            } else {
+                opinion.as_bytes().to_vec()
+            };
+            fake.replace(&attempt.operation_id, WorkState::Completed(bytes));
+        }
+        controller.tick().await?;
+    }
+    controller.tick().await?;
+    let retained = store.load_run(&id).await?;
+    let report = retained.report.as_ref().unwrap();
+    let original = store.read_report(report)?;
+    let text = std::str::from_utf8(&original)?;
+    assert!(text.contains(LUNA) && text.contains(&opinion));
+    let bridge = ConversationEvidence::open(controller.root.as_path(), &id).await?;
+    let starts = fake.starts.load(Ordering::SeqCst);
+    let full = read(&controller, &id, json!({"view":"diagnostics"})).await?;
+    assert_eq!(full["content"], text);
+    assert_eq!(full["runId"], full["identity"]["runId"]);
+    assert_eq!(full["snapshotId"], full["identity"]["snapshotId"]);
+    // The existing MCP encoded-output bound is explicit; callers can page, never truncate.
+    assert!(
+        bridge
+            .execute("evidence", r#"{"view":"diagnostics"}"#)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("500000")
+    );
+    let mut offset = 0;
+    let mut restored = String::new();
+    loop {
+        let query = json!({"view":"diagnostics","offset":offset,"maxBytes":65537});
+        let claude = bridge.execute("evidence", &query.to_string()).await?;
+        assert_eq!(claude, read(&controller, &id, query).await?);
+        restored.push_str(claude["content"].as_str().unwrap());
+        if claude["eof"] == true {
+            break;
+        }
+        offset = claude["nextOffset"].as_u64().unwrap();
+    }
+    assert_eq!(restored.as_bytes(), original);
+    let roster = read(&controller, &id, json!({"view":"reviewers"})).await?;
+    for reviewer in roster["items"].as_array().unwrap() {
+        assert!(restored.contains(reviewer["reviewerId"].as_str().unwrap()));
+        assert!(restored.contains(reviewer["assignmentId"].as_str().unwrap()));
+    }
+    assert_eq!(roster["items"][1]["structuredFindingsAvailable"], false);
+    assert_eq!(roster["items"][1]["opinionAvailable"], true);
+    for query in [
+        json!({"view":"diagnostics","runId":"other"}),
+        json!({"view":"diagnostics","snapshot":"other"}),
+        json!({"view":"diagnostics","reviewer":"other"}),
+        json!({"view":"diagnostics","path":"/etc/passwd"}),
+    ] {
+        assert!(
+            bridge
+                .execute("evidence", &query.to_string())
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(store.read_report(report)?, original);
+    assert_eq!(
+        store.load_run_metadata(&id).await?.revision,
+        retained.revision
+    );
+    assert_eq!(fake.starts.load(Ordering::SeqCst), starts);
+    let path = controller.root.join(&report.relative_path);
+    let mut permissions = std::fs::metadata(&path)?.permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&path, permissions)?;
+    std::fs::write(path, "tampered report")?;
+    assert!(
+        read(&controller, &id, json!({"view":"diagnostics"}))
+            .await
+            .is_err()
+    );
+    assert!(
+        bridge
+            .execute("evidence", r#"{"view":"diagnostics","maxBytes":128}"#)
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn claude_retained_bridge_reuses_findings_and_rejects_foreign_source_and_writes()
+-> anyhow::Result<()> {
+    use crate::audex::conversation_evidence::ConversationEvidence;
+    let temp = tempfile::tempdir()?;
+    let (controller, fake, _) = fixture(&temp).await;
+    assert!(
+        ConversationEvidence::open(controller.root.as_path(), "missing")
+            .await
+            .is_err()
+    );
+    let id = foundations::roster(&controller, "claude-retained", 2).await?;
+    assert!(
+        ConversationEvidence::open(controller.root.as_path(), &id)
+            .await
+            .is_err()
+    );
+    let store = controller.store().await?;
+    for _ in 0..4 {
+        controller.tick().await?;
+        for attempt in store.attempts(&id).await? {
+            if attempt.assignment_state != AssignmentState::Running {
+                continue;
+            }
+            attest_fake_completion(store, &attempt).await?;
+            let mut result: Value = serde_json::from_slice(&empty_result(&attempt))?;
+            result["findings"] = json!((0..2).map(|n| json!({"severity":"high","confidence":"medium",
+            "title":format!("Independent finding {n}"),"mechanism":"Captured mechanism","impact":"Claim",
+            "remediation":null,"evidence":[{"description":"Source citation","path":"example.rs","start_byte":0,"end_byte":2}]})).collect::<Vec<_>>());
+            fake.replace(
+                &attempt.operation_id,
+                WorkState::Completed(serde_json::to_vec(&result)?),
+            );
+        }
+        controller.tick().await?;
+    }
+    controller.tick().await?;
+    controller.tick().await?;
+    let bridge = ConversationEvidence::open(controller.root.as_path(), &id).await?;
+    let before = store.load_run_metadata(&id).await?;
+    let starts = fake.starts.load(Ordering::SeqCst);
+    let all = bridge.execute("evidence", r#"{"view":"findings"}"#).await?;
+    assert_eq!(
+        all,
+        read(&controller, &id, json!({"view":"findings"})).await?
+    );
+    assert_eq!(all["total"], 4);
+    for reviewer in all["reviewers"].as_array().unwrap() {
+        let query = json!({"view":"finding","reviewer":reviewer["reviewerId"],"number":2});
+        let finding = bridge.execute("evidence", &query.to_string()).await?;
+        assert_eq!(finding["reviewer"], *reviewer);
+        assert_eq!(finding, read(&controller, &id, query).await?);
+    }
+    let original = bridge
+        .execute(
+            "read",
+            r#"{"path":"example.rs","offset":0,"max_bytes":100}"#,
+        )
+        .await?;
+    assert_eq!(original["identity"], all["identity"]);
+    for (tool, query) in [
+        ("evidence", json!({"view":"findings","runId":"another-run"})),
+        (
+            "evidence",
+            json!({"view":"finding","reviewer":"another-reviewer","number":1}),
+        ),
+        (
+            "evidence",
+            json!({"view":"source","snapshot":"another-snapshot","path":"example.rs"}),
+        ),
+        (
+            "read",
+            json!({"path":"../live.rs","offset":0,"max_bytes":100}),
+        ),
+        (
+            "read",
+            json!({"path":"/etc/passwd","offset":0,"max_bytes":100}),
+        ),
+        (
+            "search",
+            json!({"query":"x","path":"outside.rs","max_results":10}),
+        ),
+        ("write", json!({"path":"example.rs","content":"changed"})),
+        ("audit_start", json!({})),
+    ] {
+        assert!(
+            bridge.execute(tool, &query.to_string()).await.is_err(),
+            "{tool}: {query}"
+        );
+    }
+    let readonly = AuditStore::open_read_only(controller.root.clone()).await?;
+    assert!(
+        sqlx::query("UPDATE audit_runs SET revision=revision+1 WHERE id=?")
+            .bind(&id)
+            .execute(&readonly.pool_for_tests())
+            .await
+            .is_err()
+    );
+    assert_eq!(fake.starts.load(Ordering::SeqCst), starts);
+    assert_eq!(
+        store.load_run_metadata(&id).await?.revision,
+        before.revision
+    );
+    let handle = controller
+        .snapshots()
+        .open(&SnapshotId::parse(bridge.identity.snapshot_id.clone())?)
+        .await?;
+    let source = handle.source_root().join("example.rs");
+    let mut permissions = std::fs::metadata(&source)?.permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&source, permissions)?;
+    std::fs::write(&source, "tampered sealed source")?;
+    assert!(
+        bridge
+            .execute("read", r#"{"path":"example.rs","offset":0,"max_bytes":1}"#)
+            .await
+            .is_err()
+    );
+    assert!(
+        bridge
+            .execute(
+                "search",
+                r#"{"query":"tampered","path":null,"max_results":10}"#
+            )
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
 async fn read(controller: &AuditController, run: &str, query: Value) -> anyhow::Result<Value> {
     let params = json!({"runId":run,"query":query});
     api(controller, "audit/evidence", params)

@@ -2,6 +2,7 @@ mod admission;
 mod backends;
 pub(crate) mod capture;
 pub(crate) mod controller;
+pub(crate) mod conversation_evidence;
 mod dispatch;
 #[cfg(target_os = "linux")]
 pub(crate) mod external;

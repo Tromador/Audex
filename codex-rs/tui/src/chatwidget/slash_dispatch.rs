@@ -835,11 +835,19 @@ impl ChatWidget {
         }
         match cmd {
             SlashCommand::Claude => match crate::claude::parse(&args) {
-                Ok((model, message)) => {
+                Ok(crate::claude::Request {
+                    model,
+                    audit,
+                    message,
+                }) => {
                     if source == SlashCommandDispatchSource::Live {
                         self.bottom_pane.drain_pending_submission_state();
                     }
-                    self.submit_op(AppCommand::ClaudeTurn { message, model });
+                    self.submit_op(AppCommand::ClaudeTurn {
+                        message,
+                        model,
+                        audit,
+                    });
                 }
                 Err(error) => self.add_error_message(error),
             },

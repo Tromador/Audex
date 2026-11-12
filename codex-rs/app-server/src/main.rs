@@ -30,6 +30,8 @@ const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_C
 #[derive(Debug, Parser)]
 #[command(version)]
 struct AppServerArgs {
+    #[command(subcommand)]
+    command: Option<InternalCommand>,
     /// Load frozen cloud skills from a JSON snapshot instead of a live skill service.
     #[arg(long, value_name = "PATH")]
     cloud_skills_snapshot: Option<PathBuf>,
@@ -79,10 +81,17 @@ struct AppServerArgs {
     managed_daemon: bool,
 }
 
+#[derive(Debug, clap::Subcommand)]
+enum InternalCommand {
+    #[command(hide = true)]
+    AuditSourceMcp(codex_app_server::AudexSourceMcpArgs),
+}
+
 fn main() -> anyhow::Result<()> {
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         let AppServerArgs {
+            command,
             cloud_skills_snapshot,
             config_overrides,
             code_mode_host,
@@ -95,6 +104,9 @@ fn main() -> anyhow::Result<()> {
             remote_control,
             managed_daemon,
         } = AppServerArgs::parse();
+        if let Some(InternalCommand::AuditSourceMcp(args)) = command {
+            return codex_app_server::run_audex_source_mcp(args).await;
+        }
         let loader_overrides = if disable_managed_config_from_debug_env() {
             LoaderOverrides::without_managed_config_for_tests()
         } else {
