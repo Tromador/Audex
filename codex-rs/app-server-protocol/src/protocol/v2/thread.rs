@@ -1461,6 +1461,11 @@ pub struct ThreadListParams {
     /// Optional page size; defaults to a reasonable server-side value.
     #[ts(optional = nullable)]
     pub limit: Option<u32>,
+    /// Restrict results to up to 100 thread IDs before pagination. Omit or send null
+    /// for unrestricted results. An empty list matches nothing. Exclusions still apply.
+    /// Repeat the same IDs on each page. The local store uses indexed metadata for this filter.
+    #[ts(optional = nullable)]
+    pub included_thread_ids: Option<Vec<String>>,
     /// Thread IDs to exclude before applying the result limit. Up to 100
     /// entries; invalid IDs or a larger list are rejected, never truncated.
     /// Send the same exclusions on each page. Omitted, null, or empty means no exclusions.
@@ -1514,9 +1519,8 @@ pub struct ThreadListParams {
     /// exactly matches one of these paths are returned.
     #[ts(optional = nullable, type = "string | Array<string> | null")]
     pub cwd: Option<ThreadListCwdFilter>,
-    /// If true, return from the state DB without scanning JSONL rollouts to
-    /// repair thread metadata. Omitted or false preserves scan-and-repair
-    /// behavior.
+    /// If true, the local store returns indexed metadata without scanning JSONL rollouts
+    /// for repairs. Requests with `includedThreadIds` always use indexed metadata.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub use_state_db_only: bool,
     /// Optional substring filter for the extracted thread title.
@@ -1791,6 +1795,10 @@ pub struct ThreadReadResponse {
 /// Calling `thread/guardianReview` subscribes the connection to the thread.
 /// The subscription remains after the review completes, keeping the thread loaded
 /// until the client calls `thread/unsubscribe` or disconnects.
+/// Sequential calls on the same loaded thread can reuse Guardian history across
+/// direct reviews and live approvals. The reviewer keeps a separate conversation
+/// from the actor and follows the parent thread's normal persistence settings.
+/// A retry evaluates the final call again under the current policy.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]

@@ -7,6 +7,8 @@ pub use shutdown::AgentTreeShutdown;
 pub use shutdown::AgentTreeShutdownFailure;
 pub use shutdown::AgentTreeShutdownFailureReason;
 pub use shutdown::AgentTreeShutdownReport;
+pub use shutdown::LoadedSuspendedAgent;
+pub use shutdown::SuspendedAgentTree;
 pub(crate) use shutdown::thread_store_error_kind;
 
 use crate::CodexAppsToolsCache;
@@ -342,6 +344,8 @@ pub enum PromptCacheKey {
 
 pub struct StartThreadOptions {
     pub config: Config,
+    /// Trusted host country for the initial thread settings.
+    pub request_country: codex_protocol::RequestCountry,
     /// Request-body cache key policy for this thread and its children. Hosts must reapply it on cold resume.
     pub prompt_cache_key: PromptCacheKey,
     /// Host-owned provider for this root thread's additional instructions.
@@ -439,6 +443,7 @@ impl StartThreadOptions {
     pub fn new(config: Config) -> Self {
         Self {
             config,
+            request_country: codex_protocol::RequestCountry::default(),
             prompt_cache_key: PromptCacheKey::default(),
             thread_instructions_provider: None,
             allow_provider_model_fallback: false,
@@ -564,6 +569,7 @@ fn effective_originator_value(
 
 pub(crate) struct ResumeThreadWithHistoryOptions {
     pub(crate) config: Config,
+    pub(crate) request_country: codex_protocol::RequestCountry,
     pub(crate) prompt_cache_key: Option<PromptCacheKey>,
     pub(crate) initial_history: InitialHistory,
     pub(crate) agent_control: LocalAgentControl,
@@ -1105,6 +1111,8 @@ impl ThreadManager {
         Arc::clone(&self.state.git_root_discovery)
     }
 
+    /// Returns the startup catalog. Use [`CodexThread::model_info`] for a live chat or
+    /// [`Self::models_manager_for_config`] for a new destination.
     pub fn get_models_manager(&self) -> SharedModelsManager {
         self.state.model_catalog.manager.clone()
     }
@@ -1779,6 +1787,7 @@ impl ThreadManager {
         thread_extension_init.insert(reasoning_effort_pin);
         Ok((
             StartThreadOptions {
+                request_country: settings.request_country,
                 history_mode: Some(settings.history_mode),
                 environments: Some(settings.environments.into_requests().environment_requests),
                 inherited_environments: Some(environments),
@@ -2083,6 +2092,22 @@ impl ThreadManagerState {
             })
     }
 
+    pub(crate) async fn load_legacy_model_context(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> CodexResult<StoredModelContext> {
+        let history = self
+            .thread_store
+            .load_history(params)
+            .await
+            .map_err(thread_store_rollout_read_error)?;
+        Ok(StoredModelContext {
+            thread_id: history.thread_id,
+            revision: history.revision,
+            items: history.items,
+        })
+    }
+
     pub(crate) async fn load_latest_model_context(
         &self,
         params: LoadThreadHistoryParams,
@@ -2121,11 +2146,31 @@ impl ThreadManagerState {
         } else {
             None
         };
+        self.send_pinned_op(
+            &thread,
+            op,
+            parent_turn_id,
+            root_turn_id,
+            residency_guard,
+            message_delivery,
+        )
+        .await
+    }
+
+    pub(crate) async fn send_pinned_op(
+        &self,
+        thread: &CodexThread,
+        op: Op,
+        parent_turn_id: Option<String>,
+        root_turn_id: Option<String>,
+        residency_guard: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+        message_delivery: Option<crate::agent_communication::MessageDelivery>,
+    ) -> CodexResult<String> {
         if let Some(ops_log) = &self.ops_log
             && let Ok(mut log) = ops_log.lock()
             && let Some(captured_op) = capture_test_op(&op)
         {
-            log.push((thread_id, captured_op));
+            log.push((thread.session.thread_id, captured_op));
         }
         thread
             .io
@@ -2369,6 +2414,7 @@ impl ThreadManagerState {
     ) -> CodexResult<NewThread> {
         let ResumeThreadWithHistoryOptions {
             config,
+            request_country,
             prompt_cache_key,
             initial_history,
             agent_control,
@@ -2386,6 +2432,7 @@ impl ThreadManagerState {
         let prompt_cache_key = prompt_cache_key.unwrap_or(inherited_prompt_cache_key);
         let thread_source = initial_history.get_resumed_thread_source();
         let options = StartThreadOptions {
+            request_country,
             prompt_cache_key,
             initial_history,
             session_source: Some(session_source),
@@ -2461,7 +2508,16 @@ impl ThreadManagerState {
             .config_layer_stack
             .with_mcp_ema_cancellation(cancellation);
         let runtime = request.agent_control.runtime().clone();
-        let membership = runtime.admit_start()?;
+        let options = &request.options;
+        let source = options
+            .session_source
+            .as_ref()
+            .unwrap_or(&self.session_source);
+        request.parent_thread_id = request
+            .parent_thread_id
+            .or_else(|| options.initial_history.get_resumed_parent_thread_id())
+            .or_else(|| source.parent_thread_id());
+        let membership = runtime.admit_session(request.parent_thread_id)?;
         let owns_startup = request.startup.is_none();
         let startup_state = Arc::clone(
             request
@@ -2507,6 +2563,7 @@ impl ThreadManagerState {
         };
         let StartThreadOptions {
             mut config,
+            request_country,
             prompt_cache_key,
             thread_instructions_provider,
             allow_provider_model_fallback,
@@ -2658,14 +2715,6 @@ impl ThreadManagerState {
             }
             (_, control) => control,
         };
-        let parent_thread_id = parent_thread_id
-            .or_else(|| initial_history.get_resumed_parent_thread_id())
-            .or(match &session_source {
-                SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                    parent_thread_id, ..
-                }) => Some(*parent_thread_id),
-                _ => None,
-            });
         // Both resume entry points must restore identities before children can be loaded lazily.
         if let InitialHistory::Resumed(resumed) = &initial_history
             && initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2)
@@ -2858,6 +2907,7 @@ impl ThreadManagerState {
             attached_thread,
             startup,
             config,
+            request_country,
             prompt_cache_key,
             allow_provider_model_fallback,
             instructions: startup_context.instructions,

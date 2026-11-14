@@ -22,6 +22,7 @@ use codex_mcp::ElicitationReviewRequest;
 use codex_mcp::ElicitationReviewer;
 use codex_mcp::ElicitationReviewerHandle;
 use codex_mcp::MCP_TOOL_CODEX_APPS_META_KEY;
+use codex_mcp::McpServerKey;
 use codex_otel::auth_storage::AuthStorageOriginator;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -481,20 +482,27 @@ impl Session {
         };
         if is_active_regular_turn {
             // Refresh cloud catalogs without holding the MCP permit or active-turn lock.
-            for contributor in self.services.extensions.turn_lifecycle_contributors() {
-                if contributor
-                    .refresh_catalog_for_step(codex_extension_api::CatalogRefreshInput {
-                        turn_id: &turn_context.sub_id,
-                        session_store: &self.services.session_extension_data,
-                        thread_store: &self.services.thread_extension_data,
-                        turn_store: turn_context.extension_data.as_ref(),
-                    })
-                    .await
-                {
-                    // Preserve MCP updates if a later refresh is cancelled.
-                    self.mark_mcp_runtime_dirty(McpRefreshReason::ExtensionCatalogChanged);
-                }
-            }
+            futures::future::join_all(
+                self.services
+                    .extensions
+                    .turn_lifecycle_contributors()
+                    .iter()
+                    .map(|contributor| async move {
+                        if contributor
+                            .refresh_catalog_for_step(codex_extension_api::CatalogRefreshInput {
+                                turn_id: &turn_context.sub_id,
+                                session_store: &self.services.session_extension_data,
+                                thread_store: &self.services.thread_extension_data,
+                                turn_store: turn_context.extension_data.as_ref(),
+                            })
+                            .await
+                        {
+                            // Preserve each publication if the refresh batch is cancelled.
+                            self.mark_mcp_runtime_dirty(McpRefreshReason::ExtensionCatalogChanged);
+                        }
+                    }),
+            )
+            .await;
             self.refresh_mcp_if_dirty().await;
         }
         self.wait_for_apps_tool_refresh().await;
@@ -782,10 +790,11 @@ impl Session {
     pub async fn request_mcp_server_elicitation(
         &self,
         turn_context: &TurnContext,
-        server_name: String,
+        server_key: McpServerKey,
         request_id: RequestId,
         request: ElicitationRequest,
     ) -> Option<ElicitationResponse> {
+        let server_name = server_key.name().to_owned();
         // This callback carries a request ID, not a reliable tool invocation owner.
         // Do not report its human wait as ordinary tool execution.
         if turn_context
@@ -827,6 +836,7 @@ impl Session {
         let event = EventMsg::ElicitationRequest(ElicitationRequestEvent {
             turn_id: Some(turn_context.sub_id.clone()),
             server_name,
+            environment_id: server_key.scoped_environment_id().map(str::to_owned),
             id,
             request,
         });

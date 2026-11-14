@@ -27,6 +27,7 @@ pub(super) struct Reconnected {
     pub(super) session: AppServerSession,
     bootstrap: AppServerBootstrap,
     thread: Option<AppServerStartedThread>,
+    archived_thread: Option<ThreadId>,
 }
 
 #[expect(
@@ -79,7 +80,7 @@ pub(super) async fn reconnect(
                 .with_thread_tool_transport(task_tools.clone());
             stage = "loading session settings";
             let bootstrap = session.bootstrap(&config).await?;
-            let thread = if let Some(thread_id) = thread_id {
+            let (thread, archived_thread) = if let Some(thread_id) = thread_id {
                 stage = "resuming the conversation";
                 match session
                     .resume_thread(
@@ -90,7 +91,7 @@ pub(super) async fn reconnect(
                     )
                     .await
                 {
-                    Ok(thread) => Some(thread),
+                    Ok(thread) => (Some(thread), None),
                     Err(error)
                         if matches!(
                             error.downcast_ref::<TypedRequestError>(),
@@ -114,20 +115,31 @@ pub(super) async fn reconnect(
                     Err(error)
                         if matches!(
                             error.downcast_ref::<TypedRequestError>(),
+                            Some(TypedRequestError::Server { method, source })
+                                if method == "thread/resume" && source.code == -32600
+                                    && source.message.starts_with(&format!("session {thread_id} is archived. "))
+                        ) =>
+                    {
+                        (None, Some(thread_id))
+                    }
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref::<TypedRequestError>(),
                             Some(TypedRequestError::Server { source, .. }) if source.code == -32600
                         ) || presentation == ReconnectPresentation::Overview =>
                     {
-                        None
+                        (None, None)
                     }
                     Err(error) => return Err(error),
                 }
             } else {
-                None
+                (None, None)
             };
             Ok::<_, color_eyre::Report>(Reconnected {
                 session,
                 bootstrap,
                 thread,
+                archived_thread,
             })
         };
         let result = tokio::time::timeout_at(deadline, attempt).await;
@@ -138,7 +150,7 @@ pub(super) async fn reconnect(
         }
     }
     tracing::warn!(stage, "automatic reconnect timed out");
-    color_eyre::eyre::bail!("Automatic reconnect timed out while {stage}.")
+    color_eyre::eyre::bail!("Automatic reconnect timed out while {stage}.");
 }
 
 impl App {
@@ -327,6 +339,8 @@ impl App {
         search_dir: PathBuf,
     ) {
         self.chat_widget.snapshot_local_images = self.app_server_target.uses_remote_workspace();
+        self.chat_widget.thread_settings_owner = app_server.thread_params_mode().settings_owner();
+        self.chat_widget.pending_cloud_turn_settings = app_server.pending_cloud_turn_settings();
         self.chat_widget.set_local_worktree_operations(
             !crate::uses_remote_workspace_or_environment(
                 &self.app_server_target,
@@ -365,6 +379,7 @@ impl App {
             mut session,
             bootstrap,
             thread,
+            archived_thread,
         } = connected;
         session.model_provider_override = self.harness_overrides.model_provider.clone();
         let selected = self
@@ -469,10 +484,13 @@ impl App {
         );
         // Move cached UI state into fresh channels. Old producers retain the old sender/store,
         // so their late requests cannot leak into recovery. Background threads attach on selection.
-        for channel in self.thread_event_channels.values_mut() {
+        for (&thread_id, channel) in &mut self.thread_event_channels {
             let mut replacement = ThreadEventChannel::new(THREAD_EVENT_CHANNEL_CAPACITY);
+            replacement.archived = channel.archived || archived_thread == Some(thread_id);
             replacement.backend_id = channel.backend_id;
-            if channel.attachment() == ThreadEventAttachment::ExternalWriter {
+            if !replacement.archived
+                && channel.attachment() == ThreadEventAttachment::ExternalWriter
+            {
                 replacement.mark_external_writer();
             } else {
                 replacement.mark_replay_only();
@@ -484,6 +502,9 @@ impl App {
             store.pending_interactive_replay = Default::default();
             store.pending_interrupt_turn_id = None;
             store.active = false;
+            if let Some(session) = &mut store.session {
+                session.read_only_history = true;
+            }
             store.buffer.retain(|event| {
                 matches!(
                     event,
@@ -570,7 +591,7 @@ impl App {
                 return Err(err);
             }
             self.config = self.chat_widget.config_ref().clone();
-            if self.thread_unavailable(id) && !self.chat_widget.is_external_writer_view() {
+            if self.thread_unavailable(id) && !self.chat_widget.is_read_only_view() {
                 self.agent_navigation.mark_stopped(id);
                 self.chat_widget.pause_unavailable_thread();
                 self.chat_widget.add_info_message("This conversation is unavailable. Its cached transcript and draft remain here; input is paused. Open the agent picker or return to the parent to continue.".into(), /*hint*/ None);

@@ -6,6 +6,7 @@
 use super::rate_limit_refresh::RateLimitReadStatus;
 use super::rate_limit_refresh::RateLimitRefreshOutcome;
 use super::resize_reflow::trailing_run_start;
+use super::session_lifecycle::FreshSessionStart;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
 use crate::app_event::CapturedSideStream;
@@ -339,7 +340,7 @@ impl App {
             | AppEvent::NewSession { name }
             | AppEvent::NewSessionInCurrentWorktree { name } => {
                 self.start_fresh_session(
-                    tui, app_server, /*session_start_source*/ None,
+                    tui, app_server, FreshSessionStart::NewConversation,
                     /*initial_user_message*/ None, name,
                 )
                 .await;
@@ -368,7 +369,7 @@ impl App {
                     self.start_fresh_session(
                         tui,
                         app_server,
-                        /*session_start_source*/ None,
+                        FreshSessionStart::PreserveCurrentView(None),
                         /*initial_user_message*/ None,
                         /*new_thread_name*/ None,
                     )
@@ -632,7 +633,7 @@ impl App {
                 self.start_fresh_session(
                     tui,
                     app_server,
-                    Some(ThreadStartSource::Clear),
+                    FreshSessionStart::PreserveCurrentView(Some(ThreadStartSource::Clear)),
                     /*initial_user_message*/ None,
                     name,
                 )
@@ -681,6 +682,14 @@ impl App {
                     }
                 }
                 tui.frame_requester().schedule_frame();
+            }
+            AppEvent::ResumeUnarchivedThread(thread_id) => {
+                if self.current_displayed_thread_id() == Some(thread_id)
+                    && self.chat_widget.is_archived_view()
+                    && self.thread_event_channels.get(&thread_id).is_some_and(|channel| !channel.archived)
+                {
+                    archived_thread::resume_displayed_thread(self, tui, app_server, thread_id).await;
+                }
             }
             AppEvent::ResumeSessionByIdOrName(id_or_name) => {
                 match crate::lookup_session_target_with_app_server(
@@ -1979,7 +1988,7 @@ impl App {
             AppEvent::FetchMcpInventory { detail, thread_id } => {
                 self.fetch_mcp_inventory(app_server, detail, thread_id);
             }
-            AppEvent::StartMcpLogin { name, thread_id } => {
+            AppEvent::StartMcpLogin { name, environment_id, thread_id } => {
                 if self.pending_mcp_login_start.is_some() {
                     self.chat_widget.add_info_message(
                         "MCP sign-in is starting. Wait for it to finish before trying again.".to_string(),
@@ -1991,10 +2000,11 @@ impl App {
                 self.pending_mcp_login_start = Some(PendingMcpLoginStart {
                     request_id: request_id.clone(),
                     name: name.clone(),
+                    environment_id: environment_id.clone(),
                     thread_id,
                     completions: Vec::new(),
                 });
-                self.start_mcp_login(app_server, request_id, name, thread_id);
+                self.start_mcp_login(app_server, request_id, name, environment_id, thread_id);
             }
             AppEvent::McpLoginStarted { request_id, result } => {
                 if let Some(pending) = self
@@ -2003,11 +2013,13 @@ impl App {
                 {
                     match result {
                         Ok(response) => {
-                            // Track the latest attempt per server: unrelated OAuth logins can
-                            // remain open while a user retries this server.
+                            // Replace this target's old attempt, not another environment's
+                            // login to a server with the same name.
                             if let Some(login_id) = response.login_id.as_ref() {
+                                let target = (pending.name.clone(), pending.environment_id);
+                                self.active_mcp_login_ids.retain(|_, current| current != &target);
                                 self.active_mcp_login_ids
-                                    .insert(pending.name.clone(), login_id.clone());
+                                    .insert(login_id.clone(), target);
                             }
                             let completed = pending.completions.iter().any(|completion| {
                                 completion.login_id == response.login_id
@@ -2035,13 +2047,10 @@ impl App {
                     // A rejected start leaves the old attempt current. A successful replacement
                     // has changed its ID, so the old cancellation is discarded here.
                     for completion in pending.completions {
-                        if completion.login_id.is_some() {
-                            if completion.login_id.as_ref()
-                                != self.active_mcp_login_ids.get(&completion.name)
-                            {
-                                continue;
-                            }
-                            self.active_mcp_login_ids.remove(&completion.name);
+                        if let Some(login_id) = &completion.login_id
+                            && self.active_mcp_login_ids.remove(login_id).is_none()
+                        {
+                            continue;
                         }
                         if let Some(thread_id) = completion.thread_id.as_deref()
                             .and_then(|id| ThreadId::from_string(id).ok())
@@ -2543,6 +2552,28 @@ impl App {
                     owner.on_realtime_webrtc_offer_created(thread_id, attempt_id, result);
                 } else if let Ok(offer) = result {
                     offer.handle.close();
+                }
+            }
+            AppEvent::RealtimeCallCreated { thread_id, attempt_id, result } => {
+                if let Some(owner) = self.voice_widget_for_thread(thread_id)
+                    && owner.is_starting_realtime_attempt(thread_id, attempt_id)
+                {
+                    let result = match result {
+                        Ok(call) => {
+                            owner.accept_realtime_call(call.answer_sdp);
+                            app_server.thread_realtime_start(thread_id, call.call_id).await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result
+                        && !self.recover_transport_error(&error)
+                        && let Some(owner) = self.voice_widget_for_thread(thread_id)
+                    {
+                        owner.on_realtime_error(
+                            format!("Voice conversation failed: {error:#}"),
+                            crate::chatwidget::RealtimeFailureCause::AppServerRequest,
+                        );
+                    }
                 }
             }
             AppEvent::RealtimeWebrtcConnected {
@@ -3073,6 +3104,39 @@ impl App {
             AppEvent::PersistRealtimeVoiceSelection { voice } => {
                 self.persist_realtime_voice(app_server, voice).await;
             }
+            AppEvent::ToggleCloudServiceTier { thread_id, tier } => {
+                if self.active_thread_id == Some(thread_id)
+                    && self.chat_widget.thread_id() == Some(thread_id)
+                    && app_server.thread_params_mode() == crate::ThreadParamsMode::Cloud
+                {
+                    if !self.chat_widget.current_model_service_tier_commands().iter()
+                        .any(|command| command.id == tier)
+                    {
+                        self.chat_widget.add_error_message(
+                            "The selected Cloud model does not support that speed.".into(),
+                        );
+                        return Ok(AppRunControl::Continue);
+                    }
+                    let current = self.chat_widget.config_ref().service_tier.as_deref();
+                    match app_server.toggle_cloud_service_tier(thread_id, current, tier) {
+                        Some(tier) => {
+                            let label = match tier.as_str() {
+                                codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE => "standard",
+                                "priority" => "fast",
+                                tier => tier,
+                            };
+                            self.chat_widget.add_info_message(
+                                format!("Selected {label} speed for the next new turn in this conversation"),
+                                /*hint*/ None,
+                            );
+                        }
+                        None => self.chat_widget.add_error_message(
+                            "The Cloud account changed. Reopen the conversation before choosing a speed."
+                                .into(),
+                        ),
+                    }
+                }
+            }
             AppEvent::PersistServiceTierSelection { service_tier } => {
                 self.refresh_status_line();
                 self.config.service_tier = service_tier.clone();
@@ -3297,9 +3361,11 @@ impl App {
                 }
             }
             AppEvent::OpenAgentsOverview => self.open_agents_overview(app_server),
-            AppEvent::SearchAgentsOverview(id, limit) => self.search_agents_overview(app_server.request_handle(), id, limit),
-            AppEvent::AgentsOverviewSearchPage { id, rows, cursor, ok } => {
-                self.apply_agents_overview_search_page(id, rows, cursor, ok);
+            AppEvent::SearchAgentsOverview(id, limit) => {
+                self.search_agents_overview(app_server, id, limit);
+            }
+            AppEvent::AgentsOverviewSearchPage { id, backend_id, rows, cursor, ok } => {
+                self.apply_agents_overview_search_page(id, backend_id, rows, cursor, ok);
             }
             AppEvent::ShowMoreAgentsOverview => self.show_more_agents_overview(app_server),
             AppEvent::RefreshViewedThread { backend_id, thread_id, revision } => {
@@ -3416,6 +3482,7 @@ impl App {
                 thread_id,
                 destination,
                 prompt,
+                expected_name,
                 fallback_title,
                 effort,
                 result,
@@ -3425,6 +3492,7 @@ impl App {
                     thread_id,
                     destination,
                     prompt,
+                    expected_name,
                     fallback_title,
                     effort,
                     result,

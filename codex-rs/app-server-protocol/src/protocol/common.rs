@@ -1231,6 +1231,12 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadTimelineListResponse,
     },
+    #[experimental("thread/realtime/list")]
+    ThreadRealtimeList => "thread/realtime/list" {
+        params: v2::ThreadRealtimeListParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadRealtimeListResponse,
+    },
     #[experimental("thread/realtime/listVoices")]
     ThreadRealtimeListVoices => "thread/realtime/listVoices" {
         params: v2::ThreadRealtimeListVoicesParams,
@@ -1272,6 +1278,12 @@ client_request_definitions! {
         params: v2::ModelProviderConfigWriteParams,
         serialization: global("config"),
         response: v2::ModelProviderConfigWriteResponse,
+    },
+    ModelProviderDefaultSet => "modelProvider/default/set" {
+        params: v2::ModelProviderDefaultSetParams,
+        serialization: global("config"),
+        manual_payload_conversion: manual,
+        response: v2::ConfigWriteResponse,
     },
     ModelProviderCapabilitiesRead => "modelProvider/capabilities/read" {
         params: v2::ModelProviderCapabilitiesReadParams,
@@ -2004,13 +2016,6 @@ server_request_definitions! {
         response: v2::AttestationGenerateResponse,
     },
 
-    #[experimental("currentTime/read")]
-    /// Read the current time from an external clock owned by the client.
-    CurrentTimeRead => "currentTime/read" {
-        params: v2::CurrentTimeReadParams,
-        response: v2::CurrentTimeReadResponse,
-    },
-
     /// DEPRECATED APIs below
     /// Request to approve a patch.
     /// This request is used for Turns started via the legacy APIs (i.e. SendUserTurn, SendUserMessage).
@@ -2648,6 +2653,7 @@ mod tests {
         let mcp_oauth = ClientRequest::McpServerOauthLogin {
             request_id: request_id(),
             params: v2::McpServerOauthLoginParams {
+                environment_id: None,
                 name: "server-a".to_string(),
                 thread_id: None,
                 client_registration: None,
@@ -2665,6 +2671,7 @@ mod tests {
         let mcp_resource_read = ClientRequest::McpResourceRead {
             request_id: request_id(),
             params: v2::McpResourceReadParams {
+                environment_id: None,
                 meta: None,
                 thread_id: Some("thread-1".to_string()),
                 origin_call_id: None,
@@ -2861,6 +2868,7 @@ mod tests {
         let mcp_resource_read = ClientRequest::McpResourceRead {
             request_id: request_id(),
             params: v2::McpResourceReadParams {
+                environment_id: None,
                 meta: None,
                 thread_id: None,
                 origin_call_id: None,
@@ -3191,32 +3199,6 @@ mod tests {
     }
 
     #[test]
-    fn serialize_current_time_read_request() -> Result<()> {
-        let params = v2::CurrentTimeReadParams {
-            thread_id: "thread-123".to_string(),
-        };
-        let request = ServerRequest::CurrentTimeRead {
-            request_id: RequestId::Integer(10),
-            params: params.clone(),
-        };
-        assert_eq!(
-            json!({
-                "method": "currentTime/read",
-                "id": 10,
-                "params": {
-                    "threadId": "thread-123"
-                }
-            }),
-            serde_json::to_value(&request)?,
-        );
-
-        let payload = ServerRequestPayload::CurrentTimeRead(params);
-        assert_eq!(request.id(), &RequestId::Integer(10));
-        assert_eq!(payload.request_with_id(RequestId::Integer(10)), request);
-        Ok(())
-    }
-
-    #[test]
     fn serialize_server_response() -> Result<()> {
         let response = ServerResponse::CommandExecutionRequestApproval {
             request_id: RequestId::Integer(8),
@@ -3255,6 +3237,7 @@ mod tests {
             thread_id: "thr_123".to_string(),
             turn_id: Some("turn_123".to_string()),
             server_name: "codex_apps".to_string(),
+            environment_id: None,
             request: v2::McpServerElicitationRequest::Form {
                 meta: Some(json!({
                     "suggestion_id": "request_plugin_install_install-github"
@@ -3276,6 +3259,7 @@ mod tests {
                     "threadId": "thr_123",
                     "turnId": "turn_123",
                     "serverName": "codex_apps",
+                    "environmentId": null,
                     "mode": "form",
                     "_meta": {
                         "suggestion_id": "request_plugin_install_install-github"

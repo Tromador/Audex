@@ -173,6 +173,7 @@ async fn split_homes_support_backfill_listing_and_paginated_history() {
 
     let threads = store
         .list_threads(ListThreadsParams {
+            included_thread_ids: None,
             page_size: 10,
             cursor: None,
             sort_key: ThreadSortKey::CreatedAt,
@@ -526,6 +527,7 @@ async fn paginated_mcp_history_caps_large_results() {
     let tool_call = McpToolCallItem {
         id: "mcp-1".to_string(),
         server: "test".to_string(),
+        environment_id: None,
         tool: "large_result".to_string(),
         arguments: arguments.clone(),
         connector_id: None,
@@ -624,11 +626,13 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "voice:started".to_string(),
                     realtime_session_id: "voice".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::RealtimeSessionStarted,
                 }),
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "voice:transcript:0".to_string(),
                     realtime_session_id: "voice".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::TranscriptSegment {
                         role: RealtimeTranscriptRole::Assistant,
                         text: "Here is the result.".to_string(),
@@ -638,6 +642,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "voice:promoted:agent-1".to_string(),
                     realtime_session_id: "voice".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::BemItemPromoted {
                         turn_id: "turn-1".to_string(),
                         item_id: "agent-1".to_string(),
@@ -662,6 +667,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "voice:closed".to_string(),
                     realtime_session_id: "voice".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::RealtimeSessionClosed {
                         outcome: RealtimeSessionOutcome::Ended,
                     },
@@ -795,6 +801,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
             items: vec![RolloutItem::RealtimeItem(RealtimeItem {
                 id: "legacy:started".to_string(),
                 realtime_session_id: "legacy".to_string(),
+                observed_at_ms: None,
                 content: RealtimeItemContent::RealtimeSessionStarted,
             })],
         })
@@ -1485,6 +1492,7 @@ async fn subagent_prefix_advances_projection_without_materializing_history() {
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "parent:started".to_string(),
                     realtime_session_id: "parent".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::RealtimeSessionStarted,
                 }),
                 turn_started("parent-turn"),
@@ -1502,6 +1510,7 @@ async fn subagent_prefix_advances_projection_without_materializing_history() {
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "child:started".to_string(),
                     realtime_session_id: "child".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::RealtimeSessionStarted,
                 }),
                 completed_item(

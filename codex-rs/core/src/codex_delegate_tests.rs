@@ -76,6 +76,7 @@ async fn forward_events_filters_private_events_before_blocked_send_is_cancelled(
     for msg in [
         EventMsg::McpStartupUpdate(McpStartupUpdateEvent {
             server: "pending".to_string(),
+            environment_id: None,
             status: McpStartupStatus::Starting,
         }),
         EventMsg::McpStartupComplete(McpStartupCompleteEvent::default()),
@@ -165,7 +166,7 @@ async fn forward_ops_preserves_submission_trace_context() {
         residency_guard: None,
         message_delivery: None,
     };
-    tx_ops.send(submission).await.unwrap();
+    tx_ops.send(Box::new(submission)).await.unwrap();
     drop(tx_ops);
 
     let forwarded = timeout(Duration::from_secs(1), rx_sub.recv())

@@ -1223,3 +1223,20 @@ async fn internal_follow_up_preserves_questions_on_submission_and_disconnect_rec
     );
     assert_eq!(restored.bottom_pane.composer_text(), "Operator draft");
 }
+
+#[tokio::test]
+async fn archived_view_collapses_questions_and_retains_answers() {
+    let (mut chat, _events, mut ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.add_async_questions("message", &questions());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+    chat.bottom_pane.handle_paste("kept answer".into());
+    assert!(!chat.no_modal_or_popup_active());
+    chat.show_read_only_thread(ReadOnlyThread::Archived);
+    assert!(chat.no_modal_or_popup_active());
+    let questions = chat.bottom_pane.questions.as_mut().unwrap();
+    assert!(!questions.delivery_enabled);
+    questions.set_expanded(/*expanded*/ true);
+    chat.read_only_thread = None;
+    assert!(render_bottom_popup(&chat, /*width*/ 100).contains("kept answer"));
+    assert_no_submit_op(&mut ops);
+}

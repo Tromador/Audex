@@ -99,6 +99,7 @@ fn request() -> ResponsesApiRequest {
         text: None,
         client_metadata: None,
         access_programs: None,
+        request_country: Default::default(),
     }
 }
 fn logical(authority: &Arc<Authority>) -> GenerationRequest {
@@ -276,6 +277,7 @@ async fn websocket_admission_runs_after_writer_lock_and_stop_refuses_the_create_
             false,
             None,
             Some(generation),
+            |_| {},
         )
         .await
         .unwrap();
@@ -322,6 +324,7 @@ async fn websocket_interrupt_and_close_frames_remain_available_after_generation_
             false,
             None,
             Some(logical(&authority)),
+            |_| {},
         )
         .await
         .unwrap();

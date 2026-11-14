@@ -56,20 +56,20 @@ impl ConversationFrame {
         }
     }
 
-    pub(super) fn chooser_covers_transcript(&self) -> bool {
-        matches!(self.sidebar, Some(sidebar::SidebarLayout::Chooser { main, .. }) if main.is_empty())
+    pub(super) fn panel_covers_transcript(&self) -> bool {
+        matches!(self.sidebar, Some(sidebar::SidebarLayout::Panel { main, .. }) if main.is_empty())
     }
 
-    pub(super) fn chooser_area(&self) -> Option<Rect> {
+    pub(super) fn panel_area(&self) -> Option<Rect> {
         match self.sidebar {
-            Some(sidebar::SidebarLayout::Chooser { sidebar, .. }) => Some(sidebar),
+            Some(sidebar::SidebarLayout::Panel { sidebar, .. }) => Some(sidebar),
             _ => None,
         }
     }
 
     pub(super) fn sidebar_tab_strip(&self) -> Option<Rect> {
         self.chat_strip.or_else(|| {
-            self.chooser_area()
+            self.panel_area()
                 .map(|area| side_pane::tab_and_body(area)[0])
         })
     }
@@ -269,7 +269,7 @@ impl App {
             Some(sidebar::SidebarLayout::Chat(panes)) => {
                 (Some(panes.focused), Some(panes.tab_strip))
             }
-            Some(sidebar::SidebarLayout::Chooser { main, .. }) => {
+            Some(sidebar::SidebarLayout::Panel { main, .. }) => {
                 ((!main.is_empty()).then_some(*main), None)
             }
             None if chat == TabState::Active
@@ -342,7 +342,7 @@ impl App {
                         );
                     }
                 }
-                Some(sidebar::SidebarLayout::Chooser { sidebar, focus, .. }) => {
+                Some(sidebar::SidebarLayout::Panel { sidebar, focus, .. }) => {
                     let focused = *focus == PaneFocus::Sidebar;
                     let resize_hint = self.pane_resize.map(|_| side_pane::RESIZE_HINT);
                     if let Some(creation) = self.sidebar().and_then(|pane| pane.creation.as_ref()) {
@@ -457,7 +457,7 @@ impl App {
                 let viewport = frame.area();
                 let column = self
                     .conversation_frame
-                    .chooser_area()
+                    .panel_area()
                     .or(strip)
                     .unwrap_or(viewport);
                 let area = Rect {
@@ -562,7 +562,7 @@ impl App {
             None => (None, None),
         };
         let mut composer_gap = (!self.chat_widget.has_active_view()
-            && !self.chat_widget.is_external_writer_view())
+            && !self.chat_widget.is_read_only_view())
         .then(crate::bottom_pane::ComposerGap::default);
         let prompt_footer = if self.pane_resize.is_some() {
             Some(crate::bottom_pane::TranscriptFooter {
@@ -584,7 +584,7 @@ impl App {
         let max_composer_height = side_pane::composer_height_limit(area.height);
         let unfocused = matches!(
             self.conversation_frame.sidebar,
-            Some(sidebar::SidebarLayout::Chooser {
+            Some(sidebar::SidebarLayout::Panel {
                 focus: PaneFocus::Sidebar,
                 ..
             })
@@ -673,6 +673,7 @@ impl App {
             );
             needs_redraw = false;
         }
+        view.finish_collapse_layout(&self.transcript_cells);
         let blossom_tick = chat_widget
             .empty_state_animation
             .borrow_mut()
@@ -874,7 +875,7 @@ impl App {
             }
             if self
                 .conversation_frame
-                .chooser_area()
+                .panel_area()
                 .is_some_and(|area| area.contains((mouse.column, mouse.row).into()))
             {
                 return Ok(true);
@@ -986,7 +987,7 @@ impl App {
         // Search and selection still consume Escape first to dismiss their interaction.
         if let TuiEvent::Key(key) = event
             && !self.transcript_view.has_active_interaction()
-            && (self.chat_widget.is_external_writer_view() || self.chat_widget.has_provider_error())
+            && (self.chat_widget.is_read_only_view() || self.chat_widget.has_provider_error())
             && crate::key_hint::plain(KeyCode::Esc).is_press(*key)
         {
             return Ok(false);

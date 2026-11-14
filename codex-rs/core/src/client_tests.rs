@@ -977,7 +977,7 @@ fn websocket_incremental_reuse_tracks_raw_result_metadata() -> anyhow::Result<()
         )?;
 
         let mut session = client.new_session();
-        session.websocket_session.last_request = Some(previous);
+        session.websocket_session.last_request = Some(Arc::new(previous));
         let (sender, receiver) = tokio::sync::oneshot::channel();
         sender
             .send(super::LastResponse {
@@ -1028,7 +1028,7 @@ fn websocket_continuation_reports_unavailable_response_state() {
         )
         .expect("build continuation request");
     let mut session = client.new_session();
-    session.websocket_session.last_request = Some(request.clone());
+    session.websocket_session.last_request = Some(Arc::new(request.clone()));
     assert_eq!(
         session.prepare_websocket_request(&request).err(),
         Some(NonIncrementalReason::NoPreviousResponse),
@@ -1092,14 +1092,14 @@ async fn responses_http_preserves_raw_tool_metadata_for_openai_custom_endpoint()
     let output = output_with_tool_result_metadata(ToolResultMetadata::new(&json!({
         "private": "raw-result-metadata",
     })));
-    let prompt = Prompt {
+    let prompt = Arc::new(Prompt {
         input: vec![output.clone()],
         base_instructions: BaseInstructions {
             text: String::new(),
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
     let responses_metadata = test_responses_metadata_for_client(
         &client,
         /*turn_id*/ None,
@@ -1260,7 +1260,7 @@ fn websocket_continuation_reset_reason_survives_failed_reconnect_and_turn_bounda
             )
             .expect("build continuation request");
         let mut session = client.new_session();
-        session.websocket_session.last_request = Some(request);
+        session.websocket_session.last_request = Some(Arc::new(request));
         session.websocket_session.reset(Some(reason));
         session.websocket_session.reset(/*reason*/ None);
         session.websocket_session.reset(Some(later_reason));
@@ -1462,21 +1462,26 @@ fn started_inference_attempt(temp: &TempDir) -> anyhow::Result<InferenceTraceAtt
     })?;
 
     let inference_trace = InferenceTraceContext::enabled(
-        writer,
+        Arc::clone(&writer),
         "thread-root".to_string(),
         "turn-1".to_string(),
         "gpt-test".to_string(),
         "test-provider".to_string(),
     );
     let attempt = inference_trace.start_attempt();
-    attempt.record_started(&json!({
+    let request = json!({
         "model": "gpt-test",
         "input": [{
             "type": "message",
             "role": "user",
             "content": [{"type": "input_text", "text": "hello"}]
         }],
-    }));
+    });
+    attempt.record_started(serde_json::to_vec(&request)?, Arc::new(request), || {
+        Ok(None)
+    });
+    // Cancellation tests can start replaying as soon as this helper returns.
+    writer.flush()?;
     Ok(attempt)
 }
 
@@ -1687,6 +1692,7 @@ async fn untraced_http_stream_releases_completed_output_before_response_ends() {
         &test_model_client(SessionSource::Cli).state,
         /*last_response_tx*/ None,
         None,
+        super::ResponseDelivery::default(),
     );
 
     assert!(matches!(
@@ -1730,6 +1736,7 @@ async fn incomplete_response_traces_attempted_call_without_streaming_it() -> any
             &test_model_client(SessionSource::Cli).state,
             /*last_response_tx*/ None,
             None,
+            super::ResponseDelivery::default(),
         );
         assert!(matches!(stream.next().await, Some(Err(_))));
         assert!(stream.next().await.is_none());
@@ -1776,6 +1783,7 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         &test_model_client(SessionSource::Cli).state,
         /*last_response_tx*/ None,
         None,
+        super::ResponseDelivery::default(),
     );
 
     let observed = stream
@@ -1805,7 +1813,7 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         rollout.threads["thread-root"].conversation_item_ids,
         inference.request_item_ids
     );
-    assert_eq!(rollout.raw_payloads.len(), 2);
+    assert_eq!(rollout.raw_payloads.len(), 3);
 
     Ok(())
 }
@@ -1835,6 +1843,7 @@ async fn response_stream_records_last_model_feedback_ids() {
         &test_model_client(SessionSource::Cli).state,
         /*last_response_tx*/ None,
         None,
+        super::ResponseDelivery::default(),
     );
 
     while stream.next().await.is_some() {}
@@ -2060,6 +2069,7 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         &test_model_client(SessionSource::Cli).state,
         /*last_response_tx*/ None,
         None,
+        super::ResponseDelivery::default(),
     );
 
     // Fill the mapper channel with non-terminal events, then yield one output
@@ -2078,7 +2088,7 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
 
     assert_eq!(inference.execution.status, ExecutionStatus::Cancelled);
     assert_eq!(inference.response_item_ids.len(), 1);
-    assert_eq!(rollout.raw_payloads.len(), 2);
+    assert_eq!(rollout.raw_payloads.len(), 3);
 
     Ok(())
 }
@@ -2410,7 +2420,7 @@ async fn realtime_call_preserves_captured_account_binding(change: RealtimeCreden
                 event_parser: codex_api::RealtimeEventParser::V1,
                 session_mode: codex_api::RealtimeSessionMode::Conversational,
                 output_modality: codex_protocol::protocol::RealtimeOutputModality::Audio,
-                voice: codex_protocol::protocol::RealtimeVoice::Cove,
+                voice: Some(codex_protocol::protocol::RealtimeVoice::Cove),
             },
             http::HeaderMap::new(),
             Some(api_provider),
@@ -2743,7 +2753,7 @@ async fn realtime_custom_call_keeps_selected_key_for_openai_sideband(mode: Runti
                 event_parser: codex_api::RealtimeEventParser::V1,
                 session_mode: codex_api::RealtimeSessionMode::Conversational,
                 output_modality: codex_protocol::protocol::RealtimeOutputModality::Audio,
-                voice: codex_protocol::protocol::RealtimeVoice::Cove,
+                voice: Some(codex_protocol::protocol::RealtimeVoice::Cove),
             },
             http::HeaderMap::new(),
             Some(call_provider),
@@ -2876,20 +2886,21 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
         .await?;
     drop(tx_event);
     let (last_response_tx, last_response_rx) = tokio::sync::oneshot::channel();
-    let mut stream = super::map_response_stream(
-        codex_api::ResponseStream {
+    let mut stream = super::OpenedModelResponse {
+        stream: codex_api::ResponseStream {
             routing_affinity: None,
             rx_event,
             upstream_request_id: None,
             interrupt: None,
         },
-        test_session_telemetry(),
-        attempt,
-        &test_model_client(SessionSource::Cli).state,
-        vec![Box::new(ReplaceOutput)],
-        Some(last_response_tx),
-        None,
-    );
+        telemetry: test_session_telemetry(),
+        trace: attempt,
+        client: Arc::clone(&test_model_client(SessionSource::Cli).state),
+        interceptors: vec![Box::new(ReplaceOutput)],
+        continuation: Some(last_response_tx),
+        generation: None,
+    }
+    .into_stream()?;
     let mut delivered = Vec::new();
     while let Some(event) = stream.next().await {
         if let ResponseEvent::OutputItemDone(item) = event? {
@@ -2904,8 +2915,9 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
         .values()
         .find(|payload| payload.kind == codex_rollout_trace::RawPayloadKind::InferenceResponse)
         .expect("response trace payload");
-    let recorded: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(temp.path().join(&payload.path))?)?;
+    let recorded: serde_json::Value = serde_json::from_slice(
+        codex_rollout_trace::PayloadReader::new(temp.path()).read(payload)?,
+    )?;
     assert_eq!(recorded["output_items"], serde_json::to_value(&delivered)?);
     Ok(())
 }

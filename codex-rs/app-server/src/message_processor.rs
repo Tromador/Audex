@@ -8,7 +8,6 @@ use std::sync::atomic::AtomicBool;
 use crate::attestation::app_server_attestation_provider;
 use crate::config_manager::ConfigManager;
 use crate::connection_rpc_gate::ConnectionRpcGate;
-use crate::current_time::app_server_time_provider;
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
 use crate::error_code::invalid_request;
@@ -418,11 +417,7 @@ impl MessageProcessor {
                     outgoing.clone(),
                     thread_state_manager.clone(),
                 )),
-                {
-                    let time_provider =
-                        app_server_time_provider(outgoing.clone(), thread_state_manager.clone());
-                    Some(time_provider)
-                },
+                None,
             );
             match code_mode_session_provider {
                 Some(provider) => manager.with_code_mode_session_provider(provider),
@@ -1331,7 +1326,7 @@ impl MessageProcessor {
                 .clients_revoke(params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::ConfigRequirementsRead { params: _, .. } => self
+            ClientRequest::ConfigRequirementsRead { .. } => self
                 .config_processor
                 .config_requirements_read()
                 .await
@@ -1400,7 +1395,12 @@ impl MessageProcessor {
                 .model_provider_config_write(params)
                 .await
                 .map(|r| Some(r.into())),
-            ClientRequest::ModelProviderCapabilitiesRead { params: _, .. } => self
+            ClientRequest::ModelProviderDefaultSet { params, .. } => self
+                .config_processor
+                .model_provider_default_set(params)
+                .await
+                .map(Some),
+            ClientRequest::ModelProviderCapabilitiesRead { .. } => self
                 .config_processor
                 .model_provider_capabilities_read()
                 .await
@@ -1867,7 +1867,10 @@ impl MessageProcessor {
             ClientRequest::ThreadTimelineList { params, .. } => {
                 self.thread_processor.thread_timeline_list(params).await
             }
-            ClientRequest::ThreadRealtimeListVoices { params: _, .. } => {
+            ClientRequest::ThreadRealtimeList { params, .. } => {
+                self.thread_processor.thread_realtime_list(params).await
+            }
+            ClientRequest::ThreadRealtimeListVoices { .. } => {
                 self.turn_processor.thread_realtime_list_voices().await
             }
             ClientRequest::ReviewStart { params, .. } => {

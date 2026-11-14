@@ -520,6 +520,7 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
 
     app.handle_mcp_inventory_result(
         Ok(vec![McpServerStatus {
+            environment_id: None,
             server_capabilities: None,
             tool_list_meta: None,
             tools_error: None,
@@ -1210,6 +1211,7 @@ async fn active_thread_drain_yields_after_frame_deadline_without_dropping_events
         crate::token_usage::TokenUsage {
             input_tokens: 4,
             cached_input_tokens: 1,
+            cache_write_input_tokens: 0,
             output_tokens: 5,
             reasoning_output_tokens: 0,
             total_tokens: 10,
@@ -1238,6 +1240,7 @@ async fn active_thread_drain_yields_after_frame_deadline_without_dropping_events
         crate::token_usage::TokenUsage {
             input_tokens: 4,
             cached_input_tokens: 1,
+            cache_write_input_tokens: 0,
             output_tokens: 10,
             reasoning_output_tokens: 0,
             total_tokens: 15,
@@ -2218,7 +2221,6 @@ async fn replayed_interrupted_turn_restores_queued_input_to_composer() {
 #[tokio::test]
 async fn token_usage_update_refreshes_status_line_with_runtime_context_window() {
     use crate::bottom_pane::StatusLineItem;
-    use crate::bottom_pane::footer_content::FooterContent;
 
     let mut app = make_test_app().await;
     app.chat_widget.setup_status_line(
@@ -2249,10 +2251,11 @@ async fn token_usage_update_refreshes_status_line_with_runtime_context_window() 
         app.handle_thread_event_now(ThreadBufferedEvent::Notification(Box::new(
             token_usage_notification(thread_id, "turn-1", Some(window)),
         )));
-        assert!(matches!(
-            app.chat_widget.status_line_content(),
-            Some(FooterContent::HyperlinkLine(_))
-        ));
+        assert!(
+            app.chat_widget
+                .status_line_content()
+                .is_some_and(|status| status.as_native().is_some())
+        );
         let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 60);
         assert!(
             rendered.lines().any(|row| row.trim() == expected),
@@ -4578,7 +4581,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
             .collect::<Vec<_>>()
             .join("\n")
     );
-    let sidebar_x = app.conversation_frame.chooser_area().unwrap().x;
+    let sidebar_x = app.conversation_frame.panel_area().unwrap().x;
     app.local_settings.tui.animations = true;
     keys!(KeyCode::Enter.into());
     assert!(!tui.has_deferred_thread_switch_clear());
@@ -5552,7 +5555,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
 
     keys!(prefix, chooser_key, prefix, KeyCode::Char('=').into());
     side_frame(&mut app, &mut tui, even)?;
-    assert_eq!(app.conversation_frame.chooser_area().unwrap().width, 100);
+    assert_eq!(app.conversation_frame.panel_area().unwrap().width, 100);
     keys!(prefix, KeyCode::Char('r').into(), KeyCode::Left.into());
     let frame = side_frame(&mut app, &mut tui, even)?;
     let (_, hint) = frame
@@ -5586,12 +5589,12 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     assert_eq!(strip.divider_area(), Some(Rect::new(target, 0, 1, 1)));
     keys!(prefix, chooser_key);
     side_frame(&mut app, &mut tui, even)?;
-    assert!(app.conversation_frame.chooser_area().is_some());
+    assert!(app.conversation_frame.panel_area().is_some());
     assert_eq!(divider_at(&tui, 4), target);
 
     // Closing from the chooser must not switch to the tab before confirmation.
     let chooser_focus = app.chooser_focus();
-    let chooser = app.conversation_frame.chooser_area().unwrap();
+    let chooser = app.conversation_frame.panel_area().unwrap();
     let close_x = (chooser.x..chooser.right())
         .rfind(|&x| tui.terminal.previous_buffer()[(x, chooser.y)].symbol() == "×")
         .expect("close button on the second tab");
@@ -7324,6 +7327,7 @@ async fn inactive_thread_url_elicitation_routes_to_app_link() {
     let request = ServerRequest::McpServerElicitationRequest {
         request_id: AppServerRequestId::Integer(9),
         params: McpServerElicitationRequestParams {
+            environment_id: None,
             thread_id: thread_id.to_string(),
             turn_id: Some("turn-auth".to_string()),
             server_name: "payments".to_string(),
@@ -7364,6 +7368,7 @@ async fn inactive_thread_invalid_url_elicitation_is_declined() {
     let request = ServerRequest::McpServerElicitationRequest {
         request_id: AppServerRequestId::Integer(10),
         params: McpServerElicitationRequestParams {
+            environment_id: None,
             thread_id: thread_id.to_string(),
             turn_id: Some("turn-auth".to_string()),
             server_name: "payments".to_string(),
@@ -7461,6 +7466,15 @@ async fn inactive_thread_approval_badge_clears_after_turn_completion_notificatio
 #[tokio::test]
 async fn inactive_thread_started_notification_initializes_replay_session() -> Result<()> {
     let mut app = make_test_app().await;
+    app.chat_widget
+        .set_feature_enabled(Feature::CliDaybreak, /*enabled*/ true);
+    set_chatgpt_auth(&mut app.chat_widget);
+    let mut model = crate::test_support::TEST_MODEL_PRESETS[0].clone();
+    model.model = "gpt-agent".into();
+    model.available_access_programs = Some(codex_protocol::openai_models::ModelAccessPrograms {
+        cyber: vec![codex_protocol::turn_input::CyberAccessProgram::DaybreakBlue],
+    });
+    crate::chatwidget::tests::helpers::set_test_model_catalog(&mut app.chat_widget, vec![model]);
     let temp_dir = tempdir()?;
     let main_thread_id =
         ThreadId::from_string("00000000-0000-0000-0000-000000000101").expect("valid thread");
@@ -7469,6 +7483,15 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
     let primary_cwd = test_path_buf("/tmp/main").abs();
     let shared_root = test_path_buf("/tmp/shared").abs();
     let primary_session = ThreadSessionState {
+        read_only_history: true,
+        collaboration_mode: Some(Box::new(CollaborationMode {
+            mode: codex_protocol::config_types::ModeKind::Plan,
+            settings: codex_protocol::config_types::Settings {
+                model: "parent-model".into(),
+                reasoning_effort: Some(ReasoningEffortConfig::High),
+                developer_instructions: None,
+            },
+        })),
         daybreak_enabled: false,
         windows_sandbox_host: WindowsSandboxHost::Local,
         approval_policy: AskForApproval::OnRequest,
@@ -7497,7 +7520,7 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
                 originator: None,
                 environments: Some(vec![codex_app_server_protocol::ThreadEnvironment {
                     environment_id: "remote".to_string(),
-                    cwd: test_path_buf("/tmp/agent").abs().into(),
+                    cwd: codex_utils_path_uri::LegacyAppPathString::from_string("/executor/agent"),
                     runtime_workspace_roots: Vec::new(),
                 }]),
                 id: agent_thread_id.to_string(),
@@ -7513,9 +7536,9 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
                 project_id: None,
                 daybreak_enabled: Some(true),
                 history_mode: Default::default(),
-                model_provider: "agent-provider".to_string(),
+                model_provider: "openai".to_string(),
                 model: Some("gpt-agent".to_string()),
-                reasoning_effort: None,
+                reasoning_effort: Some(ReasoningEffortConfig::Low),
                 created_at: 1,
                 updated_at: 2,
                 recency_at: Some(2),
@@ -7536,22 +7559,24 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
     )
     .await?;
 
-    let store = app
+    let session = app
         .thread_event_channels
         .get(&agent_thread_id)
         .expect("agent thread channel")
         .store
         .lock()
-        .await;
-    let session = store.session.clone().expect("inferred session");
-    drop(store);
+        .await
+        .session
+        .take()
+        .expect("inferred session");
 
+    assert!(!session.read_only_history);
     assert_eq!(session.thread_id, agent_thread_id);
     assert!(session.daybreak_enabled);
     assert_eq!(session.windows_sandbox_host, WindowsSandboxHost::Remote);
     assert_eq!(session.thread_name, Some("agent thread".to_string()));
     assert_eq!(session.model, "gpt-agent");
-    assert_eq!(session.model_provider_id, "agent-provider");
+    assert_eq!(session.model_provider_id, "openai");
     assert_eq!(session.approval_policy, primary_session.approval_policy);
     assert_eq!(session.cwd.as_path(), test_path_buf("/tmp/agent").as_path());
     assert_eq!(
@@ -7569,6 +7594,17 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
             is_closed: false,
         })
     );
+
+    app.chat_widget.handle_thread_session(session);
+    let state = serde_json::to_value(app.chat_widget.statusline_state())?;
+    let thread = &state["thread"];
+    assert_eq!(thread["workspace"]["cwd"], "/executor/agent");
+    assert_eq!(thread["model"]["id"], "gpt-agent");
+    assert_eq!(thread["model"]["reasoning_level"], "low");
+    assert_eq!(thread["model"]["access_program"], "daybreak_blue");
+    assert!(thread["model"].get("service_tier").is_none());
+    assert!(thread.get("approval").is_none());
+    assert!(thread.get("permissions").is_none());
 
     Ok(())
 }
@@ -7643,17 +7679,21 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
     )
     .await?;
 
-    let store = app
+    let session = app
         .thread_event_channels
         .get(&agent_thread_id)
         .expect("agent thread channel")
         .store
         .lock()
-        .await;
-    let session = store.session.clone().expect("inferred session");
-
+        .await
+        .session
+        .take()
+        .expect("inferred session");
     assert_eq!(session.model, primary_session.model);
 
+    app.chat_widget.handle_thread_session(session);
+    let state = serde_json::to_value(app.chat_widget.statusline_state())?;
+    assert_eq!(state["thread"]["model"]["id"], primary_session.model);
     Ok(())
 }
 
@@ -7674,7 +7714,6 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         runtime_workspace_roots: vec![primary_cwd.clone()],
         ..test_thread_session(main_thread_id, primary_cwd.to_path_buf())
     };
-    app.primary_session_configured = Some(primary_session);
 
     let thread = Thread {
         originator: None,
@@ -7712,10 +7751,17 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         turns: Vec::new(),
     };
 
+    let cold_session = app
+        .session_state_for_thread_read(read_thread_id, &thread)
+        .await;
+    assert!(cold_session.read_only_history);
+
+    app.primary_session_configured = Some(primary_session);
     let session = app
         .session_state_for_thread_read(read_thread_id, &thread)
         .await;
 
+    assert!(session.read_only_history);
     assert_eq!(session.thread_id, read_thread_id);
     assert_eq!(session.model, "server-reported-model");
     assert_eq!(session.cwd.as_path(), test_path_buf("/tmp/read").as_path());
@@ -7798,7 +7844,7 @@ fn agent_picker_item_name_snapshot() {
 async fn side_fork_config_is_ephemeral_and_appends_developer_guardrails() {
     let app = make_test_app().await;
     let original_approval_policy = app.config.permissions.approval_policy.value();
-    let original_sandbox_policy = app.config.legacy_sandbox_policy();
+    let original_permission_profile = app.config.permissions.effective_permission_profile();
 
     let mut fork_config = app.side_fork_config();
     crate::app_server_session::SideChatStorage::Temporary.configure_fork(&mut fork_config);
@@ -7808,7 +7854,10 @@ async fn side_fork_config_is_ephemeral_and_appends_developer_guardrails() {
         fork_config.permissions.approval_policy.value(),
         original_approval_policy
     );
-    assert_eq!(fork_config.legacy_sandbox_policy(), original_sandbox_policy);
+    assert_eq!(
+        fork_config.permissions.effective_permission_profile(),
+        original_permission_profile
+    );
     let developer_instructions = fork_config
         .developer_instructions
         .as_deref()
@@ -8285,6 +8334,7 @@ async fn primary_thread_ignores_child_mcp_startup_notifications() {
         &app_server,
         codex_app_server_client::AppServerEvent::ServerNotification(Box::new(
             ServerNotification::McpServerStatusUpdated(McpServerStatusUpdatedNotification {
+                environment_id: None,
                 thread_id: Some(child_thread_id.to_string()),
                 name: "sentry".to_string(),
                 status: McpServerStartupState::Failed,
@@ -8363,6 +8413,7 @@ async fn app_scoped_mcp_startup_notifications_do_not_render_in_active_thread() {
         &app_server,
         codex_app_server_client::AppServerEvent::ServerNotification(Box::new(
             ServerNotification::McpServerStatusUpdated(McpServerStatusUpdatedNotification {
+                environment_id: None,
                 thread_id: None,
                 name: "sentry".to_string(),
                 status: McpServerStartupState::Failed,
@@ -8443,6 +8494,7 @@ async fn active_side_thread_renders_live_mcp_startup_notifications() {
             &app_server,
             codex_app_server_client::AppServerEvent::ServerNotification(Box::new(
                 ServerNotification::McpServerStatusUpdated(McpServerStatusUpdatedNotification {
+                    environment_id: None,
                     thread_id: Some(side_thread_id.to_string()),
                     name: name.to_string(),
                     status,
@@ -8820,6 +8872,9 @@ async fn render_clear_ui_header_after_long_transcript_for_snapshot() -> String {
     };
     let make_header = |is_first| -> Arc<dyn HistoryCell> {
         let session = ThreadSessionState {
+            read_only_history: false,
+            thread_settings_confirmed: true,
+            primary_environment_cwd: None,
             daybreak_enabled: false,
             windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
             thread_id: ThreadId::new(),
@@ -9535,6 +9590,9 @@ async fn replace_goal_confirmation_snapshot() {
 
 pub(super) fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState {
     ThreadSessionState {
+        read_only_history: false,
+        thread_settings_confirmed: true,
+        primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id,
@@ -10851,6 +10909,9 @@ async fn backtrack_selection_preserves_selected_prompt_and_requests_branch() {
 
     let make_header = |is_first| {
         let session = ThreadSessionState {
+            read_only_history: false,
+            thread_settings_confirmed: true,
+            primary_environment_cwd: None,
             daybreak_enabled: false,
             windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
             thread_id: ThreadId::new(),
@@ -10924,6 +10985,9 @@ async fn backtrack_selection_preserves_selected_prompt_and_requests_branch() {
     let base_id = ThreadId::new();
     app.chat_widget
         .handle_thread_session(crate::session_state::ThreadSessionState {
+            read_only_history: false,
+            thread_settings_confirmed: true,
+            primary_environment_cwd: None,
             daybreak_enabled: false,
             windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
             thread_id: base_id,
@@ -11154,6 +11218,10 @@ async fn in_app_resume_session_cwd_without_metadata_is_non_fatal() -> Result<()>
 
 #[tokio::test]
 async fn remote_resume_keeps_server_only_cwd_out_of_local_config() -> Result<()> {
+    use codex_config::types::BuiltinStatusLine;
+    use codex_config::types::StatusLineProviderId;
+    use codex_config::types::StatusLineSelection;
+
     // Keep the large setup and resume futures off the Windows test stack.
     let (mut app, _app_event_rx, _op_rx) = Box::pin(make_test_app_with_channels()).await;
     let local_cwd = app.config.cwd.to_path_buf();
@@ -11208,18 +11276,15 @@ async fn remote_resume_keeps_server_only_cwd_out_of_local_config() -> Result<()>
         RuntimePermissionProfileOverride::from_restored_config(&prior_config),
     );
 
-    let control = Box::pin(app.resume_target_session(
-        &mut tui,
-        &mut app_server,
-        crate::resume_picker::SessionTarget {
-            backend_id,
-            path: Some(rollout_path),
-            thread_id: ThreadId::from_string(&thread_id)?,
-            cwd: None,
-            history_mode: None,
-        },
-    ))
-    .await?;
+    let target = crate::resume_picker::SessionTarget {
+        backend_id,
+        path: Some(rollout_path),
+        thread_id: ThreadId::from_string(&thread_id)?,
+        cwd: None,
+        history_mode: None,
+    };
+    let control =
+        Box::pin(app.resume_target_session(&mut tui, &mut app_server, target.clone())).await?;
 
     assert!(matches!(control, AppRunControl::Continue));
     assert_eq!(app.harness_overrides.cwd, Some(remote_cwd));
@@ -11230,6 +11295,49 @@ async fn remote_resume_keeps_server_only_cwd_out_of_local_config() -> Result<()>
     assert_eq!(app.config.workspace_roots, local_workspace_roots);
     assert_eq!(app.runtime_approval_policy_override, None);
     assert!(app.runtime_permission_profile_override.is_none());
+
+    // Preparing this stored remote from an embedded conversation still uses its client preferences.
+    let mut stored = app.backend_settings();
+    let remote_home = tempdir()?;
+    let profile = stored.local_settings.codex_home.join("work.config.toml");
+    let managed = stored.local_settings.codex_home.join("managed.toml");
+    std::fs::write(
+        &profile,
+        "[tui]\nstatus_line_provider = { server = 'work', tool = 'usage' }\n",
+    )?;
+    app.loader_overrides = LoaderOverrides {
+        user_config_path: Some(profile),
+        user_config_profile: Some("work".parse()?),
+        ..LoaderOverrides::with_managed_config_path_for_tests(managed.to_path_buf())
+    };
+    stored.config.codex_home = remote_home.path().to_path_buf().abs();
+    app.app_server_target = crate::AppServerTarget::Embedded;
+    let (_, local) = Box::pin(app.resume_config_for_target(
+        &mut tui,
+        &mut app_server,
+        &target,
+        super::resume_preparation::ResumeSource::Backend(&stored),
+    ))
+    .await
+    .expect("prepare stored remote");
+    assert_eq!(local.codex_home, stored.local_settings.codex_home);
+    assert_eq!(
+        local.tui.status_line_provider.as_deref(),
+        Some(&StatusLineSelection::Mcp(StatusLineProviderId {
+            server: "work".into(),
+            tool: "usage".into(),
+        })),
+    );
+    std::fs::write(managed, "[tui]\nstatus_line_provider = 'default'\n")?;
+    app.refresh_in_memory_config_from_disk().await?;
+    assert_eq!(
+        app.chat_widget
+            .local_settings
+            .tui
+            .status_line_provider
+            .as_deref(),
+        Some(&StatusLineSelection::Builtin(BuiltinStatusLine::Default)),
+    );
     app_server.shutdown().await?;
     Ok(())
 }
@@ -12276,6 +12384,9 @@ async fn new_session_requests_shutdown_for_previous_conversation() {
 
         let thread_id = ThreadId::new();
         let event = crate::session_state::ThreadSessionState {
+            read_only_history: false,
+            thread_settings_confirmed: true,
+            primary_environment_cwd: None,
             daybreak_enabled: false,
             windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
             thread_id,
@@ -13055,6 +13166,9 @@ async fn clear_only_ui_reset_preserves_chat_session_state() {
     let thread_id = ThreadId::new();
     app.chat_widget
         .handle_thread_session(crate::session_state::ThreadSessionState {
+            read_only_history: false,
+            thread_settings_confirmed: true,
+            primary_environment_cwd: None,
             daybreak_enabled: false,
             windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
             thread_id,

@@ -4,6 +4,7 @@ use clap::Parser;
 use codex_app_server::AppServerCodeModeHostArgs;
 use codex_app_server::AppServerRuntimeOptions;
 use codex_app_server::AppServerTransport;
+use codex_app_server::PluginMcpLaunchArgs;
 use codex_app_server::PluginStartupTasks;
 use codex_app_server::run_main_with_transport_options;
 use codex_arg0::Arg0DispatchPaths;
@@ -79,6 +80,9 @@ struct AppServerArgs {
     /// Save loaded threads during managed daemon shutdown.
     #[arg(long, hide = true)]
     managed_daemon: bool,
+
+    #[command(flatten)]
+    plugin_mcp_launch: PluginMcpLaunchArgs,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -103,6 +107,7 @@ fn main() -> anyhow::Result<()> {
             disable_plugin_startup_tasks_for_tests,
             remote_control,
             managed_daemon,
+            plugin_mcp_launch,
         } = AppServerArgs::parse();
         if let Some(InternalCommand::AuditSourceMcp(args)) = command {
             return codex_app_server::run_audex_source_mcp(args).await;
@@ -120,6 +125,7 @@ fn main() -> anyhow::Result<()> {
             cloud_skills_snapshot,
             code_mode_host_transport: code_mode_host.into(),
             managed_daemon,
+            plugin_mcp_launch,
             ..Default::default()
         };
         #[cfg(debug_assertions)]

@@ -15,6 +15,8 @@ mod loading;
 #[path = "agents_overview_selection.rs"]
 mod selection;
 
+use super::agents_overview_discovery::is_overview_root;
+use super::agents_overview_discovery::is_visible_in_agents_overview;
 use super::agents_overview_view::AgentsOverviewGroup;
 use super::agents_overview_view::AgentsOverviewRow;
 use super::agents_overview_view::AgentsOverviewView;
@@ -257,11 +259,7 @@ impl App {
                         if displayed_refresh
                             && !self.agents_overview.threads.contains_key(&thread_id)
                             && !self.agents_overview.hidden_threads.contains(&thread_id)
-                            && thread.parent_thread_id.is_none()
-                            && !matches!(
-                                thread.source,
-                                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
-                            )
+                            && is_overview_root(&thread)
                         {
                             self.agents_overview.refill_count =
                                 self.agents_overview.refill_count.saturating_sub(1);
@@ -423,7 +421,7 @@ impl App {
                 threads.push(target.clone());
             }
         }
-        threads.retain(|thread| !thread.ephemeral);
+        threads.retain(is_visible_in_agents_overview);
         for thread in &mut threads {
             if thread.parent_thread_id.is_none()
                 && let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -526,10 +524,23 @@ impl App {
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
     ) -> Result<AppRunControl> {
+        // Selecting an already visible chat can just dismiss the overview.
+        let viewing_task = self.current_displayed_thread_id() == Some(thread_id)
+            && (!self.thread_unavailable(thread_id) || self.chat_widget.is_external_writer_view());
         if let Some(owner) = self.backend_registry.owner(thread_id)
-            && owner != app_server.backend_id()
+            && (owner != app_server.backend_id()
+                || (app_server.thread_params_mode()
+                    == crate::app_server_session::ThreadParamsMode::Cloud
+                    && !self.chat_widget.fork_in_progress
+                    && !viewing_task))
         {
-            let Some(Some(thread)) = self.agents_overview.threads.get(&thread_id) else {
+            let Some(thread) = self
+                .agents_overview
+                .threads
+                .get(&thread_id)
+                .and_then(Option::as_ref)
+                .or_else(|| self.agents_overview.search_matches.get(&thread_id))
+            else {
                 self.add_agents_overview_error(format!(
                     "Agent session {thread_id} is unavailable. Refresh Command Center and try again."
                 ));
@@ -564,8 +575,7 @@ impl App {
         }
         let is_new_session = started.is_some();
         if self.current_displayed_thread_id() == Some(root_thread_id)
-            && (!self.thread_unavailable(root_thread_id)
-                || self.chat_widget.is_external_writer_view())
+            && (!self.thread_unavailable(root_thread_id) || self.chat_widget.is_read_only_view())
         {
             // Keep the displayed read-only snapshot frozen; R explicitly retries attachment.
             if let Ok(mut state) = self.agents_overview.view_state.lock() {
@@ -696,6 +706,7 @@ impl App {
                         &current_cwd,
                         config_cwd,
                         (&self.config, &self.local_settings),
+                        &self.app_server_target,
                     )
                     .await
                 {
@@ -1004,8 +1015,7 @@ impl App {
         }
 
         if self.current_displayed_thread_id() != Some(root_thread_id)
-            || (self.thread_unavailable(root_thread_id)
-                && !self.chat_widget.is_external_writer_view())
+            || (self.thread_unavailable(root_thread_id) && !self.chat_widget.is_read_only_view())
         {
             self.select_agent_thread(tui, app_server, root_thread_id)
                 .await?;
@@ -1013,7 +1023,7 @@ impl App {
         if self.current_displayed_thread_id() == Some(root_thread_id) {
             self.remember_attached_host_project(app_server);
         }
-        let read_only = self.chat_widget.is_external_writer_view();
+        let read_only = self.chat_widget.is_read_only_view();
         if !read_only {
             self.replay_agents_overview_requests(app_server, root_thread_id)
                 .await;
@@ -1050,10 +1060,12 @@ impl App {
         mut input: ThreadInputState,
         pending_settings: Option<codex_app_server_protocol::ThreadSettingsUpdatedNotification>,
     ) {
-        let preserve_in_flight_turn = !self.chat_widget.is_external_writer_view()
+        let preserve_in_flight_turn = !self.chat_widget.is_read_only_view()
             && self.active_turn_id_for_thread(thread_id).await.is_some();
         self.reconcile_saved_session_input(thread_id, &mut input)
             .await;
+        // Missing receipts must not turn a previously submitted steer into unsent input.
+        input.reconnect_pending |= !preserve_in_flight_turn && !input.pending_steers.is_empty();
         self.chat_widget.restore_thread_input_state(
             Some(input),
             ThreadInputStateRestoreMode {

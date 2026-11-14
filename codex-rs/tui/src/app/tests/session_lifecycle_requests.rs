@@ -1,4 +1,8 @@
+#[path = "archived_thread_tests.rs"]
+mod archived_thread_tests;
+
 use super::*;
+use crate::app::session_lifecycle::FreshSessionStart;
 use crate::app_event::TranscriptExportDestination;
 use crate::bottom_pane::BottomPaneView;
 use crate::test_support::boxed_future;
@@ -323,7 +327,7 @@ async fn cloud_resume_picker_reconciles_admitted_steers() -> Result<()> {
     use codex_protocol::models::MessagePhase;
 
     let (mut app, mut events, mut ops) = make_test_app_with_channels().await;
-    let [original, other] = [ThreadId::new(), ThreadId::new()];
+    let [original, other, failed] = std::array::from_fn(|_| ThreadId::new());
     app.app_server_target = AppServerTarget::Cloud;
     app.enqueue_primary_thread_session(
         test_thread_session(original, app.config.cwd.to_path_buf()),
@@ -417,10 +421,30 @@ async fn cloud_resume_picker_reconciles_admitted_steers() -> Result<()> {
         crate::ThreadParamsMode::Cloud,
     );
     let backend_id = server.backend_id();
+    let mut failed_row = other_thread.clone();
+    failed_row.id = failed.to_string();
+    failed_row.session_id = failed_row.id.clone();
+    failed_row.history_mode = ThreadHistoryMode::Paginated;
+    let unavailable = failed_row.clone();
     let serve = tokio::spawn(async move {
         let mut resumed_threads = Vec::new();
         while let Some(command) = commands.recv().await {
-            let reply = match command.operation {
+            let (operation, scoped_history) = match command.operation {
+                CloudOperation::PrepareThreadResume {
+                    request_id,
+                    params,
+                    history,
+                } => (
+                    CloudOperation::Request(Box::new(ClientRequest::ThreadResume {
+                        request_id,
+                        params: *params,
+                    })),
+                    Some(history),
+                ),
+                operation => (operation, None),
+            };
+            let mut history_fails = false;
+            let reply = match operation {
                 CloudOperation::Request(request) => match *request {
                     ClientRequest::ThreadRead { params, .. } => {
                         let mut thread = if params.thread_id == original.to_string() {
@@ -434,7 +458,10 @@ async fn cloud_resume_picker_reconciles_admitted_steers() -> Result<()> {
                         Ok(serde_json::json!({"thread": thread}))
                     }
                     ClientRequest::ThreadResume { params, .. } => {
-                        let mut thread = if params.thread_id == original.to_string() {
+                        history_fails = params.thread_id == failed.to_string();
+                        let mut thread = if history_fails {
+                            unavailable.clone()
+                        } else if params.thread_id == original.to_string() {
                             original_thread.clone()
                         } else {
                             other_thread.clone()
@@ -448,7 +475,9 @@ async fn cloud_resume_picker_reconciles_admitted_steers() -> Result<()> {
                                 vec![agent_item("missed-item", "Missed response", None)],
                             ));
                         }
-                        resumed_threads.push(params.thread_id);
+                        if !history_fails {
+                            resumed_threads.push(params.thread_id);
+                        }
                         Ok(serde_json::json!({
                             "thread": thread,
                             "model": "gpt-5.5",
@@ -486,6 +515,34 @@ async fn cloud_resume_picker_reconciles_admitted_steers() -> Result<()> {
                 _ => panic!("unexpected Cloud operation while resuming"),
             };
             command.response.send(Ok(reply)).unwrap();
+            if let Some(mut scoped_history) = scoped_history {
+                let commit = scoped_history.recv().await.unwrap();
+                if history_fails {
+                    assert!(matches!(commit.operation, CloudOperation::Request(request)
+                        if matches!(request.as_ref(), ClientRequest::ThreadTurnsList { params, .. } if params.thread_id == failed.to_string())));
+                    commit
+                        .response
+                        .send(Ok(Err(JSONRPCErrorError {
+                            code: -32000,
+                            message: "history unavailable".into(),
+                            data: None,
+                        })))
+                        .unwrap();
+                    assert!(
+                        scoped_history.recv().await.is_none(),
+                        "failed B must not commit"
+                    );
+                    continue;
+                }
+                assert!(matches!(
+                    commit.operation,
+                    CloudOperation::CommitPreparedResume
+                ));
+                commit
+                    .response
+                    .send(Ok(Ok(serde_json::Value::Null)))
+                    .unwrap();
+            }
         }
         resumed_threads
     });
@@ -629,7 +686,34 @@ async fn cloud_resume_picker_reconciles_admitted_steers() -> Result<()> {
     assert!(
         !std::iter::from_fn(|| ops.try_recv().ok()).any(|op| matches!(op, Op::UserTurn { .. }))
     );
-    server.shutdown().await?;
+    // Use the regular Command Center Enter action to open a task whose history fails.
+    app.app_server_backend_id = Some(backend_id);
+    app.chat_widget
+        .apply_external_edit("Keep this draft".into());
+    app.backend_registry.observe(backend_id, failed);
+    app.agents_overview
+        .threads
+        .insert(failed, Some(failed_row.clone()));
+    let view = app.agents_overview_view(vec![failed_row], Some(failed));
+    app.agents_overview.visible_thread_ids = view.thread_ids();
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    while events.try_recv().is_ok() {}
+    app.chat_widget.handle_key_event(KeyCode::Enter.into());
+    Box::pin(app.handle_event(&mut tui, &mut server, events.try_recv()?)).await?;
+    let AppEvent::ResumeBackendSession(target) = events.try_recv()? else {
+        color_eyre::eyre::bail!("Enter must use the owner-routed resume path");
+    };
+    assert_eq!((target.backend_id, target.thread_id), (backend_id, failed));
+    let mut backends = crate::app::backend_sessions::BackendSessions::from_initial(server, vec![]);
+    app.resume_backend_session(&mut tui, &mut backends, target)
+        .await?;
+    assert_eq!(backends.displayed_owner(), backend_id);
+    assert_eq!(app.chat_widget.thread_id(), Some(original));
+    assert_eq!(
+        app.chat_widget.composer_text_with_pending(),
+        "Keep this draft"
+    );
+    backends.shutdown().await?;
     assert_eq!(
         serve.await?,
         [
@@ -1133,7 +1217,7 @@ async fn complete_managed_worktree_creation(
             .await?
             .ok_or_else(|| color_eyre::eyre::eyre!("worktree creation event channel closed"))?;
         if matches!(event, AppEvent::ManagedWorktreeCreated(_)) {
-            app.handle_event(tui, server, event).await?;
+            crate::boxed_future!(app.handle_event(tui, server, event)).await?;
             if let Some(created) = app.pending_managed_worktree_created.take() {
                 app.finish_managed_worktree(*created).await;
             }
@@ -1752,9 +1836,8 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                                     serde_json::json!("future_voice");
                             }
                             if custom_voice_catalog && let Ok(value) = &mut result {
-                                value["voices"]["v1"] =
+                                value["voices"]["v3"] =
                                     serde_json::json!(["maple", "cove", "juniper"]);
-                                value["voices"]["defaultV1"] = serde_json::json!("maple");
                             }
                             if background {
                                 let terminal = r#"{"data":[{"itemId":"x","processId":"x","command":"x","cwd":"/"}],"nextCursor":null}"#;
@@ -1874,12 +1957,81 @@ async fn make_history_test_app() -> Result<(Box<App>, tempfile::TempDir)> {
 }
 
 #[tokio::test]
+async fn read_only_history_hides_the_statusline_until_interactive_resume() -> Result<()> {
+    let (mut app, _codex_home) = make_history_test_app().await?;
+    let thread_id = create_history_rollout(&app.config, ThreadHistoryMode::Legacy, "saved prompt")?;
+    app.config
+        .permissions
+        .set_permission_profile(PermissionProfile::read_only())?;
+    let mut server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+    app.chat_widget.setup_status_line(
+        vec![crate::bottom_pane::StatusLineItem::SessionId],
+        /*use_theme_colors*/ false,
+    );
+
+    app.enqueue_primary_thread_session(
+        test_thread_session(thread_id, app.config.cwd.to_path_buf()),
+        Vec::new(),
+    )
+    .await?;
+    assert!(render_bottom_popup(&app.chat_widget, /*width*/ 100).contains(&thread_id.to_string()));
+
+    let (view, _) = server
+        .read_thread_for_viewing(&app.config, &app.local_settings, thread_id)
+        .await?;
+    app.enqueue_primary_thread_session(view.session, view.turns)
+        .await?;
+    assert!(app.chat_widget.statusline_state().is_none());
+    let footer = render_bottom_popup(&app.chat_widget, /*width*/ 100);
+    insta::assert_snapshot!(footer, @r"
+    › Ask Codex to do anything
+
+      ? for shortcuts
+    ");
+
+    for window in [Some(100_000), None] {
+        app.chat_widget.handle_server_notification(
+            token_usage_notification(thread_id, "turn-1", window),
+            /*replay_kind*/ None,
+        );
+        assert_eq!(render_bottom_popup(&app.chat_widget, /*width*/ 100), footer);
+    }
+
+    let live = server
+        .resume_thread(
+            &app.local_settings,
+            app.config.clone(),
+            thread_id,
+            app.resume_model_settings(),
+        )
+        .await?;
+    assert_eq!(
+        live.session.permission_profile,
+        PermissionProfile::read_only()
+    );
+    app.enqueue_primary_thread_session(live.session, live.turns)
+        .await?;
+    assert!(app.chat_widget.statusline_state().is_some());
+    let footer = render_bottom_popup(&app.chat_widget, /*width*/ 100);
+    assert!(footer.contains(&thread_id.to_string()), "{footer}");
+    app.chat_widget
+        .setup_status_line(Vec::new(), /*use_theme_colors*/ false);
+    app.chat_widget.handle_server_notification(
+        token_usage_notification(thread_id, "turn-2", /*model_context_window*/ None),
+        /*replay_kind*/ None,
+    );
+    assert!(render_bottom_popup(&app.chat_widget, /*width*/ 100).contains("10 used"));
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn cloud_resume_with_current_directory_needs_no_cwd_override() -> Result<()> {
     use codex_config::types::ResumeCwdMode;
 
     let (mut app, codex_home) = make_history_test_app().await?;
     std::fs::write(
-        codex_home.path().join("config.toml"),
+        &app.local_settings.user_config_path,
         "[tui]\nresume_cwd = 'current'\n",
     )?;
     app.launch_cwd = codex_home.path().to_path_buf();
@@ -2462,6 +2614,7 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths_sc
         .request_typed(ClientRequest::McpServerStatusList {
             request_id: AppServerRequestId::String("tui-tool-inventory".to_string()),
             params: codex_app_server_protocol::ListMcpServerStatusParams {
+                environment_id: None,
                 server_name: None,
                 cursor: None,
                 limit: None,
@@ -2846,7 +2999,8 @@ async fn older_external_server_starts_without_unsupported_dynamic_tools_or_histo
 
     let starts = recorded_params(&requests, "thread/start");
     assert_eq!(starts.len(), 6);
-    for attempts in starts.chunks_exact(3) {
+    const ATTEMPTS_PER_START: usize = 3;
+    for attempts in starts.as_chunks::<ATTEMPTS_PER_START>().0 {
         assert_eq!(attempts[0]["dynamicTools"][0]["type"], "namespace");
         assert_eq!(attempts[0]["historyMode"], "paginated");
         assert_eq!(attempts[1]["dynamicTools"], serde_json::Value::Null);
@@ -3296,6 +3450,7 @@ async fn check_dynamic_tool_requests(
         serde_json::json!({
             "name": "create_thread",
             "namespace": "codex_tui",
+            "retain": true,
             "output": format!(
                 "<codex_delegation>\n  <source_thread_id>{creation_source}</source_thread_id>\n  <input>Check &lt;main&gt; &amp; report</input>\n</codex_delegation>"
             )
@@ -3383,6 +3538,7 @@ async fn check_dynamic_tool_requests(
         serde_json::json!({
             "name": "send_message_to_thread",
             "namespace": "codex_tui",
+            "retain": true,
             "output": format!(
                 "<codex_delegation>\n  <source_thread_id>{thread_id}</source_thread_id>\n  <input>Follow &lt;up&gt; &amp; report</input>\n</codex_delegation>"
             )
@@ -4786,7 +4942,7 @@ model_reasoning_effort = "low"
     app.start_fresh_session(
         &mut tui,
         &mut server,
-        /*session_start_source*/ None,
+        FreshSessionStart::PreserveCurrentView(None),
         /*initial_user_message*/ None,
         /*new_thread_name*/ None,
     )
@@ -4816,14 +4972,14 @@ model_reasoning_effort = "low"
     );
     let mut browser_entries = Vec::new();
     requests.lock().expect("request recorder lock").clear();
-    app.handle_event(
+    crate::boxed_future!(app.handle_event(
         &mut tui,
         &mut server,
         AppEvent::StartManagedWorktree {
             mode: ManagedWorktreeMode::Fork,
             name: None,
         },
-    )
+    ))
     .await?;
     complete_managed_worktree_creation(&mut app, &mut tui, &mut server, &mut events).await?;
     assert_eq!(app.chat_widget.thread_id(), Some(original));
@@ -4889,14 +5045,14 @@ terminal_visualization_instructions = true
     )?;
     app.config = app.rebuild_config_for_cwd(source.clone()).await?;
     requests.lock().expect("request recorder lock").clear();
-    app.handle_event(
+    crate::boxed_future!(app.handle_event(
         &mut tui,
         &mut server,
         AppEvent::StartManagedWorktree {
             mode: ManagedWorktreeMode::Fork,
             name: None,
         },
-    )
+    ))
     .await?;
     complete_managed_worktree_creation(&mut app, &mut tui, &mut server, &mut events).await?;
     assert_eq!(app.chat_widget.thread_id(), Some(original));
@@ -4913,14 +5069,14 @@ terminal_visualization_instructions = true
         owner: crate::worktree_browser::Owner::None,
     });
     while events.try_recv().is_ok() {}
-    app.handle_event(
+    crate::boxed_future!(app.handle_event(
         &mut tui,
         &mut server,
         AppEvent::StartManagedWorktree {
             mode: ManagedWorktreeMode::New,
             name: None,
         },
-    )
+    ))
     .await?;
     assert_eq!(app.chat_widget.thread_id(), Some(original));
     drain_managed_worktree_start(&mut app, &mut server).await;
@@ -4948,11 +5104,11 @@ terminal_visualization_instructions = true
         .cwd
         .clone();
     app.primary_thread_id = Some(ThreadId::new());
-    app.handle_event(
+    crate::boxed_future!(app.handle_event(
         &mut tui,
         &mut server,
         AppEvent::ManagedWorktreeCreated(created),
-    )
+    ))
     .await?;
     let created = app
         .pending_managed_worktree_created
@@ -4988,14 +5144,14 @@ terminal_visualization_instructions = true
         requests.lock().expect("request recorder lock").clear();
         let previous = app.chat_widget.thread_id();
         let previous_rollout = app.chat_widget.rollout_path().expect("previous rollout");
-        app.handle_event(
+        crate::boxed_future!(app.handle_event(
             &mut tui,
             &mut server,
             AppEvent::StartManagedWorktree {
                 mode,
                 name: Some(format!("{mode:?} worktree")),
             },
-        )
+        ))
         .await?;
         complete_managed_worktree_creation(&mut app, &mut tui, &mut server, &mut events).await?;
         let replacement = app.chat_widget.thread_id().expect("replacement thread");
@@ -5150,7 +5306,7 @@ terminal_visualization_instructions = true
     app.start_fresh_session(
         &mut tui,
         &mut server,
-        /*session_start_source*/ None,
+        FreshSessionStart::PreserveCurrentView(None),
         /*initial_user_message*/ None,
         /*new_thread_name*/ None,
     )
@@ -5166,11 +5322,11 @@ terminal_visualization_instructions = true
         .set_turns(vec![completed]);
     for mode in [ManagedWorktreeMode::Fork, ManagedWorktreeMode::New] {
         requests.lock().expect("request recorder lock").clear();
-        app.handle_event(
+        crate::boxed_future!(app.handle_event(
             &mut tui,
             &mut server,
             AppEvent::StartManagedWorktree { mode, name: None },
-        )
+        ))
         .await?;
         drain_managed_worktree_start(&mut app, &mut server).await;
         let is_new = mode == ManagedWorktreeMode::New;
@@ -5325,9 +5481,14 @@ async fn change_directory_scenario() -> Result<()> {
         start_recording_app_server(&app.config, no_list, background).await?;
     let (rec, plain, req) = (recorded_params, crate::key_hint::plain, &requests);
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    let (source, message, name) = (None, None, Some("Previous project".to_string()));
-    app.start_fresh_session(&mut tui, &mut server, source, message, name)
-        .await;
+    app.start_fresh_session(
+        &mut tui,
+        &mut server,
+        FreshSessionStart::PreserveCurrentView(None),
+        /*initial_user_message*/ None,
+        Some("Previous project".to_string()),
+    )
+    .await;
     let original = app.chat_widget.thread_id().expect("original thread");
     let rollout = app.chat_widget.rollout_path().expect("original rollout");
     let json = r#"{"type":"message","role":"assistant","content":[{"type":"output_text","text":"saved history"}]}"#;
@@ -5734,7 +5895,7 @@ fn fresh_session_keeps_its_name_and_draft_when_cycling_backends() -> Result<()> 
                 app.start_fresh_session(
                     &mut tui,
                     &mut app_server,
-                    /*session_start_source*/ None,
+                    FreshSessionStart::PreserveCurrentView(None),
                     /*initial_user_message*/ None,
                     /*new_thread_name*/ Some("Add User".to_string()),
                 )
@@ -5872,6 +6033,7 @@ fn fresh_session_keeps_its_name_and_draft_when_cycling_backends() -> Result<()> 
                         .contains_key(&destination_thread)
                 );
                 assert!(!app.thread_event_channels.contains_key(&destination_thread));
+                tui.pause_events();
                 // An automatic fresh session may use another connection without changing
                 // the user's last explicit choice.
                 app.start_new_session_on_other_backend(
@@ -6040,7 +6202,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                 app.start_fresh_session(
                     &mut tui,
                     &mut app_server,
-                    /*session_start_source*/ None,
+                    FreshSessionStart::PreserveCurrentView(None),
                     /*initial_user_message*/ None,
                     /*new_thread_name*/ None,
                 )

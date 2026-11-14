@@ -1,4 +1,5 @@
 pub use codex_api::ResponseEvent;
+use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -18,10 +19,12 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-/// API request payload for a single model turn
-#[derive(Debug, Clone)]
+/// Core inputs to provider request formatting for a single model turn.
+/// The rollout trace serializes this shape before transport-specific rewrites.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Prompt {
     /// Conversation context input items.
+    #[serde(serialize_with = "codex_rollout_trace::serialize_trace_items")]
     pub input: Vec<ResponseItem>,
 
     /// Tool definitions to inject into this request, empty when supplied by history.
@@ -125,6 +128,32 @@ pub struct ResponseStream {
     /// Signals the mapper task that the consumer stopped polling before the
     /// provider stream reached its own terminal event.
     pub(crate) consumer_dropped: CancellationToken,
+}
+
+impl ResponseStream {
+    /// A cancelled turn discards any queued event, including an incomplete response's usage.
+    pub(crate) fn accept_for_turn(
+        event: Option<Result<ResponseEvent>>,
+        cancellation: &CancellationToken,
+    ) -> Option<Result<ResponseEvent>> {
+        if cancellation.is_cancelled() {
+            Some(Err(CodexErr::TurnAborted))
+        } else {
+            event
+        }
+    }
+
+    pub(crate) async fn next_for_turn(
+        &mut self,
+        cancellation: &CancellationToken,
+    ) -> Option<Result<ResponseEvent>> {
+        let event = tokio::select! {
+            biased;
+            event = self.rx_event.recv() => event,
+            () = cancellation.cancelled() => return Some(Err(CodexErr::TurnAborted)),
+        };
+        Self::accept_for_turn(event, cancellation)
+    }
 }
 
 impl Stream for ResponseStream {

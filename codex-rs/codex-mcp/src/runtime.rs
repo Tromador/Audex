@@ -4,7 +4,8 @@
 //! environment in which MCP servers execute. Transport startup lives in
 //! [`crate::rmcp_client`] and connection-set behavior lives in
 //! [`crate::connection_manager`]. Registry removal revokes EMA authority before
-//! the thread becomes untracked.
+//! the thread becomes untracked. Client targets resolve against the same runtime
+//! publication whose connections execute the operation.
 
 #[cfg(test)]
 #[path = "runtime/apps_tool_refresh_tests.rs"]
@@ -84,6 +85,13 @@ pub enum McpStartupPolicy {
     DeferCachedStdio,
     /// Allow cached tools to satisfy startup for any eligible transport, including required servers.
     DeferCachedServers,
+}
+
+/// Startup behavior for a host-requested MCP tool call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum McpToolStartup {
+    Wait,
+    SkipDormantReplCleanup,
 }
 
 /// A host-requested tool result and its identity in the published MCP catalog.
@@ -829,37 +837,61 @@ impl McpRuntime {
     pub async fn latest_read_resource(
         &self,
         server: &str,
+        environment_id: Option<&str>,
         params: ReadResourceRequestParams,
     ) -> anyhow::Result<ReadResourceResult> {
-        let connections = self.latest_connections();
-        let key = connections
-            .resolve_server_name(server)
+        let current = self.current.load_full();
+        let key = current
+            .config
+            .as_ref()
+            .map(|config| {
+                config
+                    .mcp_server_catalog
+                    .resolve_server_key(server, environment_id)
+            })
             .ok_or_else(|| anyhow::anyhow!("unknown MCP server '{server}'"))?;
-        connections.read_resource(key, params).await
+        current.connections.read_resource(&key, params).await
     }
 
     pub async fn latest_call_tool_without_attribution(
         &self,
         server: &str,
+        environment_id: Option<&str>,
         tool: &str,
         arguments: Option<serde_json::Value>,
         meta: Option<serde_json::Value>,
     ) -> anyhow::Result<CallToolResult> {
-        let connections = self.latest_connections();
-        let server_key =
-            connections.resolve_tool_call_server(server, tool, /*environment_id*/ None)?;
-        connections.wait_for_server_startup(server_key).await;
-        connections
+        let current = self.current.load_full();
+        let server_key = current
+            .config
+            .as_ref()
+            .map(|config| {
+                config
+                    .mcp_server_catalog
+                    .resolve_server_key(server, environment_id)
+            })
+            .ok_or_else(|| anyhow::anyhow!("unknown MCP server '{server}'"))?;
+        current.connections.validate_tool_call(&server_key, tool)?;
+        current
+            .connections
+            .wait_for_server_startup(&server_key)
+            .await;
+        current
+            .connections
             .call_tool(
-                server_key, tool, arguments, meta, /*requested_timeout*/ None,
+                &server_key,
+                tool,
+                arguments,
+                meta,
+                /*requested_timeout*/ None,
                 /*wait_for_server*/ true,
             )
             .await
     }
 
     /// Calls a tool for the host, retaining attribution while its catalogs stay unchanged.
-    /// Waiting calls capture a binding after the selected server starts; non-waiting calls
-    /// use the cached binding. Missing or changed catalogs leave the namespace unknown.
+    /// Capture a binding after the selected server starts. Missing or changed catalogs leave
+    /// the namespace unknown.
     #[allow(clippy::too_many_arguments)]
     pub async fn latest_call_tool(
         &self,
@@ -869,18 +901,30 @@ impl McpRuntime {
         arguments: Option<serde_json::Value>,
         meta: Option<serde_json::Value>,
         requested_timeout: Option<Duration>,
-        wait_for_server: bool,
+        startup: McpToolStartup,
     ) -> anyhow::Result<McpToolCallResult> {
         let current = self.current.load_full();
         let server_key =
             current
                 .connections
                 .resolve_tool_call_server(server, tool, environment_id)?;
-        let attribution = if wait_for_server
-            && current
-                .connections
-                .wait_for_server_startup(server_key)
-                .await
+        if startup == McpToolStartup::SkipDormantReplCleanup
+            && current.connections.is_dormant_private_stdio(server_key)
+        {
+            return Ok(McpToolCallResult {
+                result: CallToolResult {
+                    content: Vec::new(),
+                    structured_content: None,
+                    is_error: None,
+                    meta: None,
+                },
+                source_tool_namespace: None,
+            });
+        }
+        let attribution = if current
+            .connections
+            .wait_for_server_startup(server_key)
+            .await
             && let Some(revisions) = current
                 .connections
                 .stable_catalog_revisions(
@@ -914,7 +958,7 @@ impl McpRuntime {
                 arguments,
                 meta,
                 requested_timeout,
-                wait_for_server,
+                /*wait_for_server*/ true,
             )
             .await?;
         // Host calls use live connections, unlike model calls pinned to a binding.
@@ -967,7 +1011,8 @@ impl McpRuntime {
     pub async fn connection_statuses(
         &self,
         config: &McpConfig,
-    ) -> std::collections::HashMap<String, codex_protocol::mcp::McpServerConnectionStatus> {
+    ) -> std::collections::HashMap<McpServerKey, codex_protocol::mcp::McpServerConnectionStatus>
+    {
         let current = self.current.load_full();
         let Some(published_config) = current.config.as_ref() else {
             return HashMap::new();
@@ -976,10 +1021,8 @@ impl McpRuntime {
         statuses.retain(|name, _| {
             published_config
                 .mcp_server_catalog
-                .server_by_name(name)
-                .is_some_and(|server| {
-                    config.mcp_server_catalog.server_by_name(name) == Some(server)
-                })
+                .server(name)
+                .is_some_and(|server| config.mcp_server_catalog.server(name) == Some(server))
         });
         statuses
     }
@@ -1342,6 +1385,7 @@ mod tests {
         runtime
             .latest_call_tool_without_attribution(
                 CODEX_APPS_MCP_SERVER_NAME,
+                /*environment_id*/ None,
                 "search",
                 /*arguments*/ None,
                 /*meta*/ None,

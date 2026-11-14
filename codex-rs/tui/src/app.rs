@@ -251,6 +251,7 @@ mod new_session;
 mod quick_dials;
 mod turn_tips;
 pub(crate) use new_session::has_launch_setting;
+mod archived_thread;
 mod clipboard;
 mod footer_selection;
 mod native_history;
@@ -272,6 +273,7 @@ mod resize_reflow;
 mod resume_config;
 mod resume_preparation;
 mod right_click_paste;
+mod status_line_settings;
 pub(crate) use right_click_paste::PasteEnvironment;
 mod pane_motion;
 mod safety_buffering;
@@ -721,8 +723,8 @@ pub(crate) struct App {
     rate_limit_hard_stop_generation: u64,
     rate_limit_refresh_state: rate_limit_refresh::RateLimitRefreshState,
     pending_mcp_login_start: Option<PendingMcpLoginStart>,
-    // Latest accepted attempt per server; stale retry completions must not update the UI.
-    active_mcp_login_ids: HashMap<String, String>,
+    // Login ID -> requested server and environment. Retrying one target keeps other logins alive.
+    active_mcp_login_ids: HashMap<String, (String, Option<String>)>,
     // Serialize plugin enablement writes per plugin so stale completions cannot
     // overwrite a newer toggle, even if the plugin is toggled from different
     // cwd contexts.
@@ -739,6 +741,7 @@ pub(crate) struct App {
 struct PendingMcpLoginStart {
     request_id: String,
     name: String,
+    environment_id: Option<String>,
     thread_id: ThreadId,
     completions: Vec<codex_app_server_protocol::McpServerOauthLoginCompletedNotification>,
 }
@@ -873,7 +876,7 @@ impl App {
         self.transcript_view
             .sync_patch_approval(self.chat_widget.current_patch_approval());
         // A chooser action must never decide a modal that has not been painted yet.
-        if (self.conversation_frame.chooser_area().is_some()
+        if (self.conversation_frame.panel_area().is_some()
             || self.sidebar().is_some_and(|pane| pane.close.is_some()))
             && self.chat_widget.has_active_modal()
             && matches!(
@@ -1213,7 +1216,7 @@ impl App {
         {
             if self.overlay.is_none()
                 && self.chat_widget.no_modal_or_popup_active()
-                && self.chat_widget.is_external_writer_view()
+                && self.chat_widget.is_read_only_view()
                 && (crate::key_hint::plain(KeyCode::Esc).is_press(*key)
                     || (crate::key_hint::plain(KeyCode::Left).is_press(*key)
                         && self.chat_widget.agents_navigation_key_available()))
@@ -1360,7 +1363,7 @@ impl App {
             let frozen = self.chat_widget.is_external_writer_view();
             let visible = self.current_displayed_thread_id().filter(|&id| {
                 tui.is_terminal_focused()
-                    && !self.conversation_frame.chooser_covers_transcript()
+                    && !self.conversation_frame.panel_covers_transcript()
                     && matches!(self.overlay, None | Some(Overlay::Transcript(_)))
                     && self.chat_widget.no_modal_or_popup_active()
                     && self.initial_history_replay_buffer.is_none()

@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
-/// Connection to a board provisioned by the research host.
+/// Connection settings for a remote message board.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteMessageBoardConfigToml {
@@ -163,6 +163,12 @@ pub struct GuardianElasticSectionConfigToml {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GuardianV2ConfigToml {
+    /// Enable elastic allocation for asynchronous Guardian requests. Defaults to false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub async_elastic_budgeting: Option<bool>,
+    /// Section limits validated when asynchronous elastic budgeting is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub async_elastic_sections: Option<BTreeMap<String, GuardianElasticSectionConfigToml>>,
     /// Enable elastic allocation for synchronous Guardian requests. Defaults to false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync_elastic_budgeting: Option<bool>,
@@ -409,6 +415,9 @@ pub struct TokenBudgetConfigToml {
     /// Whether to expose the built-in history and notes extension.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_history_notes_extension: Option<bool>,
+    /// Render the context window and its hints as an agent.thread_hint tool output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window_as_tool_output: Option<bool>,
     /// Number of tokens remaining before auto-compaction when the wrap-up reminder is emitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]

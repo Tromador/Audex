@@ -130,6 +130,9 @@ impl ChatWidget {
     }
 
     pub(crate) fn pause_unavailable_thread(&mut self) {
+        self.read_only_history = true;
+        self.sync_context_window_visibility();
+        self.refresh_status_line();
         if let Some(questions) = &mut self.bottom_pane.questions {
             questions.delivery_enabled = false;
         }
@@ -195,12 +198,22 @@ impl ChatWidget {
         self.bottom_pane.composer_paste_deadline()
     }
 
+    pub(crate) fn cancel_cloud_handoff_input(&mut self) -> CancellationEvent {
+        // Count buffered terminal input as part of the draft before deciding to quit.
+        self.bottom_pane.flush_composer_paste_burst();
+        let cancellation = self.bottom_pane.on_ctrl_c();
+        if cancellation == CancellationEvent::Handled {
+            self.refresh_startup_recovery();
+        }
+        cancellation
+    }
+
     pub(crate) fn handle_restricted_key(
         &mut self,
         key: KeyEvent,
         mode: RestrictedInputMode,
     ) -> KeyEventAction {
-        if self.external_writer_view {
+        if self.is_read_only_view() {
             return KeyEventAction::None;
         }
         if mode == RestrictedInputMode::DraftHandoff {

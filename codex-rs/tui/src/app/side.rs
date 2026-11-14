@@ -67,7 +67,6 @@ impl SideParentStatus {
             | ServerRequest::ExecCommandApproval { .. } => Some(SideParentStatus::NeedsApproval),
             ServerRequest::DynamicToolCall { .. }
             | ServerRequest::AttestationGenerate { .. }
-            | ServerRequest::CurrentTimeRead { .. }
             | ServerRequest::ChatgptAuthTokensRefresh { .. } => None,
         }
     }
@@ -304,7 +303,7 @@ impl App {
             && (self.chat_widget.no_modal_or_popup_active()
                 // Replaying the parent may reopen a completion for its parked draft.
                 // The focused chooser hides it and owns the keystrokes.
-                || (self.chooser_focus() == Some(sidebar::PaneFocus::Sidebar)
+                || (self.panel_focus() == Some(sidebar::PaneFocus::Sidebar)
                     && self.sidebar_chooser_available()
                     && self.chat_widget.completion_can_yield_focus()))
     }

@@ -214,6 +214,8 @@ pub enum Feature {
     ShellSnapshotV2,
     /// Allow turns to start while selected executors are still starting.
     DeferredExecutor,
+    /// Describe each selected environment's filesystem and permissions separately.
+    PerEnvironmentContext,
     /// Use the current working directory for turn diff display paths.
     CwdRelativeTurnDiffs,
     /// Enable runtime metrics snapshots via a manual reader.
@@ -278,6 +280,8 @@ pub enum Feature {
     SpawnCsv,
     /// Enable apps.
     Apps,
+    /// Use Apps usage instructions from the selected model's catalog entry.
+    CatalogAppsInstructions,
     /// Route first-party ChatGPT requests through PSP.
     Psp,
     /// Enable MCP apps.
@@ -288,6 +292,8 @@ pub enum Feature {
     McpToolListChanged,
     /// Discover and share eligible local stdio connections across chats.
     McpConnectionSharing,
+    /// Use the app server's fixed launch directories for shared REPL servers.
+    McpSharedReplCwd,
     /// Defer optional stdio server startup in regular chats with a warm tool catalog.
     McpLazyStdioStartup,
     /// Keep same-named HTTP servers discovered on different executors separate.
@@ -400,8 +406,12 @@ pub enum Feature {
     ImageGenerationAnimation,
     /// Omit inline image and audio content from app-server item notifications.
     OmitAppServerNotificationMedia,
+    /// Allow this host's attachment store to prepare fresh tool audio before persistence.
+    FileBackedToolAudio,
     /// Tell the model when a prompt image was resized and include its dimensions.
     ImageResizeNotice,
+    /// Normalize prompt images with the reviewed image sanitizer.
+    SafeImageDecoder,
     /// Apply one shared pixel and token budget to every image, regardless of legacy detail hints.
     UnifiedImageBudget,
     /// Removed compatibility flag for always-on centralized image preparation.
@@ -1146,8 +1156,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::TuiWorkspace,
         key: "tui_workspace",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::TuiMultiBackend,
@@ -1265,6 +1275,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::DeferredExecutor,
         key: "deferred_executor",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::PerEnvironmentContext,
+        key: "per_environment_context",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1727,6 +1743,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::CatalogAppsInstructions,
+        key: "catalog_apps_instructions",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::Psp,
         key: "psp",
         stage: Stage::UnderDevelopment,
@@ -1753,6 +1775,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::McpConnectionSharing,
         key: "mcp_connection_sharing",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::McpSharedReplCwd,
+        key: "mcp_shared_repl_cwd",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1832,7 +1860,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::IncrementalToolsLegacy,
         key: "incremental_tools_legacy",
         stage: Stage::Stable,
-        default_enabled: false,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::IncrementalToolsLegacyGcp,
@@ -2027,6 +2055,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::FileBackedToolAudio,
+        key: "file_backed_tool_audio",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::ImageResizeNotice,
         key: "image_resize_notice",
         stage: Stage::UnderDevelopment,
@@ -2037,6 +2071,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "unified_image_budget",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::SafeImageDecoder,
+        key: "safe_image_decoder",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::ResizeAllImages,

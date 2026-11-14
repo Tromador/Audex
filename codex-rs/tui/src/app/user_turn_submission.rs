@@ -17,6 +17,7 @@ pub(super) async fn try_submit_user_turn(
 ) -> Result<bool> {
     let AppCommand::UserTurn {
         turn_trigger,
+        items,
         cloud_submission,
         client_user_message_id,
         ..
@@ -115,8 +116,30 @@ pub(super) async fn try_submit_user_turn(
 
     match result {
         Ok((admission, selection)) => {
-            if selection.is_some() {
-                app.chat_widget.cloud_picker_selection = selection;
+            if *turn_trigger == "user"
+                && !items.is_empty()
+                && matches!(admission, UserMessageAdmission::StartResponse(_))
+                && let Some(fork_name) = app_server.side_chat_fork_names.remove(&thread_id)
+                && let Some(text) = super::thread_title::user_message_text(items)
+            {
+                app.generate_thread_title(
+                    app_server,
+                    thread_id,
+                    ThreadTitleDestination::Automatic,
+                    &text,
+                    fork_name,
+                );
+            }
+            if let Some(selection) = selection {
+                if selection.model.is_some() {
+                    app.chat_widget.cloud_picker_selection = selection.model;
+                }
+                let service_tier = selection
+                    .service_tier
+                    .or_else(|| app.chat_widget.configured_service_tier());
+                app.chat_widget.set_service_tier(service_tier);
+                app.sync_active_thread_service_tier_to_cached_session()
+                    .await;
             }
             if !matches!(&admission, UserMessageAdmission::Queued(_)) {
                 crate::startup_recovery::acknowledged(client_user_message_id);

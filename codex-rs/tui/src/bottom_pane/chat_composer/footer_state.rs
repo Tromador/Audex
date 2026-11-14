@@ -18,9 +18,9 @@ use super::super::footer::footer_height;
 use super::super::footer::reset_mode_after_activity;
 use super::ActivePopup;
 use super::warning_notice;
+use crate::bottom_pane::StatusLine;
 use crate::bottom_pane::footer::FooterKeyHints;
 use crate::bottom_pane::footer::FooterProps;
-use crate::bottom_pane::footer_content::FooterContent;
 use crate::key_hint;
 use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
@@ -379,12 +379,12 @@ pub(super) struct FooterState {
     pub(super) flash: Option<FooterFlash>,
     pub(super) context_window_percent: Option<i64>,
     pub(super) context_window_used_tokens: Option<i64>,
-    pub(super) context_window_pending: bool,
+    pub(super) context_window_hidden: bool,
     pub(super) collaboration_mode_indicator: Option<CollaborationModeIndicator>,
     pub(super) goal_status_indicator: Option<GoalStatusIndicator>,
     pub(super) ide_context_active: bool,
-    pub(super) status_line_value: Option<FooterContent>,
-    pub(super) status_layout: crate::bottom_pane::status_line::StatusLine,
+    pub(super) status_line_value: Option<StatusLine>,
+    pub(super) labeled_status_line: std::cell::RefCell<Option<StatusLine>>,
     pub(super) status_line_enabled: bool,
     pub(super) side_conversation_context_label: Option<String>,
     pub(super) active_agent_label: Option<String>,

@@ -130,6 +130,7 @@ mod clipboard_paste;
 mod clock_format;
 mod collaboration_modes;
 mod color;
+mod command_output;
 mod config_panel;
 mod config_update;
 mod copy_input_guard;
@@ -141,6 +142,7 @@ mod image_decode;
 mod markdown_copy;
 mod permission_discovery;
 mod pets;
+mod realtime_call;
 mod security_setup;
 mod worktree_browser;
 pub use custom_terminal::Terminal;
@@ -230,6 +232,7 @@ mod startup_presentation;
 mod startup_recovery;
 mod status;
 mod status_indicator_widget;
+mod statusline_provider;
 mod streaming;
 mod style;
 mod subscription;
@@ -945,6 +948,7 @@ fn latest_session_lookup_params(
     ThreadListParams {
         include_attached_threads: false,
         current_account_only: true,
+        included_thread_ids: None,
         excluded_thread_ids: None,
         attached_to_thread_id: None,
         originators: None,

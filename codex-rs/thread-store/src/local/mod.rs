@@ -498,6 +498,14 @@ impl LocalThreadStore {
         thread_history::list_items(self, params).await
     }
 
+    /// Reads the independent realtime projection without starting a runtime.
+    pub async fn list_realtime(
+        &self,
+        params: crate::ListRealtimeParams,
+    ) -> ThreadStoreResult<crate::RealtimePage> {
+        thread_history::list_realtime(self, params).await
+    }
+
     /// Lists bounded ordinary and realtime items from the rollout projection.
     pub async fn list_timeline(
         &self,
@@ -516,6 +524,12 @@ impl LocalThreadStore {
 }
 
 impl ThreadStore for LocalThreadStore {
+    fn model_ids(&self) -> Option<Arc<dyn codex_state::SessionModelIdStore>> {
+        self.state_db
+            .clone()
+            .map(|db| db as Arc<dyn codex_state::SessionModelIdStore>)
+    }
+
     fn default_history_mode(&self) -> ThreadHistoryMode {
         ThreadHistoryMode::Paginated
     }
@@ -792,6 +806,10 @@ impl ThreadStore for LocalThreadStore {
         Box::pin(async move { projects::delete_project(self, project_id).await })
     }
 
+    fn realtime_frames_enabled(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, bool> {
+        Box::pin(async { Ok(self.state_db.is_some()) })
+    }
+
     fn supports_paginated_history_lists(&self) -> bool {
         self.state_db.is_some()
     }
@@ -806,6 +824,13 @@ impl ThreadStore for LocalThreadStore {
 
     fn list_timeline(&self, params: ListTimelineParams) -> ThreadStoreFuture<'_, TimelinePage> {
         Box::pin(LocalThreadStore::list_timeline(self, params))
+    }
+
+    fn list_realtime(
+        &self,
+        params: crate::ListRealtimeParams,
+    ) -> ThreadStoreFuture<'_, crate::RealtimePage> {
+        Box::pin(LocalThreadStore::list_realtime(self, params))
     }
 
     fn search_threads(

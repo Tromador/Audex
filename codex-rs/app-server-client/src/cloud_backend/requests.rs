@@ -6,6 +6,7 @@ use super::send_notification;
 use crate::CloudUserMessageReceipt;
 use codex_app_server_protocol as protocol;
 use codex_cloud_client as cloud;
+use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::models::ImageDetail;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::bail;
@@ -70,6 +71,25 @@ impl Requests {
                     use_paginated_history(thread);
                 }
                 serde_json::to_value(page)?
+            }
+            Request::ThreadSetName { params, .. } => {
+                let name = params.name.trim();
+                self.client.set_thread_name(&params.thread_id, name).await?;
+                if let Some(loaded) = &mut self.loaded
+                    && loaded.thread.id == params.thread_id
+                {
+                    loaded.thread.name = Some(name.to_owned());
+                }
+                send_notification(
+                    output,
+                    protocol::ServerNotification::ThreadNameUpdated(
+                        protocol::ThreadNameUpdatedNotification {
+                            thread_id: params.thread_id,
+                            thread_name: Some(name.to_owned()),
+                        },
+                    ),
+                );
+                serde_json::to_value(protocol::ThreadSetNameResponse {})?
             }
             Request::ThreadArchive { params, .. } => {
                 self.client.archive_thread(&params.thread_id).await?;
@@ -152,7 +172,7 @@ impl Requests {
                     Some(protocol::ThreadItemsListCursor::Opaque(cursor)) => Some(cursor),
                     None => None,
                     Some(protocol::ThreadItemsListCursor::Anchor(_)) => {
-                        bail!("Cloud item anchors are not supported yet.")
+                        bail!("Cloud item anchors are not supported yet.");
                     }
                 };
                 let page = self
@@ -285,7 +305,7 @@ fn thread_list_query(params: protocol::ThreadListParams) -> Result<cloud::Thread
             Some(protocol::ThreadSortKey::UpdatedAt) => cloud::ThreadSortKey::UpdatedAt,
             Some(protocol::ThreadSortKey::RecencyAt) => cloud::ThreadSortKey::RecencyAt,
             Some(protocol::ThreadSortKey::SectionPosition) => {
-                bail!("Cloud section ordering is not supported yet.")
+                bail!("Cloud section ordering is not supported yet.");
             }
         },
         sort_direction: match params.sort_direction {
@@ -314,10 +334,21 @@ fn cloud_message(
         ))?;
     let input = std::mem::take(&mut params.input);
     let turn_trigger = params.turn_trigger.take();
-    let (model, effort) = if turn_trigger.as_deref() == Some("user") {
-        (params.model.take(), params.effort.take())
+    let (model, effort, service_tier) = if turn_trigger.as_deref() == Some("user") {
+        let tier = match params.service_tier.take() {
+            Some(Some(tier)) if tier == SERVICE_TIER_DEFAULT_REQUEST_VALUE => Some(None),
+            Some(Some(tier))
+                if !matches!(tier.as_str(), "fast" | "priority" | "flex" | "ultrafast") =>
+            {
+                return Err(PreflightRejection(
+                    "This service tier is unavailable in Cloud.",
+                ));
+            }
+            tier => tier,
+        };
+        (params.model.take(), params.effort.take(), tier)
     } else {
-        (None, None)
+        (None, None, None)
     };
     if params != protocol::TurnStartParams::default() {
         return Err(PreflightRejection(
@@ -392,6 +423,7 @@ fn cloud_message(
         turn_trigger,
         model,
         effort: effort.map(|effort| effort.to_string()),
+        service_tier,
         mode: cloud::SubmissionMode::StartIfIdle,
         shared_access: false,
     })
@@ -408,18 +440,22 @@ fn admitted_message(outcome: cloud::AdmissionOutcome) -> Result<CloudUserMessage
         cloud::AdmissionOutcome::Duplicate { turn_id } => {
             CloudUserMessageReceipt::Duplicate { turn_id }
         }
-        cloud::AdmissionOutcome::Queued { .. } => bail!(
-            "Cloud already accepted this message without returning a turn. Reopen the conversation to see its status before sending again."
-        ),
+        cloud::AdmissionOutcome::Queued { .. } => {
+            bail!(
+                "Cloud already accepted this message without returning a turn. Reopen the conversation to see its status before sending again."
+            );
+        }
     })
 }
 
 fn admitted_turn(outcome: cloud::AdmissionOutcome) -> Result<protocol::Turn> {
     match admitted_message(outcome)? {
         CloudUserMessageReceipt::Started(turn) | CloudUserMessageReceipt::Steered(turn) => Ok(turn),
-        CloudUserMessageReceipt::Duplicate { .. } => bail!(
-            "Cloud already accepted this message without returning a turn. Reopen the conversation to see its status before sending again."
-        ),
+        CloudUserMessageReceipt::Duplicate { .. } => {
+            bail!(
+                "Cloud already accepted this message without returning a turn. Reopen the conversation to see its status before sending again."
+            );
+        }
     }
 }
 

@@ -7,8 +7,10 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::client::ModelClientSession;
+use crate::client::SamplingOptions;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
+use crate::client_common::ResponseStream;
 use crate::compact::AutoCompactionDisabled;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact_remote_v2::BackgroundCompactionCandidate;
@@ -21,15 +23,14 @@ use crate::cyber_access_program;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
 use crate::hook_runtime::drain_async_hook_results;
-use crate::hook_runtime::hooks_for_model_request;
 use crate::hook_runtime::inspect_pending_input;
 use crate::hook_runtime::legacy_notify_input_messages;
 use crate::hook_runtime::record_additional_contexts;
 use crate::hook_runtime::record_pending_input;
 use crate::hook_runtime::run_legacy_after_agent_hook;
-use crate::hook_runtime::run_model_request_hooks;
 use crate::hook_runtime::run_pending_session_start_hooks;
 use crate::hook_runtime::run_turn_stop_hooks;
+use crate::hook_runtime::sampling::SamplingRequest;
 use crate::mcp_skill_dependencies::maybe_prompt_and_install_mcp_dependencies;
 use crate::mentions::build_connector_slug_counts;
 use crate::mentions::collect_explicit_app_ids;
@@ -67,9 +68,7 @@ use crate::tools::router::ToolSuggestCandidates;
 use crate::tools::router::ToolSuggestPresentation;
 use crate::tools::router::record_registration_metrics;
 use crate::tools::spec_plan::build_tool_router;
-use crate::tools::spec_plan::tool_suggest_enabled;
 use crate::turn_diff_tracker::TurnDiffTracker;
-use crate::turn_timing::record_turn_ttft_metric;
 use crate::util::error_or_panic;
 use codex_analytics::AppInvocation;
 use codex_analytics::CompactionPhase;
@@ -87,9 +86,7 @@ use codex_features::Feature;
 use codex_file_system::EnvironmentAccess;
 use codex_file_system::FindUpErrorPolicy;
 use codex_file_system::find_nearest_ancestor_with_markers;
-use codex_hooks::ModelRequestHookEvent::PostModelRequest;
-use codex_hooks::ModelRequestHookEvent::PreModelRequest;
-use codex_hooks::ModelRequestStatus;
+use codex_hooks::SamplingKind;
 use codex_login::CodexAuth;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::ResponseItemId;
@@ -114,8 +111,6 @@ use codex_protocol::protocol::AgentReasoningSectionBreakEvent;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::HookEventName;
-use codex_protocol::protocol::HookExecutionMode;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
@@ -156,6 +151,7 @@ use tracing::instrument;
 use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
+use uuid::Uuid;
 
 const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
 
@@ -540,6 +536,7 @@ pub(crate) async fn run_turn(
 
     let mut next_step_context = Some(first_step_context);
     let mut guardian_budget_compacted = false;
+    let mut unfinished_plan_id = None;
     loop {
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
@@ -651,6 +648,7 @@ pub(crate) async fn run_turn(
                 Arc::clone(&turn_diff_tracker),
                 &mut client_session,
                 sampling_request_input,
+                &mut unfinished_plan_id,
                 cancellation_token.child_token(),
             )
             .await
@@ -676,6 +674,9 @@ pub(crate) async fn run_turn(
                 // Process async hooks only after sampling and its tools have finished.
                 drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ false).await;
                 let (has_pending_input, token_status) = async {
+                    // Tool output can add audio without a queued user input. Resolve its
+                    // duration before checking the continuation's compaction threshold.
+                    super::file_audio::resolve_pending(&sess).await;
                     let has_pending_input =
                         sess.input_queue.has_pending_input(&sess.active_turn).await;
                     let token_status = super::context_window::context_window_token_status(
@@ -1077,8 +1078,7 @@ pub(crate) async fn run_hooks_and_record_inputs(
     // The batch has left the input queue. Persist every accepted item before the
     // optional lookup can suspend this task long enough for an interrupt to abort it.
     if !input.is_empty() {
-        let ids = std::mem::take(&mut sess.state.lock().await.pending_audio_duration_ids);
-        super::file_audio::resolve(sess, ids).await;
+        super::file_audio::resolve_pending(sess).await;
     }
     Ok(blocked_input && !accepted_user_input)
 }
@@ -1775,7 +1775,7 @@ async fn run_auto_compact(
             );
             run_inline_auto_compact_task(
                 Arc::clone(sess),
-                Arc::clone(turn_context),
+                step_context,
                 replacement_step_context,
                 world_state,
                 reason,
@@ -1895,6 +1895,7 @@ async fn run_sampling_request(
     turn_diff_tracker: SharedTurnDiffTracker,
     client_session: &mut ModelClientSession,
     input: crate::context_manager::ContextManager,
+    unfinished_plan_id: &mut Option<String>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<String>)> {
     let turn_context = Arc::clone(&step_context.turn);
@@ -1931,6 +1932,7 @@ async fn run_sampling_request(
     let mut initial_input = Some(input);
     let mut notify_messages = Vec::new();
     let mut executed_tool_calls_by_output = HashMap::new();
+    let mut sampling_request = SamplingRequest::new(SamplingKind::Sampling);
     loop {
         // Running code-mode cells can request review while this response is in flight.
         // Keep the latest received ID until response.created replaces it.
@@ -2006,6 +2008,7 @@ async fn run_sampling_request(
         };
         let mut draining_for_mailbox = false;
         let err = match try_run_sampling_request(
+            &mut sampling_request,
             tool_runtime.clone(),
             Arc::clone(&sess),
             sampling_step_context,
@@ -2016,6 +2019,7 @@ async fn run_sampling_request(
             prompt,
             pending_audio,
             input_item_count,
+            unfinished_plan_id,
             cancellation_token.child_token(),
             &mut draining_for_mailbox,
         )
@@ -2036,11 +2040,8 @@ async fn run_sampling_request(
                     }
                     return Err(err);
                 }
-                CodexErrorDetails::SessionBudgetExceeded
-                | CodexErrorDetails::InferenceHookDenied { .. }
-                | CodexErrorDetails::Fatal(_) => {
-                    return Err(err);
-                }
+                CodexErrorDetails::Fatal(_) => return Err(err),
+                _ if crate::responses_retry::is_terminal_sampling_outcome(&err) => return Err(err),
                 _ => err,
             },
         };
@@ -2090,47 +2091,29 @@ async fn run_sampling_request(
     }
 }
 
-pub(crate) struct PreparedToolRecommendations {
-    auth: Option<CodexAuth>,
-    endpoint_candidates: Option<Vec<DiscoverableTool>>,
+pub(super) enum PreparedToolRecommendations {
+    Endpoint(Vec<DiscoverableTool>),
+    Legacy(Option<CodexAuth>),
 }
 
-#[instrument(level = "trace", skip_all)]
-pub(crate) async fn prepare_tool_recommendations(
-    sess: &Session,
-    turn_context: &TurnContext,
-) -> PreparedToolRecommendations {
-    let loaded_plugins = sess
-        .services
-        .plugins_manager
-        .plugins_for_config(&turn_context.config.plugins_config_input())
-        .await
-        .without_plugins(&turn_context.disabled_plugin_ids);
-    let tool_suggest_is_enabled = tool_suggest_enabled(turn_context);
-    let auth = if tool_suggest_is_enabled {
-        sess.services.auth_manager.auth().await
-    } else {
-        None
-    };
-    let endpoint_candidates = if tool_suggest_is_enabled {
-        let plugins_config = turn_context.config.plugins_config_input();
-        sess.services
+impl PreparedToolRecommendations {
+    #[instrument(level = "trace", skip_all)]
+    pub(super) async fn load(sess: &Session, turn_context: &TurnContext) -> Self {
+        let auth = sess.services.auth_manager.auth().await;
+        let endpoint_candidates = sess
+            .services
             .plugins_manager
             .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
-                plugins_config: &plugins_config,
-                loaded_plugins: &loaded_plugins,
+                plugins_config: &turn_context.config.plugins_config_input(),
                 auth: auth.as_ref(),
                 disabled_tools: &turn_context.config.tool_suggest.disabled_tools,
                 app_server_client_name: turn_context.app_server_client_name.as_deref(),
             })
-            .await
-    } else {
-        None
-    };
-
-    PreparedToolRecommendations {
-        auth,
-        endpoint_candidates,
+            .await;
+        match endpoint_candidates {
+            Some(tools) => Self::Endpoint(tools),
+            None => Self::Legacy(auth),
+        }
     }
 }
 
@@ -2143,77 +2126,61 @@ pub(crate) async fn prepare_tool_recommendations(
         apps_enabled = turn_context.apps_enabled()
     )
 )]
-pub(crate) async fn built_tools(
+pub(super) async fn built_tools(
     sess: &Session,
     turn_context: &TurnContext,
     model_info: &codex_protocol::openai_models::ModelInfo,
     environments: &TurnEnvironmentSnapshot,
     mcp: &Arc<codex_mcp::McpBinding>,
     step_store: &ExtensionData,
-    prepared_recommendations: PreparedToolRecommendations,
+    prepared_recommendations: Option<PreparedToolRecommendations>,
     dynamic_tools: &[codex_protocol::dynamic_tools::DynamicToolSpec],
 ) -> CodexResult<Arc<ToolRouter>> {
-    let all_mcp_tools = mcp.tools();
-    let connector_snapshot = mcp.config().connector_snapshot.clone();
-
     let apps_enabled = turn_context.apps_enabled();
-    let accessible_connectors =
-        apps_enabled.then(|| connectors::accessible_connectors_from_mcp_tools(all_mcp_tools));
-    let tool_suggest_is_enabled = tool_suggest_enabled(turn_context);
-    let PreparedToolRecommendations {
-        auth,
-        endpoint_candidates: endpoint_recommended_plugin_candidates,
-    } = prepared_recommendations;
-    let tool_suggest_candidates =
-        if let Some(recommended_plugin_candidates) = endpoint_recommended_plugin_candidates {
-            Some(ToolSuggestCandidates {
-                tools: recommended_plugin_candidates,
-                presentation: ToolSuggestPresentation::RecommendationContext,
-            })
-        } else {
-            let loaded_plugin_app_connector_ids = connector_snapshot
+    let tool_suggest_candidates = match prepared_recommendations {
+        Some(PreparedToolRecommendations::Endpoint(tools)) => Some(ToolSuggestCandidates {
+            tools,
+            presentation: ToolSuggestPresentation::RecommendationContext,
+        }),
+        Some(PreparedToolRecommendations::Legacy(auth)) if apps_enabled => {
+            let accessible_connectors =
+                connectors::accessible_connectors_from_mcp_tools(mcp.tools());
+            let loaded_plugin_app_connector_ids = mcp
+                .config()
+                .connector_snapshot
                 .connector_ids()
                 .iter()
                 .map(|connector_id| connector_id.0.clone())
                 .collect::<Vec<_>>();
-            async {
-                if apps_enabled && tool_suggest_is_enabled {
-                    if let Some(accessible_connectors) = accessible_connectors.as_ref() {
-                        match connectors::list_tool_suggest_discoverable_tools_with_auth(
-                            &turn_context.config,
-                            sess.services.plugins_manager.as_ref(),
-                            auth.as_ref(),
-                            accessible_connectors.as_slice(),
-                            &loaded_plugin_app_connector_ids,
-                        )
-                        .await
-                        .map(|discoverable_tools| {
-                            filter_request_plugin_install_discoverable_tools_for_client(
-                                discoverable_tools,
-                                turn_context.app_server_client_name.as_deref(),
-                            )
-                        }) {
-                            Ok(discoverable_tools) if discoverable_tools.is_empty() => None,
-                            Ok(discoverable_tools) => Some(ToolSuggestCandidates {
-                                tools: discoverable_tools,
-                                presentation: ToolSuggestPresentation::ListTool,
-                            }),
-                            Err(err) => {
-                                warn!("failed to load discoverable tool suggestions: {err:#}");
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                } else {
+            match connectors::list_tool_suggest_discoverable_tools_with_auth(
+                &turn_context.config,
+                sess.services.plugins_manager.as_ref(),
+                auth.as_ref(),
+                &accessible_connectors,
+                &loaded_plugin_app_connector_ids,
+            )
+            .instrument(trace_span!("built_tools.load_discoverable_tools"))
+            .await
+            {
+                Ok(tools) => {
+                    let tools = filter_request_plugin_install_discoverable_tools_for_client(
+                        tools,
+                        turn_context.app_server_client_name.as_deref(),
+                    );
+                    (!tools.is_empty()).then_some(ToolSuggestCandidates {
+                        tools,
+                        presentation: ToolSuggestPresentation::ListTool,
+                    })
+                }
+                Err(err) => {
+                    warn!("failed to load discoverable tool suggestions: {err:#}");
                     None
                 }
             }
-            .instrument(trace_span!("built_tools.load_discoverable_tools"))
-            .await
-        };
-    Ok(Arc::new(build_tool_router(
+        }
+        Some(PreparedToolRecommendations::Legacy(_)) | None => None,
+    };
+    let router = build_tool_router(
         sess,
         turn_context,
         model_info,
@@ -2223,7 +2190,13 @@ pub(crate) async fn built_tools(
         step_store,
         tool_suggest_candidates.as_ref(),
         dynamic_tools,
-    )?))
+    )?;
+    if let Some(candidates) = tool_suggest_candidates
+        && candidates.presentation == ToolSuggestPresentation::RecommendationContext
+    {
+        step_store.insert(candidates);
+    }
+    Ok(Arc::new(router))
 }
 
 #[derive(Debug)]
@@ -2259,12 +2232,16 @@ struct PlanModeStreamState {
 }
 
 impl PlanModeStreamState {
-    fn new(turn_id: &str) -> Self {
+    fn new(unfinished_plan_id: Option<String>) -> Self {
         Self {
             pending_agent_message_items: HashMap::new(),
             started_agent_message_items: HashSet::new(),
             leading_whitespace_by_item: HashMap::new(),
-            plan_item_state: ProposedPlanItemState::new(turn_id),
+            plan_item_state: ProposedPlanItemState {
+                item_id: unfinished_plan_id.unwrap_or_else(|| Uuid::now_v7().to_string()),
+                started: false,
+                completed: false,
+            },
         }
     }
 }
@@ -2320,12 +2297,9 @@ impl AssistantMessageStreamParsers {
 }
 
 impl ProposedPlanItemState {
-    fn new(turn_id: &str) -> Self {
-        Self {
-            item_id: format!("{turn_id}-plan"),
-            started: false,
-            completed: false,
-        }
+    /// Keep the ID across model requests until a completion claims it.
+    fn unfinished_id(self) -> Option<String> {
+        (!self.completed).then_some(self.item_id)
     }
 
     async fn start(&mut self, sess: &Session, turn_context: &TurnContext) {
@@ -2888,6 +2862,7 @@ async fn drain_in_flight(
     )
 )]
 async fn try_run_sampling_request(
+    sampling_request: &mut SamplingRequest,
     tool_runtime: ToolCallRuntime,
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
@@ -2898,14 +2873,21 @@ async fn try_run_sampling_request(
     prompt: Prompt,
     mut pending_audio: Option<codex_history::AcceptedFileAudio>,
     input_item_count: usize,
+    unfinished_plan_id: &mut Option<String>,
     cancellation_token: CancellationToken,
     draining_for_mailbox: &mut bool,
 ) -> CodexResult<SamplingRequestResult> {
     let turn_context = Arc::clone(&step_context.turn);
+    #[expect(deprecated, reason = "Classify feedback using the initial turn cwd.")]
+    let diagnostic_cwd = &turn_context.cwd;
     feedback_tags!(
         model = step_context.settings.model_info.slug.clone(),
         approval_policy = turn_context.approval_policy(),
-        sandbox_policy = &turn_context.sandbox_policy(),
+        sandbox_policy = tracing::field::display(
+            turn_context
+                .permission_profile()
+                .legacy_sandbox_policy_label(diagnostic_cwd)
+        ),
         effort = step_context.settings.reasoning_effort(),
         auth_mode = sess.services.auth_manager.auth_mode(),
         tags_json = tracing::field::display(serde_json::json!(crate::feedback_config::usage_tags(
@@ -2939,47 +2921,11 @@ async fn try_run_sampling_request(
     let effort = sess
         .reasoning_effort_for_request(&step_context.settings, super::RequestEffortUsage::Sampling)
         .await;
-    let hooks = hooks_for_model_request(&sess, &step_context);
-    let post_mode = hooks.execution_mode_for_event(HookEventName::PostModelRequest);
-    let defer_tool_dispatch = post_mode == Some(HookExecutionMode::Sync);
-    let finish_post_request = post_mode.map(|_| {
-        let (post_request, completed) = tokio::sync::oneshot::channel();
-        let (hook_done, wait_for_hook) = tokio::sync::oneshot::channel();
-        hooks.schedule_async_task({
-            let hooks = Arc::clone(&hooks);
-            let session = Arc::clone(&sess);
-            let step = Arc::clone(&step_context);
-            async move {
-                let event = completed.await.unwrap_or(PostModelRequest {
-                    status: ModelRequestStatus::Cancelled,
-                    error: None,
-                    token_usage: None,
-                });
-                run_model_request_hooks(&session, &step, &hooks, event).await;
-                let _ = hook_done.send(());
-            }
-        });
-        let cancellation_token = cancellation_token.clone();
-        async move |event| {
-            let _ = post_request.send(event);
-            if defer_tool_dispatch {
-                // Interrupt the wait, not the session-owned hook or final token accounting.
-                let _ = wait_for_hook.or_cancel(&cancellation_token).await;
-            }
-        }
-    });
-    if hooks
-        .execution_mode_for_event(HookEventName::PreModelRequest)
-        .is_some()
-    {
-        run_model_request_hooks(&sess, &step_context, &hooks, PreModelRequest).await;
-    }
     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
     let mut response_id_for_assessment = None;
     let mut answer_moderation: Option<codex_protocol::protocol::TargetedAnswerModeration> = None;
     let mut pending_assessment: Option<codex_api::GuardianAssessment> = None;
     let mut response_completed = false;
-    let mut request_token_usage: Option<codex_protocol::protocol::TokenUsage> = None;
     let mut includes_reasoning = step_context.settings.model_info.use_responses_lite;
     // Catalog policies can enable adaptive review independently of the legacy scorer flag.
     // Capture evidence whenever Guardian is available; the reviewer resolves the policy.
@@ -2993,38 +2939,35 @@ async fn try_run_sampling_request(
         None
     };
     let mut resampling = crate::guardian::ResponseResampling::new(&sess);
-    let mut stream_request = async |prompt: &Prompt| {
-        client_session
-            .stream(
+    let prompt = Arc::new(prompt);
+    let mut stream_request = async |prompt: &Arc<Prompt>| {
+        let send = client_session
+            .open_model_response(
                 prompt,
                 &step_context.settings.model_info,
                 &step_context.session_telemetry,
-                effort.clone(),
-                step_context.settings.reasoning_summary,
-                step_context.settings.service_tier.clone(),
+                SamplingOptions {
+                    reasoning_effort: effort.clone(),
+                    reasoning_summary: step_context.settings.reasoning_summary,
+                    service_tier: step_context.settings.service_tier.clone(),
+                },
                 responses_metadata,
                 &inference_trace,
             )
-            .instrument(trace_span!("stream_request"))
+            .instrument(trace_span!("stream_request"));
+        sampling_request
+            .open(
+                &sess,
+                &step_context,
+                &step_context.settings.model_info.slug,
+                &cancellation_token,
+                send,
+            )
             .await
     };
-    let stream = stream_request(&prompt)
+    let mut stream = stream_request(&prompt)
         .or_cancel(&cancellation_token)
-        .await?;
-    let mut stream = match stream {
-        Ok(stream) => stream,
-        Err(error) => {
-            if let Some(finish_post_request) = finish_post_request {
-                finish_post_request(PostModelRequest {
-                    status: ModelRequestStatus::Failed,
-                    error: Some(error.to_string()),
-                    token_usage: None,
-                })
-                .await;
-            }
-            return Err(error);
-        }
-    };
+        .await??;
     let can_interrupt = turn_context
         .config
         .features
@@ -3058,7 +3001,8 @@ async fn try_run_sampling_request(
         .unwrap_or_else(|| "default".to_string());
     let plan_mode = turn_context.mode() == ModeKind::Plan;
     let mut assistant_message_stream_parsers = AssistantMessageStreamParsers::new(plan_mode);
-    let mut plan_mode_state = plan_mode.then(|| PlanModeStreamState::new(&turn_context.sub_id));
+    let mut plan_mode_state =
+        plan_mode.then(|| PlanModeStreamState::new(unfinished_plan_id.clone()));
     let defer_streamed_turn_items_for_contributors =
         !sess.services.extensions.turn_item_contributors().is_empty();
     let mut active_item_is_streaming_to_client = false;
@@ -3102,8 +3046,6 @@ async fn try_run_sampling_request(
             "codex.response.receive_wait_ms",
             receive_started.elapsed().as_secs_f64() * 1000.0,
         );
-        // Account for an already-received terminal error even if cancellation raced it.
-        // Cancellation still stops ordinary stream events before they can run tools.
         let event = match event {
             Ok(Ok(event)) => event,
             Ok(Err(_)) => {
@@ -3130,13 +3072,7 @@ async fn try_run_sampling_request(
             Err(_) => break Err(CodexErr::TurnAborted),
         };
 
-        if cancellation_token.is_cancelled()
-            && !matches!(event.as_ref(), Some(Err(err))
-                if matches!(err.details(), CodexErrorDetails::ResponseIncomplete(_)))
-        {
-            break Err(CodexErr::TurnAborted);
-        }
-
+        let event = ResponseStream::accept_for_turn(event, &cancellation_token);
         let event = match event.unwrap_or_else(|| {
             Err(CodexErr::Stream(
                 "stream closed before response.completed".into(),
@@ -3145,11 +3081,6 @@ async fn try_run_sampling_request(
             Ok(event) => event,
             Err(err) => {
                 if let CodexErrorDetails::ResponseIncomplete(incomplete) = err.details() {
-                    if let Some(usage) = &incomplete.token_usage {
-                        request_token_usage
-                            .get_or_insert_default()
-                            .add_assign(usage);
-                    }
                     sess.record_incomplete_response_usage(
                         &turn_context,
                         &step_context.settings,
@@ -3174,7 +3105,6 @@ async fn try_run_sampling_request(
             }
         };
 
-        record_turn_ttft_metric(&turn_context, &event).await;
         let Some(event) = resampling.filter(event, &step_context.tool_router) else {
             continue;
         };
@@ -3285,7 +3215,7 @@ async fn try_run_sampling_request(
                     step_context: Arc::clone(&step_context),
                     turn_store: Arc::clone(&turn_store),
                     tool_runtime,
-                    defer_tool_dispatch: defer_tool_dispatch || *draining_for_mailbox,
+                    defer_tool_dispatch: *draining_for_mailbox,
                     cancellation_token: cancellation_token.child_token(),
                 };
                 if *draining_for_mailbox {
@@ -3544,11 +3474,6 @@ async fn try_run_sampling_request(
                     .await;
                 }
                 response_completed = true;
-                if let Some(usage) = &token_usage {
-                    request_token_usage
-                        .get_or_insert_default()
-                        .add_assign(usage);
-                }
                 sess.services
                     .analytics_events_client
                     .track_code_mode_tool_call(
@@ -3769,21 +3694,6 @@ async fn try_run_sampling_request(
     drop(stream);
     drop(sampling_span);
     drop(sampling_timing_guard);
-    if let Some(finish_post_request) = finish_post_request {
-        let (status, error) = match (response_completed, &outcome) {
-            (true, _) => (ModelRequestStatus::Completed, None),
-            (false, Err(error)) if !matches!(error.details(), CodexErrorDetails::TurnAborted) => {
-                (ModelRequestStatus::Failed, Some(error.to_string()))
-            }
-            _ => (ModelRequestStatus::Cancelled, None),
-        };
-        finish_post_request(PostModelRequest {
-            status,
-            error,
-            token_usage: request_token_usage,
-        })
-        .await;
-    }
     flush_assistant_text_segments_all(
         &sess,
         &turn_context,
@@ -3791,6 +3701,9 @@ async fn try_run_sampling_request(
         &mut assistant_message_stream_parsers,
     )
     .await;
+    if let Some(state) = plan_mode_state {
+        *unfinished_plan_id = state.plan_item_state.unfinished_id();
+    }
 
     if !in_flight.is_empty() {
         let _tool_blocking_timing_guard = turn_context

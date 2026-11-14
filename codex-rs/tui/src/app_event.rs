@@ -317,7 +317,7 @@ pub(crate) struct CapturedSideDisplay {
     pub(crate) active: Option<Box<dyn HistoryCell>>,
     pub(crate) auxiliary: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
     pub(crate) draft: Box<crate::bottom_pane::TextArea>,
-    pub(crate) status_line: Option<crate::bottom_pane::footer_content::FooterContent>,
+    pub(crate) status_line: Option<crate::bottom_pane::StatusLine>,
     pub(crate) work: Option<CapturedSideWork>,
     pub(crate) last_completed_agent_message: Option<(String, String)>,
     pub(crate) cwd: AbsolutePathBuf,
@@ -453,6 +453,7 @@ pub(crate) enum AppEvent {
     SearchAgentsOverview(Uuid, usize),
     AgentsOverviewSearchPage {
         id: Uuid,
+        backend_id: crate::backend_id::BackendId,
         rows: Vec<(Thread, bool)>,
         cursor: crate::app::agents_overview_discovery::AgentsOverviewDiscovery,
         ok: bool,
@@ -518,6 +519,7 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
         destination: ThreadTitleDestination,
         prompt: String,
+        expected_name: Option<String>,
         fallback_title: Option<String>,
         effort: Option<ReasoningEffort>,
         result: Result<String, String>,
@@ -866,6 +868,9 @@ pub(crate) enum AppEvent {
     /// Resume a thread by UUID or thread name inside the running TUI session.
     ResumeSessionByIdOrName(String),
 
+    /// Reattach an externally unarchived thread only while it remains displayed and unarchived.
+    ResumeUnarchivedThread(ThreadId),
+
     /// Attach a conversation through the registered backend that owns it.
     ResumeBackendSession(crate::resume_picker::SessionTarget),
 
@@ -1035,13 +1040,13 @@ pub(crate) enum AppEvent {
     /// Fetch backend-estimated usage for the currently visible enterprise thread.
     RefreshThreadUsage {
         thread_id: ThreadId,
-        request_id: u64,
+        request_id: Uuid,
     },
 
     /// Result of fetching backend-estimated usage for a specific thread.
     ThreadUsageLoaded {
         thread_id: ThreadId,
-        request_id: u64,
+        request_id: Uuid,
         result: Result<ThreadUsageOutcome, String>,
     },
 
@@ -1054,7 +1059,7 @@ pub(crate) enum AppEvent {
 
     /// Fetch workspace messages for the status-line headline item.
     RefreshStatusLineWorkspaceHeadline {
-        request_id: u64,
+        request_id: Uuid,
     },
 
     /// Commit settled asynchronous usage output after active-output barriers clear.
@@ -1363,6 +1368,7 @@ pub(crate) enum AppEvent {
 
     StartMcpLogin {
         name: String,
+        environment_id: Option<String>,
         thread_id: ThreadId,
     },
 
@@ -1512,6 +1518,13 @@ pub(crate) enum AppEvent {
         result: Result<StartedRealtimeWebrtcSession, RealtimeWebrtcStartupFailure>,
     },
 
+    /// Provider negotiation completed for this local voice startup attempt.
+    RealtimeCallCreated {
+        thread_id: ThreadId,
+        attempt_id: u64,
+        result: color_eyre::Result<crate::realtime_call::CreatedCall>,
+    },
+
     /// Result of establishing the WebRTC connection for an active voice attempt.
     RealtimeWebrtcConnected {
         thread_id: ThreadId,
@@ -1589,6 +1602,12 @@ pub(crate) enum AppEvent {
     /// Save the voice for subsequent conversations through the app server.
     PersistRealtimeVoiceSelection {
         voice: codex_protocol::protocol::RealtimeVoice,
+    },
+
+    /// Toggle the service tier staged for the next Cloud submission.
+    ToggleCloudServiceTier {
+        thread_id: ThreadId,
+        tier: String,
     },
 
     /// Persist the selected service tier to the appropriate config.
@@ -1905,7 +1924,7 @@ pub(crate) enum AppEvent {
     },
     /// Async update of the workspace notification headline for status line rendering.
     StatusLineWorkspaceHeadlineUpdated {
-        request_id: u64,
+        request_id: Uuid,
         result: Result<crate::workspace_messages::WorkspaceHeadlineFetchResult, String>,
     },
     /// Apply a user-confirmed status-line item ordering/selection.

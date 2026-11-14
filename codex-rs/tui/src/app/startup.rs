@@ -67,8 +67,8 @@ pub(super) async fn prepare_fresh_startup_config(
         }
     };
     let defaults = crate::config_update::read_effective_config_with_layers(
-        app_server.request_handle(),
-        defaults_cwd,
+        &app_server.request_handle(),
+        defaults_cwd.display().to_string(),
     )
     .await?;
     super::new_session::overlay_new_session_defaults(
@@ -936,6 +936,8 @@ impl App {
         }
         chat_widget.remote_connection = remote_connection;
         chat_widget.snapshot_local_images = app_server_target.uses_remote_workspace();
+        chat_widget.thread_settings_owner = app_server.thread_params_mode().settings_owner();
+        chat_widget.pending_cloud_turn_settings = app_server.pending_cloud_turn_settings();
         chat_widget.set_local_worktree_operations(!crate::uses_remote_workspace_or_environment(
             &app_server_target,
             environment_manager.as_ref(),

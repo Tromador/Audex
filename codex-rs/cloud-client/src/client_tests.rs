@@ -133,6 +133,33 @@ async fn archive_addresses_the_requested_thread_and_requires_acknowledgment() {
 }
 
 #[tokio::test]
+async fn rename_sends_the_thread_and_title_and_requires_acknowledgment() {
+    let mut fixture = fixture_responses(vec![
+        response(vec![frame(&[])], tonic::Status::ok("")),
+        response(
+            vec![frame(&[])],
+            tonic::Status::permission_denied("synthetic denial"),
+        ),
+    ])
+    .await;
+
+    fixture.client.set_thread_name("t", "New").await.unwrap();
+    assert_request(&mut fixture, "SetThreadName", b"\x0a\x01t\x12\x03New").await;
+
+    let error = fixture
+        .client
+        .set_thread_name("u", "Other")
+        .await
+        .unwrap_err();
+    let MutationError::OutcomeUnknown(Error::Rpc(status)) = error else {
+        panic!("expected a remote rename failure");
+    };
+    assert_eq!(status.code, tonic::Code::PermissionDenied as i32);
+    assert_request(&mut fixture, "SetThreadName", b"\x0a\x01u\x12\x05Other").await;
+    assert!(fixture.requests.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn activation_preserves_native_settings_and_thread_metadata() {
     // Native Thread fields encoded independently of the client's wire types.
     let thread_base: &[u8] = &[
@@ -451,10 +478,21 @@ async fn attach_preserves_opaque_events_and_native_error_details() {
         secret.clone(),
     );
     let data = [frame(&[10, 3, 10, 1, b'n']), frame(&[18, 3, 10, 1, b'r'])].concat();
-    let mut fixture = fixture(response(
-        data.iter().map(|b| Bytes::from(vec![*b])).collect(),
-        status,
-    ))
+    let large = vec![b'x'; 256 * 1024];
+    let burst = frame(
+        &wire::AttachResponse {
+            event: Some(wire::Payload::ServerRequest(large.clone().into())),
+        }
+        .encode_to_vec(),
+    );
+    let fragmented = data.iter().map(|b| Bytes::from(vec![*b]));
+    let mut fixture = fixture_responses(vec![
+        response(
+            fragmented.chain(std::iter::repeat_n(burst, 16)).collect(),
+            status,
+        ),
+        response(vec![frame(&[0x0a, 0x00])], tonic::Status::ok("")),
+    ])
     .await;
     let mut events = fixture.client.attach("t").await.unwrap();
     assert_request(&mut fixture, "Attach", &[10, 1, b't']).await;
@@ -468,6 +506,27 @@ async fn attach_preserves_opaque_events_and_native_error_details() {
         panic!("server request expected")
     };
     assert_eq!(bytes.as_ref(), &[10, 1, b'r']);
+    // History completes with several megabytes still unread on the Attach body.
+    let request = ListItemsRequest {
+        thread_id: "t".into(),
+        turn_id: None,
+        page: HistoryQuery::default(),
+    };
+    let history = fixture.client.list_items(&request);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), history)
+            .await
+            .unwrap()
+            .unwrap()
+            .data
+            .is_empty()
+    );
+    for _ in 0..16 {
+        let Event::ServerRequest(bytes) = events.next().await.unwrap().unwrap() else {
+            panic!("burst event expected")
+        };
+        assert_eq!(bytes.as_ref(), large.as_slice());
+    }
     let error = events.next().await.unwrap().unwrap_err();
     assert!(!format!("{error:?} {error}").contains("private"));
     let Error::Rpc(status) = error else {

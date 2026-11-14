@@ -433,6 +433,23 @@ impl InProcessTransportFactory for MutableToolsTransportFactory {
     }
 }
 
+pub(crate) async fn create_test_apps_client(
+    tool: Tool,
+    list_started: Option<Arc<Notify>>,
+    release_list: Option<Arc<Notify>>,
+    list_requests: Arc<AtomicUsize>,
+) -> anyhow::Result<Arc<RmcpClient>> {
+    let client = RmcpClient::new_in_process_client(Arc::new(RefreshTestTransportFactory {
+        tool,
+        list_started,
+        release_list,
+        next_cursor: None,
+        list_requests,
+    }))
+    .await?;
+    Ok(Arc::new(client))
+}
+
 struct DisconnectingToolsTransportFactory {
     server: MutableToolsServer,
     disconnect: CancellationToken,
@@ -667,11 +684,78 @@ async fn stalled_apps_client_publication_expires_at_the_configured_startup_timeo
 }
 
 #[tokio::test]
+async fn cleanup_skips_only_an_unrequested_private_local_stdio_connection() {
+    let name = "node_repl";
+    let key = McpServerKey::unscoped(name);
+    let mut manager = McpConnectionSet::empty(/*prefix_mcp_tool_names*/ true);
+    manager.insert_test_client(name, create_ready_async_managed_client(Vec::new()).await);
+    let (trigger, _receiver) = watch::channel(false);
+    Arc::get_mut(
+        &mut manager
+            .servers
+            .get_mut(&key)
+            .expect("registered REPL view")
+            .connection,
+    )
+    .expect("unique test connection")
+    .startup_trigger = Some(trigger.clone());
+    let stdio: McpServerConfig =
+        serde_json::from_value(serde_json::json!({"command":"test-helper"}))
+            .expect("valid test stdio config");
+    let http = reusable_server_config("https://example.com/mcp");
+    let mut remote = stdio.clone();
+    remote.environment_id = "remote".to_string();
+    let configured = |config| crate::McpServerRegistration::from_config(name.to_string(), config);
+    let plugin = crate::McpServerRegistration::from_plugin(
+        name.to_string(),
+        crate::McpPluginAttribution::new("other@example".into(), "Other".into()),
+        /*plugin_order*/ 0,
+        stdio.clone(),
+    );
+    for (registration, expected) in [
+        (configured(http), false),
+        (configured(remote), false),
+        (plugin, false),
+        (configured(stdio), true),
+    ] {
+        let mut runtime_config = crate::mcp::tests::test_mcp_config(std::env::temp_dir());
+        let mut catalog = crate::ResolvedMcpCatalog::builder();
+        catalog.register(registration);
+        runtime_config.mcp_server_catalog = catalog.build();
+        manager.config = Some(Arc::new(runtime_config));
+        assert_eq!(manager.is_dormant_private_stdio(&key), expected);
+    }
+    let view = manager.servers.get_mut(&key).expect("registered REPL view");
+    view.protocol_mode = crate::McpProtocolMode::V20260728;
+    assert!(!manager.is_dormant_private_stdio(&key));
+    let view = manager.servers.get_mut(&key).expect("registered REPL view");
+    view.protocol_mode = crate::McpProtocolMode::Legacy;
+    Arc::get_mut(&mut view.connection)
+        .expect("unique test connection")
+        .client
+        .connection_slot = Some(Arc::default());
+    assert!(!manager.is_dormant_private_stdio(&key));
+    let connection = Arc::get_mut(
+        &mut manager
+            .servers
+            .get_mut(&key)
+            .expect("registered REPL view")
+            .connection,
+    )
+    .expect("unique test connection");
+    connection.client.connection_slot = None;
+    trigger.send_replace(true);
+    assert!(!manager.is_dormant_private_stdio(&key));
+}
+
+#[tokio::test]
 async fn connection_statuses_observe_clients_without_starting_them() {
     use codex_protocol::mcp::McpServerConnectionStatus as Status;
 
     let mut manager = McpConnectionSet::empty(/*prefix_mcp_tool_names*/ true);
-    manager.disabled_servers.push("disabled".to_string());
+    manager
+        .disabled_servers
+        .push(McpServerKey::unscoped("disabled"));
     let ready = create_ready_async_managed_client(Vec::new()).await;
     ready.client().await.expect("ready client");
     manager.insert_test_client("connected", ready);
@@ -710,16 +794,17 @@ async fn connection_statuses_observe_clients_without_starting_them() {
     pending.cached_server_info = Some(create_test_server_info("Cached"));
     manager.insert_test_client("starting", pending.clone());
     manager.insert_test_client("deferred", pending);
+    let scoped_key = McpServerKey::in_environment("remote", "connected");
+    let mut deferred = manager
+        .servers
+        .remove(&McpServerKey::unscoped("deferred"))
+        .unwrap();
+    deferred.metadata.server_key = scoped_key.clone();
+    manager.servers.insert(scoped_key.clone(), deferred);
     let (trigger, _receiver) = watch::channel(/*init*/ false);
-    Arc::get_mut(
-        &mut manager
-            .servers
-            .get_mut(&McpServerKey::unscoped("deferred"))
-            .unwrap()
-            .connection,
-    )
-    .unwrap()
-    .startup_trigger = Some(trigger.clone());
+    Arc::get_mut(&mut manager.servers.get_mut(&scoped_key).unwrap().connection)
+        .unwrap()
+        .startup_trigger = Some(trigger.clone());
 
     let statuses = tokio::time::timeout(
         Duration::from_millis(/*millis*/ 100),
@@ -728,19 +813,25 @@ async fn connection_statuses_observe_clients_without_starting_them() {
     .await
     .expect("status must not await startup");
     let mut expected = HashMap::from([
-        ("connected".to_string(), Status::Connected),
-        ("failed".to_string(), Status::Failed),
-        ("auth".to_string(), Status::AuthenticationRequired),
-        ("flattened-auth".to_string(), Status::AuthenticationRequired),
-        ("cancelled".to_string(), Status::Cancelled),
-        ("starting".to_string(), Status::Starting),
-        ("deferred".to_string(), Status::NotStarted),
-        ("disabled".to_string(), Status::Disabled),
+        (McpServerKey::unscoped("connected"), Status::Connected),
+        (McpServerKey::unscoped("failed"), Status::Failed),
+        (
+            McpServerKey::unscoped("auth"),
+            Status::AuthenticationRequired,
+        ),
+        (
+            McpServerKey::unscoped("flattened-auth"),
+            Status::AuthenticationRequired,
+        ),
+        (McpServerKey::unscoped("cancelled"), Status::Cancelled),
+        (McpServerKey::unscoped("starting"), Status::Starting),
+        (scoped_key, Status::NotStarted),
+        (McpServerKey::unscoped("disabled"), Status::Disabled),
     ]);
     assert_eq!(statuses, expected);
     assert!(!*trigger.borrow());
     manager.test_client("connected").cancel_token.cancel();
-    expected.insert("connected".to_string(), Status::Cancelled);
+    expected.insert(McpServerKey::unscoped("connected"), Status::Cancelled);
     assert_eq!(manager.connection_statuses().await, expected);
 }
 
@@ -785,7 +876,8 @@ async fn connection_statuses_follow_latest_reconnect_outcome() {
     let manager = create_test_manager_with_failed_apps_startup(Vec::new(), factory);
     let client = manager.test_client(CODEX_APPS_MCP_SERVER_NAME);
     assert!(client.client().await.is_err());
-    let expected = |status| HashMap::from([(CODEX_APPS_MCP_SERVER_NAME.to_string(), status)]);
+    let expected =
+        |status| HashMap::from([(McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME), status)]);
     assert_eq!(
         manager.connection_statuses().await,
         expected(Status::Failed)
@@ -856,16 +948,13 @@ pub(crate) async fn create_test_manager_with_ready_apps_client(
     release_list: Option<Arc<Notify>>,
 ) -> anyhow::Result<Arc<McpConnectionSet>> {
     let tool = create_test_tool(CODEX_APPS_MCP_SERVER_NAME, tool_name);
-    let client = Arc::new(
-        RmcpClient::new_in_process_client(Arc::new(RefreshTestTransportFactory {
-            tool: tool.tool.clone(),
-            list_started,
-            release_list,
-            next_cursor: None,
-            list_requests: Arc::new(AtomicUsize::new(0)),
-        }))
-        .await?,
-    );
+    let client = create_test_apps_client(
+        tool.tool.clone(),
+        list_started,
+        release_list,
+        Arc::default(),
+    )
+    .await?;
     client
         .initialize(
             InitializeRequestParams::new(
@@ -3049,7 +3138,7 @@ async fn list_available_server_infos_uses_cache_while_client_is_pending() {
     .await;
     let server_infos = timeout_result.expect("server info lookup should not block on startup");
     assert_eq!(
-        server_infos.get(CODEX_APPS_MCP_SERVER_NAME),
+        server_infos.get(&McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME)),
         Some(&server_info)
     );
 }
@@ -4488,7 +4577,7 @@ async fn list_all_tools_uses_shared_codex_apps_cache_when_client_startup_fails()
         manager
             .list_available_server_infos(|_| true)
             .await
-            .get(CODEX_APPS_MCP_SERVER_NAME),
+            .get(&McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME)),
         Some(&server_info)
     );
 }
@@ -5156,7 +5245,7 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
             "{case}: executor-owned servers must not retain hosted OAuth credentials"
         );
         let auth_statuses = crate::compute_auth_statuses(
-            [(&"fake-first-party".to_string(), remote_server)],
+            [(&McpServerKey::unscoped("fake-first-party"), remote_server)],
             OAuthCredentialsStoreMode::default(),
             AuthKeyringBackendKind::default(),
             Some(&hosted_auth),
@@ -5171,7 +5260,8 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
             McpAuthState::Unsupported
         };
         assert_eq!(
-            auth_statuses["fake-first-party"].auth_state, expected_auth_state,
+            auth_statuses[&McpServerKey::unscoped("fake-first-party")].auth_state,
+            expected_auth_state,
             "{case}: auth status must only accept safe executor-owned authorization"
         );
 
