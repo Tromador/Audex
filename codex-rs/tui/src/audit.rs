@@ -262,7 +262,7 @@ async fn document(path: Option<std::path::PathBuf>) -> Result<Option<String>, St
     {
         return Err("context document must be a regular file".to_owned());
     }
-    let file = tokio::fs::File::open(&path)
+    let mut file = tokio::fs::File::open(&path)
         .await
         .map_err(|error| error.to_string())?;
     if !file
@@ -274,13 +274,9 @@ async fn document(path: Option<std::path::PathBuf>) -> Result<Option<String>, St
         return Err("context document must be a regular file".to_owned());
     }
     let mut bytes = Vec::new();
-    file.take(64 * 1024 + 1)
-        .read_to_end(&mut bytes)
+    file.read_to_end(&mut bytes)
         .await
         .map_err(|error| error.to_string())?;
-    if bytes.len() > 64 * 1024 {
-        return Err("context document exceeds 64 KiB".to_owned());
-    }
     String::from_utf8(bytes)
         .map(Some)
         .map_err(|_| "context document must be UTF-8".to_owned())

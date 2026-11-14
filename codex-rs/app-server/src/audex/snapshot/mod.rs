@@ -38,19 +38,16 @@ pub(crate) use manifest::SnapshotManifestV1;
 pub(crate) use manifest::SnapshotPath;
 
 pub(crate) const DEFAULT_MAX_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
-pub(crate) const DEFAULT_MAX_CONTEXT_DOCUMENT_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CaptureLimits {
     pub max_source_bytes: u64,
-    pub max_context_document_bytes: u64,
 }
 
 impl Default for CaptureLimits {
     fn default() -> Self {
         Self {
             max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
-            max_context_document_bytes: DEFAULT_MAX_CONTEXT_DOCUMENT_BYTES,
         }
     }
 }
@@ -230,8 +227,6 @@ pub(crate) enum SnapshotError {
     InvalidSource(String),
     #[error("source exceeds the configured limit of {limit} bytes")]
     SourceTooLarge { limit: u64 },
-    #[error("context document `{name}` exceeds the configured limit of {limit} bytes")]
-    ContextDocumentTooLarge { name: String, limit: u64 },
     #[error("source changed while it was being captured")]
     SourceChanged,
     #[error("invalid snapshot manifest: {0}")]

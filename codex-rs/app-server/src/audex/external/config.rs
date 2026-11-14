@@ -249,8 +249,7 @@ async fn prepare_files(
         &json!({"type":"user","message":{"role":"user","content":assignment.to_string()}}),
     )?;
     prompt.push(b'\n');
-    // The brief and captured documents have already passed their input bounds.
-    // JSON escaping can exceed 256 KiB even for supported 64-KiB documents.
+    // Preserve the complete assignment, including any expansion from JSON escaping.
     let billing_source = if route == "claude_subscription" {
         "none"
     } else {

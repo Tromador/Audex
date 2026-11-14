@@ -162,10 +162,6 @@ impl AuditController {
             !params.request_key.trim().is_empty(),
             "request key must be nonempty"
         );
-        anyhow::ensure!(
-            params.brief.len() <= 64 * 1024,
-            "audit brief exceeds 64 KiB"
-        );
         for selection in &selections {
             anyhow::ensure!(
                 matches!(

@@ -90,7 +90,7 @@ async fn prepare(
     request: CaptureRequest,
 ) -> Result<PublicationInput, SnapshotError> {
     let prepared_source = prepare_source(store, request.source).await?;
-    let prepared_documents = prepare_context_documents(store.limits, request.context_documents)?;
+    let prepared_documents = prepare_context_documents(request.context_documents)?;
     let source_digest = sha256_hex(&prepared_source.bytes);
     let source_entry = SnapshotEntryV1 {
         path: prepared_source.logical_path,
@@ -220,7 +220,6 @@ fn enforce_source_size(size: u64, limits: CaptureLimits) -> Result<(), SnapshotE
 }
 
 fn prepare_context_documents(
-    limits: CaptureLimits,
     documents: ContextDocuments,
 ) -> Result<Vec<PreparedContextDocument>, SnapshotError> {
     let mut prepared = Vec::new();
@@ -234,12 +233,6 @@ fn prepare_context_documents(
         let Some(bytes) = bytes else {
             continue;
         };
-        if bytes.len() as u64 > limits.max_context_document_bytes {
-            return Err(SnapshotError::ContextDocumentTooLarge {
-                name: role.logical_path().to_string(),
-                limit: limits.max_context_document_bytes,
-            });
-        }
         prepared.push(PreparedContextDocument {
             record: ContextDocumentV1 {
                 role,

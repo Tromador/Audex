@@ -186,19 +186,51 @@ async fn unaltered_live_fence_passes_semantic_validation_in_a_new_store() -> any
         "acdf90e9fe6ba06f06ab7fb6efbd75b948313b09940e5287ed725e20d62a3605"
     );
     let temp = tempfile::tempdir()?;
-    let snapshot = SnapshotStore::new(
+    let snapshots = SnapshotStore::new(
         absolute(&temp.path().join("snapshots")),
         Arc::new(LocalFileSystem::unsandboxed()),
         CaptureLimits::default(),
-    )
-    .capture(CaptureRequest {
-        source: CaptureSource::Snippet {
-            logical_path: SnapshotPath::new("example.rs")?,
-            bytes: b"pub fn identity(value: u8) -> u8 { value }\n".to_vec(),
-        },
-        context_documents: ContextDocuments::default(),
-    })
-    .await?;
+    );
+    let captured = snapshots
+        .capture(CaptureRequest {
+            source: CaptureSource::Snippet {
+                logical_path: SnapshotPath::new("example.rs")?,
+                bytes: b"pub fn identity(value: u8) -> u8 { value }\n".to_vec(),
+            },
+            context_documents: ContextDocuments::default(),
+        })
+        .await?;
+    // Reconstruct this historical snapshot under its recorded policy. A new
+    // capture has a different identity; the retained response must not be edited.
+    let mut manifest = captured.manifest().clone();
+    manifest.identity.capture_policy.version = 1;
+    manifest.identity.capture_policy.max_context_document_bytes = Some(65_536);
+    manifest.snapshot_id = crate::audex::snapshot::SnapshotId::parse(
+        "audex-source-v1:sha256:e525d1acaa156833264a4d2db49ca69014eaa493eed874be0b1123dd20944fe1",
+    )?;
+    manifest.validate()?;
+    let current_root = snapshots.root().join(captured.snapshot_id().digest());
+    let legacy_root = snapshots.root().join(manifest.snapshot_id.digest());
+    let manifest_path = current_root.join("manifest.json");
+    let original_permissions = std::fs::metadata(manifest_path.as_path())?.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            manifest_path.as_path(),
+            std::fs::Permissions::from_mode(0o644),
+        )?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut writable = original_permissions.clone();
+        writable.set_readonly(false);
+        std::fs::set_permissions(manifest_path.as_path(), writable)?;
+    }
+    std::fs::write(manifest_path.as_path(), manifest.to_pretty_bytes()?)?;
+    std::fs::set_permissions(manifest_path.as_path(), original_permissions)?;
+    std::fs::rename(current_root.as_path(), legacy_root.as_path())?;
+    let snapshot = snapshots.open(&manifest.snapshot_id).await?;
     assert_eq!(
         snapshot.snapshot_id().as_str(),
         "audex-source-v1:sha256:e525d1acaa156833264a4d2db49ca69014eaa493eed874be0b1123dd20944fe1"

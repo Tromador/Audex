@@ -1,4 +1,5 @@
 use super::*;
+mod input_documents;
 use codex_app_server_client::audit::require_audit_protocol_version as require_protocol_version;
 use codex_app_server_protocol::{AUDIT_PROTOCOL_VERSION, AuditListResponse};
 

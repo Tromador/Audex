@@ -1,3 +1,5 @@
+mod input_policy;
+
 use super::AccessLimits;
 use super::CaptureLimits;
 use super::CaptureRequest;
@@ -77,7 +79,7 @@ async fn canonical_identity_has_stable_golden_vectors() {
     );
     assert_eq!(
         handle.snapshot_id().as_str(),
-        "audex-source-v1:sha256:b9b7897e67cb61dc1963e9c23b13bdaaf7a836251a0f010d457de39f7ddfc81a"
+        "audex-source-v1:sha256:fc758e6b173e6bd208e81891eb7ce0a7c0e440c9c95545fde8abffa9d68521cf"
     );
     make_tree_writable(temp.path());
 }
@@ -193,7 +195,6 @@ async fn invalid_paths_and_oversize_inputs_publish_nothing() {
         Arc::new(LocalFileSystem::unsandboxed()),
         CaptureLimits {
             max_source_bytes: 4,
-            max_context_document_bytes: 3,
         },
     );
     assert!(SnapshotPath::new("../escape.rs").is_err());
@@ -202,21 +203,6 @@ async fn invalid_paths_and_oversize_inputs_publish_nothing() {
     assert!(matches!(
         store.capture(snippet("file.rs", b"12345")).await,
         Err(SnapshotError::SourceTooLarge { .. })
-    ));
-    assert!(matches!(
-        store
-            .capture(CaptureRequest {
-                source: CaptureSource::Snippet {
-                    logical_path: SnapshotPath::new("file.rs").expect("valid path"),
-                    bytes: b"1234".to_vec(),
-                },
-                context_documents: ContextDocuments {
-                    audex_guidance: Some(b"1234".to_vec()),
-                    agents_evidence: None,
-                },
-            })
-            .await,
-        Err(SnapshotError::ContextDocumentTooLarge { .. })
     ));
     assert_eq!(published_directories(store.root().as_path()), 0);
 }

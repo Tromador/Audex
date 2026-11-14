@@ -143,10 +143,6 @@ pub(super) async fn prepare(
         !request.model.trim().is_empty(),
         "reviewer model must be explicit"
     );
-    anyhow::ensure!(
-        request.brief.len() <= 64 * 1024,
-        "audit brief exceeds 64 KiB"
-    );
     validate_selection_requirements(host, &request.provider, &request.model)?;
     let requirements = host.config_layer_stack.requirements();
     let provider = host
@@ -354,7 +350,7 @@ pub(super) async fn prepare(
         require_unified_exec: true,
         expose_additional_permissions: false,
     });
-    // Audit documents are already bounded and verified by snapshot capture. Keep
+    // Audit documents are verified against the captured snapshot. Keep
     // their complete bytes in the ordinary user payload: additional_context is
     // a lossy 1,000-token projection intended for ordinary client attachments.
     let context = snapshot

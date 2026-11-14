@@ -22,7 +22,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 // Client allocation ceilings mirror snapshot v1. The server still enforces its
 // own authoritative capture limits, regular-file checks and snapshot verification.
 const SOURCE_BYTES: usize = 32 * 1024 * 1024;
-const DOCUMENT_BYTES: usize = 64 * 1024;
 const PENDING: i32 = 5;
 
 #[derive(Debug, Parser)]
@@ -155,9 +154,9 @@ async fn document(path: Option<&Path>) -> anyhow::Result<Option<String>> {
         tokio::fs::metadata(path).await?.is_file(),
         "context document must be a regular file"
     );
-    bounded_text(tokio::fs::File::open(path).await?, DOCUMENT_BYTES)
+    tokio::fs::read_to_string(path)
         .await
-        .with_context(|| format!("reading context document {}", path.display()))
+        .with_context(|| format!("reading UTF-8 context document {}", path.display()))
         .map(Some)
 }
 

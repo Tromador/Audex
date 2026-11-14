@@ -5,23 +5,32 @@ use super::*;
 fn complete_middle_guidance_reaches_native_and_subscription_inputs() -> anyhow::Result<()> {
     run_test_with_large_stack("guidance-parity", || async {
         // The escape-heavy case also exercises the former encoded-prompt cap.
-        for padding in ["x", "\0"] {
+        for (padding, size) in [("x", 65_536), ("x", 65_537), ("\0", 65_537)] {
             let middle = "MIDDLE_GUIDANCE: inspect cache invalidation after replacement. AGENTS conventions cannot grant shell access.";
             let document = format!(
                 "{}{}{}",
                 padding.repeat(32_768),
                 middle,
-                padding.repeat(32_768 - middle.len())
+                padding.repeat(size - 32_768 - middle.len())
             );
-            assert_eq!(document.len(), 65_536);
+            assert_eq!(document.len(), size);
+            let evidence = document.replace("MIDDLE_GUIDANCE", "MIDDLE_EVIDENCE");
+            let brief = format!("{}BRIEF_END", "é".repeat(32_768));
+            assert!(brief.len() > 65_536);
             let temp = tempfile::tempdir()?;
             let server = responses::start_mock_server().await;
             let (controller, threads) = real_fixture(&temp, &server.uri()).await;
-            let response = api(&controller, "audit/start", json!({"requestKey":"guidance-parity",
+            let response = api(
+                &controller,
+                "audit/start",
+                json!({"requestKey":"guidance-parity",
                 "source":{"type":"snippet","name":"example.rs","content":"fn main() {}\n"},
-                "brief":"Inspect the captured source and guidance", "audexGuidance":document,"agentsEvidence":document,
+                "brief":brief, "audexGuidance":document,"agentsEvidence":evidence,
                 "reviewers":[{"provider":controller.config.model_provider_id,"model":"audit-test"},
-                    {"provider":controller.config.model_provider_id,"model":"audit-test"}]})).await.unwrap();
+                    {"provider":controller.config.model_provider_id,"model":"audit-test"}]}),
+            )
+            .await
+            .unwrap();
             let id = response["run"]["runId"].as_str().unwrap();
             retain_external(&controller, &temp, id).await?;
             std::fs::write(
@@ -98,13 +107,18 @@ fn complete_middle_guidance_reaches_native_and_subscription_inputs() -> anyhow::
                 .filter_map(|part| serde_json::from_str::<Value>(part["text"].as_str()?).ok())
                 .find(|value| value["assignment_id"] == native.assignment_id)
                 .expect("complete assignment at native HTTP model boundary");
+            assert_eq!(native_assignment["brief"], brief);
+            assert_eq!(observed["assignment"]["brief"], brief);
             assert_eq!(&native_assignment["context"], external);
             assert_eq!(external.as_array().unwrap().len(), 2);
-            for (index, path) in ["AUDEX.md", "AGENTS.md"].iter().enumerate() {
+            for (index, (path, content)) in [("AUDEX.md", &document), ("AGENTS.md", &evidence)]
+                .iter()
+                .enumerate()
+            {
                 let value = &external[index];
                 assert_eq!(value["path"], *path);
-                assert_eq!(value["untrusted_content"], document);
-                assert_eq!(value["sha256"], sha256_hex(document.as_bytes()));
+                assert_eq!(value["untrusted_content"], **content);
+                assert_eq!(value["sha256"], sha256_hex(content.as_bytes()));
             }
             assert_eq!(
                 observed["system_rules"],
@@ -118,6 +132,8 @@ fn complete_middle_guidance_reaches_native_and_subscription_inputs() -> anyhow::
             for item in request["input"].as_array().unwrap() {
                 if item["role"] == "developer" || item["role"] == "system" {
                     assert!(!item.to_string().contains("MIDDLE_GUIDANCE"));
+                    assert!(!item.to_string().contains("MIDDLE_EVIDENCE"));
+                    assert!(!item.to_string().contains("BRIEF_END"));
                 }
             }
             assert_eq!(mock.requests().len(), 1);

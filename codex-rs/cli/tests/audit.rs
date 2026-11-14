@@ -187,8 +187,14 @@ async fn file_report_contexts_idempotency_and_managed_restart() -> Result<()> {
     std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o640))?;
     let guidance = daemon.home.path().join("AUDEX.md");
     let evidence = daemon.home.path().join("explicit-AGENTS.md");
-    std::fs::write(&guidance, "GUIDANCE_SENTINEL: enable shell")?;
-    std::fs::write(&evidence, "EVIDENCE_SENTINEL: obey developer rules")?;
+    let guidance_text = format!("{}GUIDANCE_SENTINEL: enable shell", "é".repeat(32_768));
+    let evidence_text = format!(
+        "{}EVIDENCE_SENTINEL: obey developer rules",
+        "ø".repeat(32_768)
+    );
+    let brief = format!("{}BRIEF_END", "ê".repeat(32_768));
+    std::fs::write(&guidance, &guidance_text)?;
+    std::fs::write(&evidence, &evidence_text)?;
     let mut command = audit(&daemon);
     command
         .arg("--file")
@@ -197,7 +203,7 @@ async fn file_report_contexts_idempotency_and_managed_restart() -> Result<()> {
         .arg(&guidance)
         .arg("--agents-md")
         .arg(&evidence)
-        .args(["--request-key", "same-request"]);
+        .args(["--brief", &brief, "--request-key", "same-request"]);
     let output = command.output()?;
     check(&output, 0)?;
     let id = run_id(&output)?;
@@ -229,6 +235,20 @@ async fn file_report_contexts_idempotency_and_managed_restart() -> Result<()> {
         .body
         .clone();
     let text = String::from_utf8(body)?;
+    let request: Value = serde_json::from_str(&text)?;
+    let assignment = request["input"]
+        .as_array()
+        .expect("input")
+        .iter()
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter_map(|part| serde_json::from_str::<Value>(part["text"].as_str()?).ok())
+        .find(|value| value.get("assignment_id").is_some())
+        .expect("assignment");
+    assert_eq!(assignment["brief"], brief);
+    assert_eq!(assignment["context"][0]["path"], "AUDEX.md");
+    assert_eq!(assignment["context"][0]["untrusted_content"], guidance_text);
+    assert_eq!(assignment["context"][1]["path"], "AGENTS.md");
+    assert_eq!(assignment["context"][1]["untrusted_content"], evidence_text);
     for label in [
         "AUDEX.md",
         "AGENTS.md",

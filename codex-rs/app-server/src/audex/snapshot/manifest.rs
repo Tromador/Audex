@@ -210,18 +210,20 @@ pub(crate) struct ContextDocumentV1 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CapturePolicyV1 {
+pub(crate) struct CapturePolicy {
     pub version: u32,
     pub max_source_bytes: u64,
-    pub max_context_document_bytes: u64,
+    // Version 1 retains its numeric limit and canonical bytes. Version 2 uses
+    // null to record that context documents have no Audex admission ceiling.
+    pub max_context_document_bytes: Option<u64>,
 }
 
-impl From<CaptureLimits> for CapturePolicyV1 {
+impl From<CaptureLimits> for CapturePolicy {
     fn from(limits: CaptureLimits) -> Self {
         Self {
-            version: 1,
+            version: 2,
             max_source_bytes: limits.max_source_bytes,
-            max_context_document_bytes: limits.max_context_document_bytes,
+            max_context_document_bytes: None,
         }
     }
 }
@@ -232,7 +234,7 @@ pub(crate) struct SnapshotIdentityV1 {
     pub format_version: u32,
     pub hash_algorithm: String,
     pub source_form: SourceFormV1,
-    pub capture_policy: CapturePolicyV1,
+    pub capture_policy: CapturePolicy,
     pub entries: Vec<SnapshotEntryV1>,
     pub context_documents: Vec<ContextDocumentV1>,
 }
@@ -356,11 +358,16 @@ fn validate_identity(identity: &SnapshotIdentityV1) -> Result<(), SnapshotError>
             "unsupported hash algorithm".to_string(),
         ));
     }
-    if identity.capture_policy.version != 1 {
-        return Err(SnapshotError::InvalidManifest(format!(
-            "unsupported capture policy version {}",
-            identity.capture_policy.version
-        )));
+    match (
+        identity.capture_policy.version,
+        identity.capture_policy.max_context_document_bytes,
+    ) {
+        (1, Some(_)) | (2, None) => {}
+        _ => {
+            return Err(SnapshotError::InvalidManifest(
+                "unsupported or inconsistent capture policy".to_string(),
+            ));
+        }
     }
     if identity.entries.len() != 1 {
         return Err(SnapshotError::InvalidManifest(
@@ -401,7 +408,11 @@ fn validate_identity(identity: &SnapshotIdentityV1) -> Result<(), SnapshotError>
                 "context document path does not match its semantic role".to_string(),
             ));
         }
-        if document.size > identity.capture_policy.max_context_document_bytes {
+        if identity
+            .capture_policy
+            .max_context_document_bytes
+            .is_some_and(|limit| document.size > limit)
+        {
             return Err(SnapshotError::InvalidManifest(
                 "context document exceeds the recorded capture policy".to_string(),
             ));
