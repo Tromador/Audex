@@ -159,7 +159,9 @@ async fn migrations_pragmas_reopen_and_recovery_are_durable() {
     );
     assert_eq!(
         store.applied_migrations().await.expect("read migrations"),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        vec![
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+        ]
     );
     let created = store
         .create_run(&create_request(&snapshot, "reopen"))

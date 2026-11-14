@@ -93,7 +93,7 @@ pub fn reviewer_selection_disclosure(params: &AuditStartParams) -> String {
                 "daemon credentials; authentication/billing category and amounts are not verified here",
             Ok(()) if reviewer.authentication_route
                 == codex_app_server_protocol::AuditAuthenticationRoute::ClaudeSubscription =>
-                "Official Claude client using OAuth in the dedicated subscription profile; consumes subscription quota. Account eligibility and billing are checked before the prompt, not by this read-only preflight.\n   The client may initiate corrective requests after cut-off output (up to 3), a missing tool call (up to 2), or empty output (up to 1), per occurrence. These are not a total request ceiling or Audex Retry authority.\n   Audex records observed corrections and stops best effort. Already initiated requests and remote quota charges may continue; stopping does not prove prevention. No automatic resume, model substitution or API fallback",
+                "Official Claude client using OAuth in the dedicated subscription profile; consumes subscription quota. Account eligibility and billing route are checked before the prompt. Ordinary client retries, continuation and automatic compaction remain authorised within this reviewer execution. Observed usage and client cost estimates are retained; subscription charges are unavailable. No model substitution or API fallback",
             Ok(()) => "unavailable for commissioning; authentication and billing configuration have not been verified",
         };
         text.push_str(&format!(
@@ -102,6 +102,7 @@ pub fn reviewer_selection_disclosure(params: &AuditStartParams) -> String {
             reviewer.authentication_route, reviewer.reasoning_effort, reviewer.expected_served_model
         ));
     }
+    text.push_str("Normal client retries and compaction stay within the authorised audit. If an execution fails, Audex observes the original first and retains verified completed output. Any surviving partial or unverified opinion requires your Retry decision. A verified stopped execution with no recoverable opinion may be replaced once, using the same snapshot and reviewer. A failed replacement requires investigation; further explicit retries of unfinished contributions remain available without an Audex-imposed attempt or spending ceiling.\n");
     text
 }
 

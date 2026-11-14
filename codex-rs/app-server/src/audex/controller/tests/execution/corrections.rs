@@ -204,7 +204,7 @@ fn missing_session_metadata_is_pending_but_foreign_metadata_is_terminal_unknown(
                     serde_json::from_str(error.as_deref().expect("diagnostic"))?;
                 assert_eq!(diagnostic["stage"], "history_identity");
                 assert_eq!(diagnostic["cause"], "foreign_persisted_thread");
-                assert_eq!(retry.as_deref(), Some("never_automatically_retry"));
+                assert_eq!(retry.as_deref(), Some("observe_original_before_recovery"));
             } else {
                 assert_eq!(observed.operation_state, OperationState::Accepted);
                 assert!(observed.observation_pending);

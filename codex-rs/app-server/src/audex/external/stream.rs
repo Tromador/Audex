@@ -53,7 +53,6 @@ struct Block {
 #[derive(Default)]
 struct Stream {
     repairs: repair::Tracker,
-    policy_stop_started: bool,
     session: Option<String>,
     current: Option<String>,
     messages: HashMap<String, Message>,
@@ -182,6 +181,11 @@ impl Collector {
     pub(super) async fn collect(self, stdout: ChildStdout, stderr: ChildStderr) {
         let result = self.read(stdout, stderr).await;
         if let Err(reason) = result {
+            // Preserve the admitted public prefix before failure closes capture.
+            // A fast EOF or malformed tail may precede the periodic flush.
+            // Flush retains the existing control/ownership fences and records
+            // storage failure itself; neither outcome verifies a complete review.
+            let _ = self.capture.flush().await;
             self.capture.failed(reason).await;
         }
     }
@@ -378,44 +382,68 @@ impl Collector {
             {
                 return Err("external_policy_observation_fenced");
             }
-            // Request local interruption promptly. Already initiated remote work
-            // and charges are not prevented by this owned-process signal.
-            self.capture.request_interrupt();
-            if !state.policy_stop_started {
-                state.policy_stop_started = true;
-                let (store, capture, identity) = (
-                    self.store.clone(),
-                    self.capture.clone(),
-                    self.identity.clone(),
-                );
-                #[cfg(test)]
-                let checkpoint = self.checkpoint.clone();
-                tokio::spawn(async move {
-                    #[cfg(test)]
-                    if let Some(checkpoint) = checkpoint {
-                        checkpoint("client_policy_stop").await;
-                    }
-                    let prefix = capture.control_prefix();
-                    let stopped = store
-                        .stop_client_for_policy(&identity, capture.identity(), &prefix)
-                        .await;
-                    capture.completion_finished(stopped.is_ok());
-                    capture.request_interrupt();
-                    if stopped.is_err() {
-                        capture.failed("external_policy_stop_write_failed").await;
-                    }
-                    capture.notify_committed();
-                });
+            #[cfg(test)]
+            if let Some(checkpoint) = &self.checkpoint {
+                checkpoint("client_continuation_observed").await;
             }
-            if notice.anomaly {
-                return Err("external_client_request_policy_anomaly");
-            }
+        }
+        #[cfg(test)]
+        if self
+            .store
+            .root_path()
+            .join("m5-compaction-percent")
+            .exists()
+            && matches!(kind, "assistant" | "result")
+            && (value["error"].is_string() || value["is_error"] == true)
+        {
+            // Qualification diagnostics contain only fixed labels, never client
+            // error text, credentials or arbitrary provider response fields.
+            let labels = [
+                "success",
+                "error_max_budget_usd",
+                "error_during_execution",
+                "authentication_failed",
+                "billing_error",
+                "rate_limit",
+                "invalid_request",
+                "server_error",
+                "unknown",
+                "budget_exhausted",
+                "api_error",
+                "blocking_limit",
+                "prompt_too_long",
+                "model_error",
+                "turn_setup_failed",
+            ];
+            let selected = ["error", "subtype", "terminal_reason"].map(|field| {
+                (
+                    field,
+                    value[field]
+                        .as_str()
+                        .filter(|v| labels.contains(v))
+                        .unwrap_or("unclassified"),
+                )
+            });
+            let text = value["message"]["content"].to_string().to_lowercase();
+            let terms = [
+                "budget", "credit", "quota", "limit", "auth", "expired", "rate", "429", "400",
+                "401", "403", "500",
+            ];
+            let matched = terms
+                .into_iter()
+                .filter(|term| text.contains(term))
+                .collect::<Vec<_>>();
+            eprintln!(
+                "M5 client failure labels: {selected:?}; diagnostic word matches: {matched:?}"
+            );
         }
         match kind {
             "system" => {
                 let status = match value["subtype"].as_str() {
                     Some("init") => "client_session_observed",
                     Some("status") => "client_status_observed",
+                    Some("compact_boundary") => "client_compaction_completed",
+                    Some("api_retry") => "client_transport_retry_observed",
                     _ => "client_system_event_redacted",
                 };
                 self.offer(
@@ -430,8 +458,24 @@ impl Collector {
             }
             "stream_event" => self.partial(state, session, uuid, &value["event"]).await?,
             "assistant" => {
-                if value["error"].is_string() || value["aborted"] == true {
+                if value["aborted"] == true {
                     return Err("external_assistant_failed");
+                }
+                if value["error"].is_string() {
+                    // The official client emits synthetic assistant errors before
+                    // its terminal result (including a budget stop), and may retry
+                    // them. Keep observing; this is neither model output nor a
+                    // complete execution receipt. Never persist opaque errors.
+                    self.offer(
+                        session,
+                        "",
+                        format!("client-error:{uuid}"),
+                        "status",
+                        "client_error_observed_awaiting_terminal".into(),
+                        None,
+                    )
+                    .await?;
+                    return Ok(None);
                 }
                 let message = &value["message"];
                 let id = identifier(&message["id"])?;
@@ -526,8 +570,18 @@ impl Collector {
                 if value["subtype"] != "success" || value["is_error"] != false {
                     // Retain safe failure usage/receipt in the same journal; opaque
                     // errors and diagnostic text have no public projection.
+                    let subtype = match value["subtype"].as_str() {
+                        Some("success") => "success_with_error",
+                        Some("error_max_budget_usd") => "error_max_budget_usd",
+                        Some("error_max_turns") => "error_max_turns",
+                        Some("error_during_execution") => "error_during_execution",
+                        Some("error_max_structured_output_retries") => {
+                            "error_max_structured_output_retries"
+                        }
+                        _ => "unrecognised_failure",
+                    };
                     self.offer(session, uuid, format!("client-terminal-failed:{uuid}"), "status",
-                        json!({"client_terminal":"failed","terminal_id":uuid,"usage":terminal_usage}).to_string(), None).await?;
+                        json!({"client_terminal":"failed","terminal_subtype":subtype,"terminal_id":uuid,"usage":terminal_usage}).to_string(), None).await?;
                     self.capture
                         .flush()
                         .await

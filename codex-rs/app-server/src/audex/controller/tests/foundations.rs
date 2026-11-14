@@ -175,7 +175,18 @@ async fn three_attempts_progress_without_sibling_revision_invalidation_and_recon
     recovered.tick().await?;
     let after = recovered.store().await?.attempts(&id).await?;
     assert_eq!(after[0], durable[0]);
-    assert_eq!(after[1], durable[1]);
+    let mut failed = durable[1].clone();
+    failed.attempt_revision += 1; // Newly retained recovery explanation.
+    assert_eq!(after[1], failed);
+    assert_eq!(
+        recovered
+            .store()
+            .await?
+            .recovery_status(&failed.assignment_id)
+            .await?
+            .as_deref(),
+        Some("original_observation_incomplete_no_replacement")
+    );
     assert_eq!(after[2].assignment_state, AssignmentState::Running);
     assert!(after[2].observation_pending && after[2].result_digest.is_none());
     assert_eq!(fake.starts.load(Ordering::SeqCst), 3);

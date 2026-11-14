@@ -108,15 +108,16 @@ impl AuditStore {
         &self,
         identity: &AdmissionIdentity,
         child: &codex_app_server_daemon::LinuxChildIdentity,
+        client_version: &str,
     ) -> Result<bool, AuditStoreError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if !owner_active(&mut tx, identity, now_millis()).await? {
             return Ok(false);
         }
-        let changed = sqlx::query("UPDATE audit_client_launches SET pid=?,start_ticks=?,boot_id=?,process_group=?,parent_pid=?,identity_at_ms=?
+        let changed = sqlx::query("UPDATE audit_client_launches SET pid=?,start_ticks=?,boot_id=?,process_group=?,parent_pid=?,identity_at_ms=?,client_version=?
             WHERE operation_id=? AND execution_id=? AND pid IS NULL AND prompt_write_started_at_ms IS NULL")
             .bind(i64::from(child.pid)).bind(i64::try_from(child.start_ticks).map_err(|_| AuditStoreError::InvalidInput("child start ticks overflow".into()))?)
-            .bind(&child.boot_id).bind(i64::from(child.process_group)).bind(i64::from(child.parent_pid)).bind(now_millis())
+            .bind(&child.boot_id).bind(i64::from(child.process_group)).bind(i64::from(child.parent_pid)).bind(now_millis()).bind(client_version)
             .bind(&identity.operation_id).bind(&identity.execution_id).execute(&mut *tx).await?.rows_affected() == 1;
         tx.commit().await?;
         Ok(changed)

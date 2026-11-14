@@ -46,8 +46,8 @@ pub(super) struct PolicyBindings {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(super) struct ExecutionLimits {
-    pub request_retries: u32,
-    pub stream_retries: u32,
+    pub request_retries: Option<u64>,
+    pub stream_retries: Option<u64>,
     pub automatic_compaction: bool,
     pub tool_argument_bytes: usize,
     pub read_bytes: usize,
@@ -59,9 +59,9 @@ impl ExecutionLimits {
     pub(super) fn native() -> Self {
         let access = AccessLimits::default();
         Self {
-            request_retries: 0,
-            stream_retries: 0,
-            automatic_compaction: false,
+            request_retries: None,
+            stream_retries: None,
+            automatic_compaction: true,
             tool_argument_bytes: 16 * 1024,
             read_bytes: access.max_read_bytes,
             search_query_bytes: access.max_search_query_bytes,
@@ -72,7 +72,13 @@ impl ExecutionLimits {
 
 impl RetainedInput {
     pub fn decode(raw: &str) -> anyhow::Result<Self> {
-        let input: Self = serde_json::from_str(raw)?;
+        let mut value: serde_json::Value = serde_json::from_str(raw)?;
+        // Superseded ceilings are inert. Keep the original stored bytes and digest;
+        // all remaining source, model and execution bindings still validate.
+        if let Some(object) = value.as_object_mut() {
+            object.remove("operatorLimits");
+        }
+        let input: Self = serde_json::from_value(value)?;
         anyhow::ensure!(
             matches!(input.version, 1 | 2),
             "unsupported retained audit input"
@@ -226,7 +232,11 @@ impl PolicyBindings {
             tool_exposure: super::source::TOOL_NAMES
                 .map(|name| format!("audex_source.{name}"))
                 .to_vec(),
-            limits: ExecutionLimits::native(),
+            limits: ExecutionLimits {
+                request_retries: prepared.options.config.model_provider.request_max_retries,
+                stream_retries: prepared.options.config.model_provider.stream_max_retries,
+                ..ExecutionLimits::native()
+            },
         })
     }
 }

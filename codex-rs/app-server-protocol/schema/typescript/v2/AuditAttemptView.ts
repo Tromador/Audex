@@ -14,7 +14,11 @@ findingCount: number | null, runId: string, reviewerId: string, reviewerOrdinal:
 /**
  * Requested selection, retained for compatibility.
  */
-model: string, requestedModel: string, resolvedModel: string, expectedServedModel: string | null, reasoningEffort: string | null, revision: bigint, ownerGeneration: bigint, current: boolean, retryEligible: boolean, executionAdapter: AuditExecutionAdapter,
+model: string, requestedModel: string, resolvedModel: string, expectedServedModel: string | null, reasoningEffort: string | null, revision: bigint, ownerGeneration: bigint, current: boolean, retryEligible: boolean,
+/**
+ * Recovery decision for this attempt; ordinary client retries are separate.
+ */
+recoveryStatus?: string, executionAdapter: AuditExecutionAdapter,
 /**
  * Uses the retained native route; this does not claim an API/subscription billing amount.
  */

@@ -512,6 +512,16 @@ impl CaptureHandle {
                             .expect("capture buffer")
                             .offsets
                             .remove(&(completed.turn_id.clone(), message.id.clone()));
+                    } else if let TurnItem::ContextCompaction(item) = &completed.item {
+                        self.offer(ActivityInput {
+                            producer_key: format!("compaction:{}:{}", completed.turn_id, item.id),
+                            turn_id: completed.turn_id.clone(),
+                            item_id: item.id.clone(),
+                            kind: "status".into(),
+                            payload: "client_compaction_completed".into(),
+                            text_offset: None,
+                        })
+                        .await?;
                     }
                 }
                 EventMsg::TurnComplete(completed) => {

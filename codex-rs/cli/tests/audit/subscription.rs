@@ -25,8 +25,8 @@ fn start(daemon: &TestDaemon, key: &str, mixed: bool) -> Result<Output> {
     for text in [
         "including queued reviewers",
         "subscription quota",
-        "per occurrence",
-        "best effort",
+        "Ordinary client retries",
+        "without an Audex-imposed attempt or spending ceiling",
         "Official client executable:",
         "Dedicated subscription profile:",
         "Private runtime root:",
@@ -53,7 +53,9 @@ async fn wait(
     run: &str,
     predicate: impl Fn(&[Value]) -> bool,
 ) -> Result<Vec<Value>> {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    // The repair fixture continues for 30 seconds before its own exit. M5
+    // leaves that continuation to the client; allow its terminal observation.
+    tokio::time::timeout(Duration::from_secs(45), async {
         loop {
             let rows = attempts(daemon, run)?;
             if predicate(&rows) {
@@ -244,17 +246,39 @@ async fn public_subscription_failures_preserve_native_peer_and_durable_repair_di
         daemon.lifecycle("start")?;
         let started = start(&daemon, mode, true)?;
         let run = String::from_utf8(started.stdout)?.trim().to_owned();
+        let empty_failure = matches!(mode, "missing_model" | "wrong_model" | "wrong_billing");
         let rows = wait(&daemon, &run, |rows| {
             rows[0]["completed"] == true
-                && matches!(
-                    rows[1]["operationState"].as_str(),
-                    Some("failed" | "unknown")
-                )
+                && rows.iter().any(|row| {
+                    row["provider"] == "anthropic"
+                        && row["current"] == true
+                        && row["recoveryStatus"]
+                            == if empty_failure {
+                                "automatic_recovery_exhausted_operator_investigation_required"
+                            } else {
+                                "operator_retry_required_surviving_output"
+                            }
+                })
         })
         .await?;
-        assert_eq!(rows[1]["completed"], false);
-        assert_eq!(rows[1]["disposition"], "active");
-        let history = observe(&daemon, &run, rows[1]["assignmentId"].as_str().unwrap())?;
+        let current = rows
+            .iter()
+            .find(|row| row["provider"] == "anthropic" && row["current"] == true)
+            .unwrap();
+        assert_eq!(rows.len(), if empty_failure { 3 } else { 2 });
+        assert_eq!(current["completed"], false);
+        assert_eq!(current["disposition"], "active");
+        let history = observe(&daemon, &run, current["assignmentId"].as_str().unwrap())?;
+        if mode == "interrupted" {
+            assert!(
+                history["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["kind"] == "assistant_delta"
+                        && entry["payload"] == "Independent subscription review progress.")
+            );
+        }
         if mode == "repair" {
             assert!(
                 history
@@ -277,7 +301,8 @@ async fn public_subscription_failures_preserve_native_peer_and_durable_repair_di
                     .contains("client-initiated repair occurred")
             );
         }
-        assert_eq!(fixture::prompts(&child), 1);
+        let prompts = if empty_failure { 2 } else { 1 };
+        assert_eq!(fixture::prompts(&child), prompts);
         assert_eq!(server.received_requests().await.unwrap().len(), 2);
         let frozen = audit(&daemon)
             .args(["read", &run, "--diagnostics"])
@@ -286,7 +311,7 @@ async fn public_subscription_failures_preserve_native_peer_and_durable_repair_di
         assert_eq!(frozen.stdout, report.stdout);
         evidence(
             mode,
-            json!({"attempts":rows,"history":history,"nativeRequests":2,"prompts":1}),
+            json!({"attempts":rows,"history":history,"nativeRequests":2,"prompts":prompts}),
             &report,
         )?;
         daemon.lifecycle("stop")?;

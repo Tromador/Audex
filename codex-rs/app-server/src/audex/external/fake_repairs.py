@@ -21,7 +21,7 @@ args = config["mcpServers"]["audex_source"]["args"]
 binding = json.loads(args[args.index("--binding") + 1])
 with (root / "stream-launches").open("a") as log:
     log.write(binding["execution_id"] + "\n")
-(root / "stream-prompt-receipt.json").write_text(json.dumps({"count": 1, "pid": os.getpid()}))
+(root / "stream-prompt-receipt.json").write_text(json.dumps({"count": 1, "pid": os.getpid(), "max_budget_usd": sys.argv[sys.argv.index("--max-budget-usd")+1] if "--max-budget-usd" in sys.argv else None}))
 seq = 0
 records = []
 session = "repair-session-" + binding["execution_id"]
@@ -52,8 +52,11 @@ def assistant(ident, stop, text):
 def send():
     data = "".join(json.dumps(event) + "\n" for event in records).encode()
     records.clear()
-    assert len(data) <= 8192, len(data)
-    assert os.write(1, data) == len(data)
+    # Long client-managed continuation chains need several pipe writes.
+    while data:
+        written = os.write(1, data[:8192])
+        assert written > 0
+        data = data[written:]
 
 
 emit("system", subtype="init", apiKeySource="none")
@@ -64,6 +67,15 @@ if scenario.get("gate_start"):
     while not (root / "before-public.release").exists():
         assert time.monotonic() < deadline
         time.sleep(0.005)
+if scenario.get("error_notice"):
+    emit("assistant", error="unknown", message={"id": "synthetic-error", "model": "<synthetic>",
+         "content": [{"type": "text", "text": secret}]})
+    if scenario.get("error_terminal"):
+        emit("result", subtype="error_max_budget_usd", is_error=True, result="",
+             usage=terminal_usage, total_cost_usd=0.0123)
+        send()
+        time.sleep(30)
+        sys.exit(0)
 if "single_stop" in scenario:
     # 2.1.314 wire shape: a successful result can still carry pause_turn.
     # Full assistant records may omit stop_reason; message_delta supplies it.
@@ -76,7 +88,7 @@ if "single_stop" in scenario:
         emit("stream_event", event={"type": "message_delta", "delta": {"stop_reason": scenario["single_stop"]}})
     emit("result", subtype="success", is_error=False, result=text,
          stop_reason=scenario.get("terminal_stop", scenario["single_stop"]),
-         usage=terminal_usage, total_cost_usd=0.0123)
+         usage=terminal_usage, total_cost_usd=None if scenario.get("omit_cost") else 0.0123)
     send()
     time.sleep(30)
     sys.exit(0)
@@ -145,6 +157,6 @@ if scenario.get("complete"):
     emit("stream_event", event={"type": "message_delta", "delta": {"stop_reason": "end_turn"}})
     emit("stream_event", event={"type": "message_stop"})
     emit("result", subtype="success", is_error=False, result=result, stop_reason="end_turn",
-         usage=terminal_usage, total_cost_usd=0.0123)
+         usage=terminal_usage, total_cost_usd=None if scenario.get("omit_cost") else 0.0123)
 send()
 time.sleep(30)

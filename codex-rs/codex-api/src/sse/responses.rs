@@ -44,6 +44,22 @@ pub fn spawn_response_stream(
     telemetry: Option<Arc<dyn SseTelemetry>>,
     turn_state: Option<Arc<OnceLock<String>>>,
 ) -> ResponseStream {
+    spawn_response_stream_with_attribution(
+        stream_response,
+        idle_timeout,
+        telemetry,
+        turn_state,
+        false,
+    )
+}
+
+pub(crate) fn spawn_response_stream_with_attribution(
+    stream_response: StreamResponse,
+    idle_timeout: Duration,
+    telemetry: Option<Arc<dyn SseTelemetry>>,
+    turn_state: Option<Arc<OnceLock<String>>>,
+    attribute_lifecycle: bool,
+) -> ResponseStream {
     let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
     let models_etag = stream_response
         .headers
@@ -96,6 +112,7 @@ pub fn spawn_response_stream(
             idle_timeout,
             telemetry,
             safety_buffering_treatment,
+            attribute_lifecycle,
         )
         .await;
     });
@@ -615,6 +632,7 @@ pub async fn process_sse(
         idle_timeout,
         telemetry,
         SafetyBufferingTreatment::default(),
+        false,
     )
     .await;
 }
@@ -625,7 +643,9 @@ async fn process_sse_with_treatment(
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
     safety_buffering_treatment: SafetyBufferingTreatment,
+    attribute_lifecycle: bool,
 ) {
+    let mut response_id: Option<String> = None;
     let mut stream = stream.eventsource();
     let mut response_error: Option<ApiError> = None;
     let mut last_server_model: Option<String> = None;
@@ -704,6 +724,64 @@ async fn process_sse_with_treatment(
             }
         }
 
+        // The admitted HTTP request owns this response stream. Apply the same
+        // lifecycle identity rules as WebSocket generations, leaving ordinary
+        // Codex model-notification semantics unchanged.
+        if attribute_lifecycle
+            && let Some(response) = event.lifecycle_response()
+            && (event.kind() == "response.created"
+                || response_id.is_some()
+                || response.get("model").and_then(Value::as_str).is_some())
+        {
+            let id = response
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty());
+            let created = event.kind() == "response.created";
+            let valid = id.is_some()
+                && if created {
+                    response_id.is_none()
+                } else {
+                    response_id.as_deref() == id
+                };
+            if !valid {
+                let _ = tx_event
+                    .send(Err(ApiError::Transport(
+                        codex_client::TransportError::GenerationDenied(
+                            "missing, reused or changed HTTP response identity".into(),
+                        ),
+                    )))
+                    .await;
+                return;
+            }
+            if created {
+                response_id = id.map(str::to_owned);
+                if tx_event
+                    .send(Ok(ResponseEvent::Created {
+                        response_id: response_id.clone(),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            if let Some(model) = response.get("model").and_then(Value::as_str)
+                && last_server_model.as_deref() != Some(model)
+            {
+                if tx_event
+                    .send(Ok(ResponseEvent::ServerModel(model.to_owned())))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                last_server_model = Some(model.to_owned());
+            }
+            if created {
+                continue;
+            }
+        }
         match process_responses_event(event) {
             Ok(Some(event)) => {
                 let is_completed = matches!(event, ResponseEvent::Completed { .. });
@@ -2148,3 +2226,7 @@ mod tests {
 
     const CYBER_RESTRICTED_MODEL_FOR_TESTS: &str = "gpt-5.3-codex";
 }
+
+#[cfg(test)]
+#[path = "responses_attribution_tests.rs"]
+mod attribution_tests;

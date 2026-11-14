@@ -117,66 +117,47 @@ impl codex_api::GenerationAdmission for UnusedAdmission {
 }
 
 #[tokio::test]
-async fn admitted_errors_preserve_details_without_retry_guidance_or_fallback() {
-    use codex_protocol::error::CodexErrorDetails;
-
-    for max_retries in [0, 4] {
-        for details in [
-            CodexErrorDetails::RateLimitExceeded("fixture limit".to_owned()),
-            CodexErrorDetails::ContentFilter,
-            CodexErrorDetails::InternalServerError,
-        ] {
-            let (session, turn_context) = make_session_and_context().await;
-            session
-                .services
-                .thread_extension_data
-                .insert(codex_api::GenerationAdmissionControl(Arc::new(
-                    UnusedAdmission,
-                )));
-            let step_context = StepContext::for_test(Arc::new(turn_context));
-            let mut client_session = session.services.model_client.new_session();
-            let mut retry_state = ResponsesStreamRetryState::default();
-            let history = session.clone_history().await;
-            let advice = RetryAfter::from_delay(Duration::from_secs(30)).unwrap();
-            let error = CodexErr::new(details).with_retry_after(advice);
-            let category = error.to_codex_protocol_error();
-            let detail = format!("{:?}", error.details());
-            let failure = handle_response_stream_error(
-                &mut retry_state,
-                max_retries,
-                error,
-                &mut client_session,
-                &session,
-                &step_context,
-                ResponsesStreamRequest::Sampling,
-            );
-            // A retry delay would be pending; fallback would return Ok.
-            let returned = match futures::FutureExt::now_or_never(failure) {
-                Some(Err(error)) => error,
-                _ => panic!("admitted failure must return immediately without retry or fallback"),
-            };
-            assert_eq!(returned.to_codex_protocol_error(), category);
-            assert_eq!(format!("{:?}", returned.details()), detail);
-            assert_eq!(
-                returned.retry_after().unwrap().deadline(),
-                advice.deadline()
-            );
-            assert_eq!(retry_state.retries, 0);
-            assert_eq!(retry_state.connection_retries, 0);
-            assert!(
-                session
-                    .clone_history()
-                    .await
-                    .raw_items()
-                    .eq(history.raw_items())
-            );
-            assert!(
-                session
-                    .services
-                    .thread_extension_data
-                    .get::<super::ExhaustedResponseRetry>()
-                    .is_none()
-            );
-        }
+async fn admitted_stream_errors_use_normal_retry_policy() {
+    for request in [
+        ResponsesStreamRequest::Sampling,
+        ResponsesStreamRequest::RemoteCompactionV2,
+    ] {
+        let (session, turn_context) = make_session_and_context().await;
+        session
+            .services
+            .thread_extension_data
+            .insert(codex_api::GenerationAdmissionControl(Arc::new(
+                UnusedAdmission,
+            )));
+        let step_context = StepContext::for_test(Arc::new(turn_context));
+        let mut client_session = session.services.model_client.new_session();
+        let mut retry_state = ResponsesStreamRetryState::default();
+        tokio::time::pause();
+        handle_response_stream_error(
+            &mut retry_state,
+            2,
+            CodexErr::Stream("transient".into()),
+            &mut client_session,
+            &session,
+            &step_context,
+            request,
+        )
+        .await
+        .unwrap();
+        assert_eq!(retry_state.retries, 1);
+        let error = handle_response_stream_error(
+            &mut retry_state,
+            2,
+            CodexErr::InvalidRequest("terminal".into()),
+            &mut client_session,
+            &session,
+            &step_context,
+            request,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("terminal"));
+        assert_eq!(retry_state.retries, 1);
+        tokio::time::resume();
     }
 }

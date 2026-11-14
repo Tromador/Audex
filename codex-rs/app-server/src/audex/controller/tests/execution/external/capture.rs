@@ -50,21 +50,34 @@ async fn path_ready(path: &Path) -> anyhow::Result<()> {
 }
 
 pub(super) fn assert_no_private_files(path: &Path) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            assert_no_private_files(&entry.path())?;
-        } else if entry.file_type()?.is_file() {
-            let bytes = std::fs::read(entry.path())?;
-            assert!(
-                !bytes
-                    .windows(b"PRIVATE_SENTINEL_MUST_NOT_PERSIST".len())
-                    .any(|b| b == b"PRIVATE_SENTINEL_MUST_NOT_PERSIST"),
-                "private bytes in {}",
-                entry.path().display()
-            );
-        }
-    }
+    // Reading and closing a live SQLite file in this process drops its POSIX
+    // locks, including locks held by SQLx worker threads. Inspect from a child
+    // process so the privacy check cannot invalidate the running store's locks.
+    let output = std::process::Command::new("/usr/bin/python3")
+        .args([
+            "-c",
+            r#"
+import os, pathlib, sys
+for directory, _, files in os.walk(sys.argv[1]):
+    for name in files:
+        path = pathlib.Path(directory) / name
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            continue  # SQLite may remove a checkpointed WAL between enumeration and open.
+        if b'PRIVATE_SENTINEL_MUST_NOT_PERSIST' in data:
+            raise AssertionError('private bytes in ' + str(path))
+"#,
+        ])
+        .arg(path)
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "privacy scan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(())
 }
 
@@ -285,6 +298,69 @@ fn stream_failures_and_unstructured_output_remain_distinct_without_replay() -> a
                 "C62 {mode}: {:?}, extraction remains separate; no prompt replay",
                 run.assignment_state
             );
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn failed_stream_retains_received_prefix_and_requires_operator_retry() -> anyhow::Result<()> {
+    run_test_with_large_stack("m5-failed-stream-prefix", || async {
+        for mode in ["malformed", "truncated", "eof"] {
+            let temp = tempfile::tempdir()?;
+            let server = responses::start_mock_server().await;
+            let (controller, threads) = real_fixture(&temp, &server.uri()).await;
+            let id = seed_stream(&controller, &temp, mode, false).await?;
+            let run = settled(&controller, &id).await?;
+            lifecycle_qualification::reconcile_until(&controller, &run.operation_id).await?;
+            let store = controller.store().await?;
+            let read = api(
+                &controller,
+                "audit/attempt/read",
+                json!({
+                    "runId":id,"assignmentId":run.assignment_id
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(read["attempt"]["completed"], false, "{mode}");
+            assert_eq!(read["attempt"]["retryEligible"], true, "{mode}");
+            assert_eq!(
+                read["attempt"]["recoveryStatus"], "operator_retry_required_surviving_output",
+                "{mode}"
+            );
+            assert!(
+                read["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["kind"] == "assistant_delta"
+                        && entry["payload"] == "Public progress."),
+                "{mode}: received prefix must survive the stream error"
+            );
+            assert!(
+                store
+                    .capture_state(&run.assignment_id)
+                    .await?
+                    .failure
+                    .is_some()
+            );
+            assert!(store.result_extraction(&run.assignment_id).await?.is_none());
+            for _ in 0..3 {
+                controller.drive(&id).await?;
+            }
+            assert_eq!(store.attempts(&id).await?.len(), 1, "{mode}");
+            assert_eq!(
+                std::fs::read_to_string(temp.path().join("stream-launches"))?
+                    .lines()
+                    .count(),
+                1
+            );
+            assert_no_private_files(controller.root.as_path())?;
+            threads
+                .shutdown_all_threads_bounded(Duration::from_secs(5))
+                .await;
+            store.close().await;
         }
         Ok(())
     })

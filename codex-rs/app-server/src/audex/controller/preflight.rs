@@ -101,25 +101,15 @@ impl AuditController {
         &self,
         manifest: &super::super::snapshot::SnapshotManifestV1,
     ) -> anyhow::Result<()> {
-        use codex_features::Feature;
         use codex_protocol::config_types::WebSearchMode;
-        use codex_protocol::models::{ManagedFileSystemPermissions, PermissionProfile};
-        use codex_protocol::permissions::{
-            FileSystemAccessMode, FileSystemSandboxEntry, NetworkSandboxPolicy,
-        };
+        use codex_protocol::models::ManagedFileSystemPermissions;
+        use codex_protocol::models::PermissionProfile;
+        use codex_protocol::permissions::FileSystemAccessMode;
+        use codex_protocol::permissions::FileSystemSandboxEntry;
+        use codex_protocol::permissions::NetworkSandboxPolicy;
         use codex_protocol::protocol::AskForApproval;
         let mut config = (*self.config).clone();
-        for feature in config.features.enabled_features() {
-            config.features.disable(feature)?;
-        }
-        anyhow::ensure!(
-            config
-                .features
-                .enabled_features()
-                .iter()
-                .all(|f| *f == Feature::UnifiedExec),
-            "managed feature requirements mandate ambient reviewer capabilities"
-        );
+        reviewer::retain_reviewer_features(&mut config)?;
         config.web_search_mode.set(WebSearchMode::Disabled)?;
         config.mcp_servers.set(Default::default())?;
         config
@@ -210,10 +200,12 @@ impl AuditController {
                         &selection.model,
                     )?;
                     let native = native_configuration_identity(&self.config, &selection.provider)?;
-                    // Native preparation constructs a default isolated configuration,
-                    // not the host's context/compaction or instruction overrides.
+                    // Match the native reviewer's resolved context controls while
+                    // excluding ambient instruction and tool-output overrides.
                     // Consult the same in-memory catalogue without loading Config.
                     let config = codex_models_manager::ModelsManagerConfig {
+                        model_context_window: self.config.model_context_window,
+                        model_auto_compact_token_limit: self.config.model_auto_compact_token_limit,
                         personality: Some(codex_protocol::config_types::Personality::None),
                         ..Default::default()
                     };
@@ -310,7 +302,9 @@ pub(super) fn subscription_commission(
     snapshot: &SnapshotHandle,
     approved: &AuditReviewerBinding,
 ) -> anyhow::Result<super::super::store::ReviewerCommission> {
-    use super::super::retained::{ExecutionLimits, PolicyBindings, RetainedInput};
+    use super::super::retained::ExecutionLimits;
+    use super::super::retained::PolicyBindings;
+    use super::super::retained::RetainedInput;
     let client = approved
         .client
         .as_ref()

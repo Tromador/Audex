@@ -384,6 +384,7 @@ async fn reconnect_discards_old_reader_pages_and_progress_wakes_without_revision
             viewer_id: id,
             reader_epoch: 1,
             page: Box::new(Ok(codex_app_server_protocol::AuditAttemptReadResponse {
+                recovered_output: None,
                 attempt: obsolete,
                 entries: vec![],
                 next_sequence: 0,

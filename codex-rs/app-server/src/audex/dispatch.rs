@@ -20,6 +20,8 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
+mod history;
+
 /// Installs the existing app-server event reader, without a client subscription.
 pub(super) type Listen =
     Arc<dyn Fn(ThreadId, Arc<CodexThread>) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync>;
@@ -37,9 +39,11 @@ pub(super) type Checkpoint = Arc<dyn Fn(&'static str) -> BoxFuture<'static, ()> 
 #[cfg(test)]
 #[derive(Default)]
 pub(super) struct DispatchTestHooks {
+    pub history_mode: Option<codex_protocol::protocol::ThreadHistoryMode>,
     pub config: Option<Arc<dyn Fn(&mut Config) + Send + Sync>>,
     pub checkpoint: Option<Arc<dyn Fn(&'static str) -> BoxFuture<'static, ()> + Send + Sync>>,
     pub history: Option<HistoryHook>,
+    pub original_terminal_visible: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     pub cleanup: Option<Listen>,
 }
 
@@ -367,6 +371,10 @@ impl CodexDispatch {
             .prepare(&request.operation_id)
             .await
             .map_err(|e| DispatchFailure::new("reviewer_preflight", e, true))?;
+        #[cfg(test)]
+        if let Some(mode) = self.hooks.history_mode {
+            prepared.options.history_mode = Some(mode);
+        }
         let thread_id = self.threads.reserve_thread_id();
         if !store
             .bind_execution(
@@ -521,12 +529,13 @@ impl CodexDispatch {
         &self,
         thread_id: ThreadId,
     ) -> Result<StoredModelContext, DispatchFailure> {
+        let params = LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        };
         let history = self
             .history
-            .load_latest_model_context(LoadThreadHistoryParams {
-                thread_id,
-                include_archived: false,
-            })
+            .load_latest_model_context(params)
             .await
             .map_err(|e| DispatchFailure::new("read_history", e, false))?;
         #[cfg(test)]
@@ -625,6 +634,12 @@ impl CodexDispatch {
                 }
             }
         }
+        let recovering = matches!(
+            run.assignment_state,
+            super::store::AssignmentState::Failed | super::store::AssignmentState::Unknown
+        ) || live
+            .as_ref()
+            .is_none_or(|thread| thread.has_shutdown_status());
         let mut history = self.read_history(thread_id).await?;
         // Shutdown can complete after the first read. Wait for Codex's existing
         // producer/writer barrier and take a fresh snapshot, never infer failure
@@ -649,6 +664,10 @@ impl CodexDispatch {
                 "session_metadata_unavailable",
             )));
         }
+        // Legacy model-context reads already contain the complete rollout;
+        // paginated display APIs explicitly reject legacy histories.
+        let paginated = history.items.iter().any(|item| matches!(item,
+            RolloutItem::SessionMeta(meta) if meta.meta.history_mode == codex_protocol::protocol::ThreadHistoryMode::Paginated));
         let accepted_already = boundary == SubmissionBoundary::Accepted && retained_turn.is_some();
         let mut turn = retained_turn;
         let trigger = format!("audex:{operation}");
@@ -669,7 +688,26 @@ impl CodexDispatch {
                 turn = Some(event.turn_id.clone());
             }
         }
+        let stopped = live
+            .as_ref()
+            .is_some_and(|thread| thread.has_shutdown_status())
+            || store
+                .native_owner_stopped(operation)
+                .await
+                .map_err(|e| DispatchFailure::new("verify_original_owner", e, false))?;
         let Some(turn) = turn else {
+            if stopped {
+                store
+                    .mark_execution_stopped(operation)
+                    .await
+                    .map_err(|e| DispatchFailure::new("retain_original_stop", e, false))?;
+                // No turn was accepted and the bound owner has stopped. This
+                // does not claim the uncertain submission was never sent.
+                return Ok(Observation::Rejected(diagnostic(
+                    "original_execution",
+                    "stopped_before_turn_confirmation",
+                )));
+            }
             return Ok(Observation::Deferred(diagnostic(
                 "acceptance_observation",
                 "turn_acceptance_unconfirmed",
@@ -692,7 +730,80 @@ impl CodexDispatch {
                 .await
                 .map_err(|e| DispatchFailure::new("persist_usage", e, false))?;
         }
-        if let Some(state) = terminal_state(&history.items, &turn) {
+        // Healthy activity stays in the journal. Only recovery projects history
+        // as unconfirmed output; paginated recovery reads the original archive.
+        if recovering && !paginated {
+            let recovered = history
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    RolloutItem::ResponseItem(item) => Some(&item.item),
+                    _ => None,
+                })
+                .filter_map(|item| match item {
+                    codex_protocol::models::ResponseItem::Message {
+                        id, role, content, ..
+                    } if role == "assistant" => Some((
+                        id.as_ref()
+                            .map(|id| id.as_str().to_owned())
+                            .unwrap_or_default(),
+                        content
+                            .iter()
+                            .filter_map(|part| match part {
+                                codex_protocol::models::ContentItem::OutputText {
+                                    text, ..
+                                } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<String>(),
+                    )),
+                    _ => None,
+                })
+                .filter(|(_, text)| !text.is_empty())
+                .collect::<Vec<_>>();
+            store
+                .retain_recovered_native_output(
+                    operation,
+                    &thread_id.to_string(),
+                    &turn,
+                    &recovered,
+                )
+                .await
+                .map_err(|e| DispatchFailure::new("retain_recovered_output", e, false))?;
+        }
+        let recovered_terminal = if recovering && paginated {
+            self.original_evidence(operation, thread_id, &turn).await?
+        } else {
+            None
+        };
+        if let Some(mut state) = terminal_state(&history.items, &turn).or(recovered_terminal) {
+            if !matches!(state, WorkState::Completed(_)) {
+                // A terminal turn can still have session-owned background
+                // compaction. Use Core's shutdown barrier before claiming stop.
+                if let Some(thread) = &live {
+                    thread
+                        .shutdown_and_wait()
+                        .await
+                        .map_err(|e| DispatchFailure::new("stop_failed_execution", e, false))?;
+                    let final_history = self.read_history(thread_id).await?;
+                    let original = if paginated {
+                        self.original_evidence(operation, thread_id, &turn).await?
+                    } else {
+                        None
+                    };
+                    if let Some(final_state) =
+                        terminal_state(&final_history.items, &turn).or(original)
+                    {
+                        state = final_state;
+                    }
+                }
+                if live.is_some() || stopped {
+                    store
+                        .mark_execution_stopped(operation)
+                        .await
+                        .map_err(|e| DispatchFailure::new("retain_terminal_stop", e, false))?;
+                }
+            }
             return Ok(accepted(
                 operation,
                 &run.snapshot_id,
@@ -724,8 +835,22 @@ impl CodexDispatch {
                 WorkState::Live,
             ));
         }
-        // A cold or shut-down runtime is not proof that its last readable
-        // history is final. Preserve acceptance and continue observation only.
+        if stopped {
+            store
+                .mark_execution_stopped(operation)
+                .await
+                .map_err(|e| DispatchFailure::new("retain_original_stop", e, false))?;
+            return Ok(accepted(
+                operation,
+                &run.snapshot_id,
+                thread_id,
+                &turn,
+                WorkState::Failed(
+                    "original_execution_stopped_without_terminal_confirmation".into(),
+                ),
+            ));
+        }
+        // Missing runtime alone is not proof that another daemon stopped.
         Ok(Observation::Deferred(diagnostic(
             "terminal_observation",
             "terminal_history_unconfirmed",

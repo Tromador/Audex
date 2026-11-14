@@ -667,6 +667,16 @@ async fn claude_conversation_routes_context_persistence_and_no_audit() -> anyhow
     )
     .await;
     let f = Fixture::new(&mock.uri())?;
+    let launcher = f.client.join("normal-launcher");
+    std::os::unix::fs::symlink(f.client.join("claude"), &launcher)?;
+    let path = f.home.path().join("audex/reviewer-backends.json");
+    let mut settings: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    settings["claudeSubscription"]["executable"] = json!(launcher);
+    settings["claudeSubscription"]
+        .as_object_mut()
+        .unwrap()
+        .remove("clientVersion");
+    std::fs::write(path, settings.to_string())?;
     let mut client = f.server().await?;
     let thread = client
         .start_thread(ThreadStartParams::default())

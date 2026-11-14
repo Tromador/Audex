@@ -114,8 +114,8 @@ stream_max_retries=0
             "Official client executable:",
             "Dedicated subscription profile:",
             "Private runtime root:",
-            "per occurrence",
-            "best effort",
+            "Ordinary client retries, continuation and automatic compaction",
+            "without an Audex-imposed attempt or spending ceiling",
             "Explicit context evidence",
         ] {
             assert!(

@@ -120,7 +120,7 @@ async fn admitted_request_stopped_before_wire_is_retained_but_not_sent() {
 }
 
 #[tokio::test]
-async fn one_use_http_request_cannot_follow_redirects_or_be_sent_twice() {
+async fn http_retry_rechecks_stop_without_following_redirects() {
     let authority = Arc::new(Authority::default());
     let pool = guarded(authority.clone());
     let (address,server)=spawn_response_server(vec!["HTTP/1.1 307 Temporary Redirect\r\nLocation: /again\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()]);
@@ -131,6 +131,7 @@ async fn one_use_http_request_cannot_follow_redirects_or_be_sent_twice() {
         .await
         .unwrap();
     assert_eq!(response.status(), http::StatusCode::TEMPORARY_REDIRECT);
+    authority.stopped.store(true, Ordering::SeqCst);
     let second = reqwest::Request::new(http::Method::POST, url.parse().unwrap());
     assert!(matches!(
         pool.send_with_resolver(second, |_| async { Ok(OutboundProxyRoute::Direct) })
@@ -142,12 +143,13 @@ async fn one_use_http_request_cannot_follow_redirects_or_be_sent_twice() {
 }
 
 #[tokio::test]
-async fn guarded_http_tls_failure_never_uses_the_transport_replay_path() {
+async fn guarded_http_tls_failure_uses_normal_transport_fallback() {
     let (url, attempts, stop) =
         super::super::tls_fallback_tests::spawn_protocol_version_rejection_server(2)
             .expect("TLS fixture");
     let authority = Arc::new(Authority::default());
     let pool = guarded(authority.clone());
+    super::super::tls_fallback_tests::use_native_tls_for_direct_route(&pool);
     let mut request = reqwest::Request::new(http::Method::POST, url.parse().unwrap());
     *request.body_mut() = Some(bytes::Bytes::from_static(b"replayable generation body").into());
     assert!(
@@ -161,7 +163,7 @@ async fn guarded_http_tls_failure_never_uses_the_transport_replay_path() {
             .recv()
             .expect("server finish")
             .expect("TLS attempts"),
-        1
+        2
     );
     assert_eq!(authority.admissions.load(Ordering::SeqCst), 1);
 }

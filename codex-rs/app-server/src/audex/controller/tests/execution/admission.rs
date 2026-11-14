@@ -170,10 +170,6 @@ fn stop_wins_native_tool_continuation_on_http_and_websocket_even_when_interrupt_
             let calls = Arc::new(AtomicUsize::new(0));
             let (signal, gate, count) = (entered.clone(), release.clone(), calls.clone());
             let hooks = DispatchTestHooks {
-                // A tiny compaction threshold exercises the installed native disable flag.
-                config: Some(Arc::new(|config| {
-                    config.model_auto_compact_token_limit = Some(1)
-                })),
                 checkpoint: Some(Arc::new(move |at| {
                     let (signal, gate, count) = (signal.clone(), gate.clone(), count.clone());
                     Box::pin(async move {
@@ -344,7 +340,8 @@ fn preadmitted_native_requests_stay_accounted_when_stop_suppresses_the_wire_send
 }
 
 #[test]
-fn native_http_errors_and_context_overflow_do_not_replay_or_compact() -> anyhow::Result<()> {
+fn native_terminal_errors_with_explicit_zero_retry_configuration_preserve_partial_output()
+-> anyhow::Result<()> {
     run_test_with_large_stack("audex-native-no-resend", || async {
         for status in [401, 503, 200] {
             let server = responses::start_mock_server().await;
@@ -365,7 +362,8 @@ fn native_http_errors_and_context_overflow_do_not_replay_or_compact() -> anyhow:
             let temp = tempfile::tempdir()?;
             let hooks = DispatchTestHooks {
                 config: Some(Arc::new(|config| {
-                    config.model_auto_compact_token_limit = Some(1)
+                    config.model_provider.request_max_retries = Some(0);
+                    config.model_provider.stream_max_retries = Some(0)
                 })),
                 ..Default::default()
             };
@@ -415,8 +413,7 @@ fn native_http_errors_and_context_overflow_do_not_replay_or_compact() -> anyhow:
 }
 
 #[test]
-fn native_websocket_errors_cannot_resend_or_fall_back_to_another_generation() -> anyhow::Result<()>
-{
+fn native_websocket_exhausted_failures_retain_typed_causes() -> anyhow::Result<()> {
     run_test_with_large_stack(
         "audex-native-ws-no-resend",
         failure_causes::websocket_errors,
@@ -424,7 +421,7 @@ fn native_websocket_errors_cannot_resend_or_fall_back_to_another_generation() ->
 }
 
 #[test]
-fn legitimate_websocket_tool_continuation_gets_a_fresh_one_use_request_without_compaction()
+fn legitimate_websocket_tool_continuation_keeps_attribution_and_retained_result()
 -> anyhow::Result<()> {
     run_test_with_large_stack("audex-native-ws-continuation", || async {
         let provider = Provider::new(
@@ -442,12 +439,7 @@ fn legitimate_websocket_tool_continuation_gets_a_fresh_one_use_request_without_c
         )
         .await;
         let temp = tempfile::tempdir()?;
-        let hooks = DispatchTestHooks {
-            config: Some(Arc::new(|config| {
-                config.model_auto_compact_token_limit = Some(1)
-            })),
-            ..Default::default()
-        };
+        let hooks = DispatchTestHooks::default();
         let (controller, threads) = fixture_with_transport(
             &temp,
             &provider.uri(),

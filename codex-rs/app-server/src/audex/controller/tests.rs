@@ -68,7 +68,7 @@ impl Dispatch for Fake {
                     .fetch_one(&mut connection)
                     .await?;
                 self.reconcile_schema_ready
-                    .store(version == 17, Ordering::SeqCst);
+                    .store(version == 18, Ordering::SeqCst);
             }
             Ok(())
         })
@@ -900,3 +900,6 @@ async fn suspended_interruption_does_not_block_cancel_or_regress_completed_work(
     assert_eq!(read(&controller, &id).await, completed);
     assert_eq!(fake.starts.load(Ordering::SeqCst), 1);
 }
+
+mod continuity;
+mod limits;

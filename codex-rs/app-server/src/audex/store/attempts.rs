@@ -79,8 +79,8 @@ impl AuditStore {
         &self,
         operation: &str,
     ) -> Result<bool, AuditStoreError> {
-        Ok(sqlx::query_scalar("SELECT submission_boundary<>'unsubmitted' AND state<>'committed' FROM operations WHERE id=?")
-            .bind(operation).fetch_one(&self.pool).await?)
+        let mut connection = self.pool.acquire().await?;
+        Ok(!super::recovery::stopped(&mut connection, operation).await?)
     }
 
     /// Never waits on a runtime, capture mutex, network stream, or process exit.
@@ -90,6 +90,22 @@ impl AuditStore {
         &self,
         request: &ControlRequest,
         prefix: Option<(&CaptureIdentity, &[ActivityInput])>,
+    ) -> Result<ControlOutcome, AuditStoreError> {
+        self.control_attempt_inner(request, prefix, false).await
+    }
+
+    pub(in crate::audex) async fn recover_attempt(
+        &self,
+        request: &ControlRequest,
+    ) -> Result<ControlOutcome, AuditStoreError> {
+        self.control_attempt_inner(request, None, true).await
+    }
+
+    async fn control_attempt_inner(
+        &self,
+        request: &ControlRequest,
+        prefix: Option<(&CaptureIdentity, &[ActivityInput])>,
+        automatic: bool,
     ) -> Result<ControlOutcome, AuditStoreError> {
         validate_nonempty("action key", &request.action_key, MAX_IDENTIFIER_BYTES)?;
         validate_nonempty("control reason", &request.reason, MAX_ERROR_BYTES)?;
@@ -132,8 +148,20 @@ impl AuditStore {
         let operation: String = row.try_get("operation_id")?;
         let disposition: String = row.try_get("disposition")?;
         let assignment_state = AssignmentState::parse(row.try_get("state")?)?;
-        let possible_overlap = row.try_get::<String, _>("submission_boundary")? != "unsubmitted"
-            && row.try_get::<String, _>("operation_state")? != "committed";
+        let possible_overlap = !super::recovery::stopped(&mut tx, &operation).await?;
+        if automatic {
+            if let Some(reason) =
+                super::recovery::recovery_refusal(&mut tx, &request.assignment_id).await?
+            {
+                return Err(AuditStoreError::InvalidTransition(reason.into()));
+            }
+            sqlx::query("UPDATE audit_reviewers SET automatic_recovery_used=1 WHERE id=?")
+                .bind(row.try_get::<String, _>("reviewer_id")?)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("UPDATE audit_attempts SET recovery_status='automatic_replacement_commissioned' WHERE assignment_id=?")
+                .bind(&request.assignment_id).execute(&mut *tx).await?;
+        }
         let mut response = ControlOutcome {
             action_key: request.action_key.clone(),
             assignment_id: request.assignment_id.clone(),

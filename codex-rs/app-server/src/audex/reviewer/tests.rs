@@ -16,6 +16,8 @@ use core_test_support::test_codex::run_test_with_large_stack;
 use core_test_support::wait_for_event;
 use std::collections::BTreeSet;
 
+mod context_config;
+
 fn absolute(path: &std::path::Path) -> AbsolutePathBuf {
     AbsolutePathBuf::from_absolute_path(path).expect("absolute test path")
 }

@@ -386,7 +386,7 @@ impl AuditStore {
             JOIN audit_reviewers v ON v.run_id=r.id JOIN audit_attempts t ON t.assignment_id=v.current_assignment_id
             JOIN operations o ON o.assignment_id=t.assignment_id JOIN reviewer_assignments a ON a.id=t.assignment_id
             WHERE r.phase NOT IN ('completed','completed_with_failures','failed','cancelled')
-            AND ((t.disposition='active' AND t.output_cutoff IS NULL AND a.state IN ('planned','thread_ready','dispatching','running')) OR (r.phase='reporting' AND v.ordinal=0))
+            AND ((t.disposition='active' AND a.state IN ('planned','thread_ready','dispatching','running','failed','unknown')) OR (r.phase='reporting' AND v.ordinal=0))
             ORDER BY r.created_at_ms,r.id,v.ordinal,t.ordinal")
             .fetch_all(&self.pool).await?)
     }

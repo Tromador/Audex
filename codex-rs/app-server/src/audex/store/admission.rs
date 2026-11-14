@@ -1,4 +1,4 @@
-//! One-use generation authority, ordered by the same SQLite writer as controls.
+//! Execution ownership and model evidence, ordered by the same SQLite writer as controls.
 use super::*;
 use serde::{Deserialize, Serialize};
 
@@ -128,13 +128,6 @@ impl AuditStore {
             || input["version"] == 2
             || matches!(transport, "native_http" | "native_websocket")
         {
-            let ready:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM audit_request_admissions WHERE assignment_id=? AND (identity_state NOT IN ('legacy','verified') OR (expected_model IS NOT NULL AND COALESCE(model_scope,'')<>'generation')))")
-                .bind(&identity.assignment_id).fetch_one(&mut *tx).await?;
-            if !ready {
-                return Err(AuditStoreError::InvalidTransition(
-                    "prior generation attribution is incomplete".to_owned(),
-                ));
-            }
             Some(
                 input["expectedServedModel"]
                     .as_str()
@@ -169,7 +162,7 @@ impl AuditStore {
         let now = now.max(now_millis());
         let mut allowed = false;
         if owner_active(&mut tx, identity, now).await? {
-            allowed=sqlx::query("UPDATE audit_request_admissions SET send_started_at_ms=? WHERE request_id=? AND assignment_id=? AND execution_id=? AND owner=? AND owner_generation=? AND run_stop_generation=? AND send_started_at_ms IS NULL")
+            allowed=sqlx::query("UPDATE audit_request_admissions SET send_started_at_ms=COALESCE(send_started_at_ms,?),send_count=send_count+1 WHERE request_id=? AND assignment_id=? AND execution_id=? AND owner=? AND owner_generation=? AND run_stop_generation=?")
                 .bind(now).bind(request).bind(&identity.assignment_id).bind(&identity.execution_id).bind(&identity.owner)
                 .bind(identity.owner_generation).bind(identity.run_stop_generation).execute(&mut *tx).await?.rows_affected()==1;
         }

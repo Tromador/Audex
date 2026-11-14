@@ -98,6 +98,10 @@ pub struct AuditAttemptView {
     pub owner_generation: i64,
     pub current: bool,
     pub retry_eligible: bool,
+    /// Recovery decision for this attempt; ordinary client retries are separate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recovery_status: Option<String>,
     pub execution_adapter: super::AuditExecutionAdapter,
     /// Uses the retained native route; this does not claim an API/subscription billing amount.
     pub authentication_route: String,
@@ -167,6 +171,10 @@ pub struct AuditAttemptReadResponse {
     pub next_sequence: i64,
     /// The original terminal response, if retained; invalid JSON stays invalid.
     pub raw_result: Option<String>,
+    /// Visible text recovered from the original history without terminal confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recovered_output: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

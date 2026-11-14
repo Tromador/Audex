@@ -525,7 +525,7 @@ async fn follow_run(
                     ""
                 },
                 if view.observation_pending {
-                    "; observation pending, no automatic inference retry"
+                    "; observation pending; observing the original execution"
                 } else {
                     ""
                 }

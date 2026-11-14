@@ -73,37 +73,6 @@ async fn require_owner(
 }
 
 impl AuditStore {
-    /// Internal best-effort stop, ordered with terminal persistence and operator controls.
-    /// It does not exclude wanted work or grant replay authority.
-    pub(in crate::audex) async fn stop_client_for_policy(
-        &self,
-        identity: &AdmissionIdentity,
-        capture: &activity::CaptureIdentity,
-        prefix: &[activity::ActivityInput],
-    ) -> Result<(), AuditStoreError> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        if capture.assignment_id != identity.assignment_id
-            || capture.session_id != identity.execution_id
-            || capture.owner_generation != identity.owner_generation
-        {
-            return Err(invalid());
-        }
-        if owner_active(&mut tx, identity, now_millis()).await? {
-            let appended = activity::append_batch(&mut tx, capture, prefix).await?;
-            if appended.fenced {
-                return Err(invalid());
-            }
-            sqlx::query("UPDATE audit_client_launches SET local_stop_requested_at_ms=COALESCE(local_stop_requested_at_ms,?),local_status='stop_requested' WHERE operation_id=? AND execution_id=?")
-                .bind(now_millis()).bind(&identity.operation_id).bind(&identity.execution_id)
-                .execute(&mut *tx).await?;
-            sqlx::query("UPDATE audit_attempts SET capture_failure='client_request_policy_stop',capture_gap=COALESCE(capture_gap,'client policy interruption; retained output is incomplete') WHERE assignment_id=?")
-                .bind(&identity.assignment_id).execute(&mut *tx).await?;
-        }
-        // If terminal persistence or a control won, leave its exact contribution alone.
-        tx.commit().await?;
-        Ok(())
-    }
-
     pub(in crate::audex) async fn client_capture_failure(
         &self,
         assignment: &str,

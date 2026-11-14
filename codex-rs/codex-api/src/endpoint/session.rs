@@ -137,11 +137,7 @@ impl<T: HttpTransport> EndpointSession<T> {
         let request = request.into_prepared().map_err(TransportError::Build)?;
         let make_request = || request.clone();
 
-        let mut policy = self.provider.retry.to_policy();
-        if admission.is_some() {
-            // The retry loop includes attempt zero: no retries means one physical send.
-            policy.max_attempts = 0;
-        }
+        let policy = self.provider.retry.to_policy();
         let stream = run_with_request_telemetry(
             policy,
             self.request_telemetry.clone(),

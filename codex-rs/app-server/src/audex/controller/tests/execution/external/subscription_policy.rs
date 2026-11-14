@@ -422,7 +422,7 @@ fn hostile_parent_environment_is_not_forwarded() -> anyhow::Result<()> {
 fn executable_and_retained_policy_identity_cannot_be_substituted() -> anyhow::Result<()> {
     run_test_with_large_stack("c71-identity", || async {
         for mode in [
-            "resolved_executable",
+            "missing_executable",
             "configured_version",
             "tool_binding",
             "retry_binding",
@@ -438,10 +438,9 @@ fn executable_and_retained_policy_identity_cannot_be_substituted() -> anyhow::Re
             let path = controller.root.join("reviewer-backends.json");
             let mut settings: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
             match mode {
-                "resolved_executable" => {
-                    let link = temp.path().join("client-link");
-                    std::os::unix::fs::symlink(temp.path().join("fake-client"), &link)?;
-                    settings["claudeSubscription"]["executable"] = json!(link);
+                "missing_executable" => {
+                    settings["claudeSubscription"]["executable"] =
+                        json!(temp.path().join("missing-client"));
                 }
                 "configured_version" => {
                     settings["claudeSubscription"]["clientVersion"] = "2.1.999".into()
@@ -452,7 +451,9 @@ fn executable_and_retained_policy_identity_cannot_be_substituted() -> anyhow::Re
                     .unwrap()
                     .tool_exposure
                     .push("SendMessage".into()),
-                "retry_binding" => input.bindings.as_mut().unwrap().limits.request_retries = 1,
+                "retry_binding" => {
+                    input.bindings.as_mut().unwrap().limits.request_retries = Some(1)
+                }
                 _ => unreachable!(),
             }
             let settings: BackendSettings = serde_json::from_value(settings)?;
@@ -591,6 +592,78 @@ fn compatible_wsl_policy_passes_existing_pre_prompt_and_capture_path() -> anyhow
                 assert!(launch.prompt_write_started_at_ms.is_some(), "{mode}");
             }
             gone(launch.pid.unwrap() as u32).await?;
+            threads
+                .shutdown_all_threads_bounded(Duration::from_secs(5))
+                .await;
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn normal_launcher_discovers_version_and_still_requires_same_process_identity() -> anyhow::Result<()>
+{
+    run_test_with_large_stack("m5-normal-launcher", || async {
+        for mode in ["valid", "wrong_client_version"] {
+            let temp = tempfile::tempdir()?;
+            let server = responses::start_mock_server().await;
+            let (controller, threads) = real_fixture(&temp, &server.uri()).await;
+            let id = seed_stream(&controller, &temp, "valid", false).await?;
+            let launcher = temp.path().join("claude");
+            std::os::unix::fs::symlink(temp.path().join("fake-client"), &launcher)?;
+            let path = controller.root.join("reviewer-backends.json");
+            let mut settings: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            settings["claudeSubscription"]["executable"] = json!(launcher);
+            settings["claudeSubscription"]
+                .as_object_mut()
+                .unwrap()
+                .remove("clientVersion");
+            std::fs::write(&path, settings.to_string())?;
+            let settings = BackendSettings::load(&controller.root)?;
+            let store = controller.store().await?;
+            let run = store.load_run(&id).await?;
+            let mut input =
+                RetainedInput::decode(&store.attempt_input(&run.operation_id).await?.0)?;
+            input
+                .bindings
+                .as_mut()
+                .unwrap()
+                .backend_configuration_identity = settings.identity(&input.route())?;
+            let raw = serde_json::to_string(&input)?;
+            let digest = sha256_hex(raw.as_bytes());
+            sqlx::query("UPDATE audit_attempt_inputs SET request_json=?,input_digest=? WHERE assignment_id=?")
+                .bind(raw).bind(&digest).bind(&run.assignment_id).execute(&store.pool_for_tests()).await?;
+            sqlx::query("UPDATE operations SET input_digest=? WHERE id=?")
+                .bind(digest)
+                .bind(&run.operation_id)
+                .execute(&store.pool_for_tests())
+                .await?;
+            std::fs::write(
+                temp.path().join("policy-scenario.json"),
+                json!({"mode":mode}).to_string(),
+            )?;
+            let run = settled(&controller, &id).await?;
+            let launch = store.client_launch(&run.operation_id).await?.unwrap();
+            assert_eq!(launch.client_version, "2.1.314");
+            assert_eq!(
+                launch.executable,
+                temp.path().join("fake-client").display().to_string()
+            );
+            assert_eq!(
+                launch.executable_digest,
+                Some(sha256_hex(&std::fs::read(&launch.executable)?))
+            );
+            if mode == "valid" {
+                assert_eq!(run.assignment_state, AssignmentState::Succeeded);
+                assert!(launch.prompt_write_started_at_ms.is_some());
+            } else {
+                assert_eq!(run.assignment_state, AssignmentState::Failed);
+                assert!(launch.prompt_write_started_at_ms.is_none());
+                assert_eq!(
+                    store.submission_boundary(&run.operation_id).await?,
+                    SubmissionBoundary::Unsubmitted
+                );
+            }
             threads
                 .shutdown_all_threads_bounded(Duration::from_secs(5))
                 .await;

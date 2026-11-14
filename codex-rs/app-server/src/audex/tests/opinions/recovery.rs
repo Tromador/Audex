@@ -38,7 +38,7 @@ async fn migration_from_sixteen_does_not_reclassify_historical_results_or_report
     }
     store.close().await;
     let upgraded = AuditStore::open(root.clone()).await?;
-    assert_eq!(upgraded.applied_migrations().await?.last(), Some(&17));
+    assert_eq!(upgraded.applied_migrations().await?.last(), Some(&18));
     assert!(
         upgraded
             .result_extraction(&run.assignment_id)

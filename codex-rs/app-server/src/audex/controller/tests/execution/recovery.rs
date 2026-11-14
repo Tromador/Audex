@@ -71,8 +71,7 @@ fn hide_terminal(history: &mut codex_thread_store::StoredModelContext) {
 }
 
 #[test]
-fn startup_crash_windows_preserve_the_submission_boundary_without_resampling() -> anyhow::Result<()>
-{
+fn startup_crash_windows_preserve_submission_and_never_replay_the_original() -> anyhow::Result<()> {
     run_test_with_large_stack("audex-submission-crash-windows", || async {
         for stage in [
             "reserved",
@@ -148,7 +147,7 @@ fn startup_crash_windows_preserve_the_submission_boundary_without_resampling() -
                     serde_json::from_str(error.as_deref().expect("known local failure"))?;
                 assert_eq!(diagnostic["stage"], "startup_recovery");
                 assert_eq!(diagnostic["cause"], "interrupted_before_submission");
-                assert_eq!(retry.as_deref(), Some("never_automatically_retry"));
+                assert_eq!(retry.as_deref(), Some("observe_original_before_recovery"));
             } else if submitted {
                 assert_eq!(finished(&recovered, &id).await["phase"], "completed");
             } else {
@@ -162,6 +161,22 @@ fn startup_crash_windows_preserve_the_submission_boundary_without_resampling() -
                         .contains("turn_acceptance_unconfirmed")
                 );
                 assert_eq!(retry.as_deref(), Some("observe_only"));
+            }
+            if boundary == SubmissionBoundary::Unsubmitted {
+                recovered.drive(&id).await?;
+                let attempts = recovered.store().await?.attempts(&id).await?;
+                assert_eq!(attempts.len(), 2, "{stage}: one empty stopped replacement");
+                let next = attempts.iter().find(|a| a.current).unwrap();
+                assert_eq!(next.snapshot_id, run.snapshot_id);
+                assert_eq!(
+                    recovered
+                        .store()
+                        .await?
+                        .attempt_input(&next.operation_id)
+                        .await?,
+                    store.attempt_input(&run.operation_id).await?
+                );
+                recovered.abort_audit(&id).await?;
             }
             for _ in 0..3 {
                 recovered.tick().await?;
@@ -216,7 +231,7 @@ fn expired_startup_owner_cannot_cross_the_submission_marker() -> anyhow::Result<
             serde_json::from_str(error.as_deref().expect("admission diagnosis"))?;
         assert_eq!(diagnostic["stage"], "submission_admission");
         assert_eq!(diagnostic["cause"], "cancelled_expired_or_superseded");
-        assert_eq!(retry.as_deref(), Some("never_automatically_retry"));
+        assert_eq!(retry.as_deref(), Some("observe_original_before_recovery"));
         assert_eq!(
             controller
                 .store()
@@ -277,7 +292,7 @@ fn preflight_failure_is_durably_local_and_never_submitted() -> anyhow::Result<()
         let error: Value = serde_json::from_str(&error.expect("durable diagnostic"))?;
         assert_eq!(error["stage"], "reviewer_preflight");
         assert_eq!(error["cause"], "unknown reviewer provider");
-        assert_eq!(retry.as_deref(), Some("never_automatically_retry"));
+        assert_eq!(retry.as_deref(), Some("observe_original_before_recovery"));
         assert!(
             server
                 .received_requests()
@@ -367,7 +382,7 @@ fn preparation_and_acceptance_write_failures_keep_their_certainty_and_diagnostic
                     store.submission_boundary(&run.operation_id).await?,
                     SubmissionBoundary::Unsubmitted
                 );
-                assert_eq!(retry.as_deref(), Some("never_automatically_retry"));
+                assert_eq!(retry.as_deref(), Some("observe_original_before_recovery"));
             }
             sqlx::query("DROP TRIGGER injected").execute(&pool).await?;
             if submitted {
@@ -653,7 +668,11 @@ fn delayed_terminal_visibility_remains_reconcilable_live_shutdown_and_cold() -> 
             let hidden = Arc::new(AtomicBool::new(true));
             let hooks = || {
                 let hidden = hidden.clone();
+                let original_hidden = hidden.clone();
                 DispatchTestHooks {
+                    original_terminal_visible: Some(Arc::new(move || {
+                        !original_hidden.load(Ordering::SeqCst)
+                    })),
                     history: Some(Arc::new(move |mut history| {
                         if hidden.load(Ordering::SeqCst) {
                             hide_terminal(&mut history);

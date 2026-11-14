@@ -2,7 +2,7 @@
 use super::capture::{seed_stream, settled};
 use super::*;
 
-pub(super) async fn reconcile_until(
+pub(in crate::audex::controller::tests::execution) async fn reconcile_until(
     controller: &Arc<AuditController>,
     operation: &str,
 ) -> anyhow::Result<Value> {

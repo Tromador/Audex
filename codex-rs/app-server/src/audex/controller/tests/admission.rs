@@ -318,7 +318,7 @@ async fn provider_receipt_after_stop_is_operational_only_and_replay_is_refused()
             .await?
     );
     assert!(
-        !store
+        store
             .mark_generation_send(&owner, "sent-before-stop", now)
             .await?
     );
@@ -326,6 +326,11 @@ async fn provider_receipt_after_stop_is_operational_only_and_replay_is_refused()
         .control_attempt(&cancel(&attempts[0], "stop"), None)
         .await?;
     let frozen = store.capture_state(&owner.assignment_id).await?;
+    assert!(
+        !store
+            .mark_generation_send(&owner, "sent-before-stop", now)
+            .await?
+    );
     store
         .confirm_generation(
             &owner,

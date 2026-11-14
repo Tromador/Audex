@@ -186,7 +186,8 @@ pub(crate) fn attempt_summary(target: &AuditAttemptView) -> String {
         target.capture_gap,
         target.capture_failure,
         target.capture_truncated
-    ) + &target.extraction.as_ref().map(|extraction| format!(
+    ) + &target.recovery_status.as_ref().map(|status| format!("\nRecovery: {status}")).unwrap_or_default()
+    + &target.extraction.as_ref().map(|extraction| format!(
         "\nRaw output SHA-256: {}; transformations: {:?}; extraction discrepancy: {}",
         extraction.raw_digest, extraction.transformations,
         crate::history_cell::sanitize_user_text(

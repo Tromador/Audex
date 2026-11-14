@@ -41,9 +41,16 @@ fn events(body: &Value, retained: &Value, generation: usize, mode: &str) -> Vec<
     if let Some(served) = served {
         created["response"]["headers"] = json!({"OpenAI-Model":served});
     }
-    // HTTP/SSE ignores response.model. The WebSocket handler sets it per mode, where a
-    // provider-authored lifecycle model is generation identity for admitted requests.
-    created["response"]["model"] = json!(model);
+    // Both transports now use provider-authored lifecycle model evidence.
+    // Missing identity must omit the body field too; aliases must agree with it.
+    if let Some(served) = served {
+        created["response"]["model"] = json!(served);
+    } else if mode == "payload_only" {
+        created["response"]["model"] = json!(model);
+    }
+    if mode == "header_body_conflict" {
+        created["response"]["model"] = json!("substitute");
+    }
     let mut events = vec![created];
     if generation == 1 {
         events.push(responses::ev_assistant_message(
@@ -492,10 +499,7 @@ async fn native_http_and_websocket_identity_is_required_for_every_generation() -
             "handshake_only",
             "handshake_continuation_missing",
         ] {
-            if !websocket
-                && ((mode.starts_with("handshake_") && mode != "handshake_mismatch")
-                    || mode == "header_body_conflict")
-            {
+            if !websocket && (mode.starts_with("handshake_") && mode != "handshake_mismatch") {
                 continue;
             }
             let provider = NativeProvider::new(websocket, mode).await?;
@@ -520,8 +524,7 @@ async fn native_http_and_websocket_identity_is_required_for_every_generation() -
                 r[0]["completed"] == true || r[0]["operationState"] == "failed"
             })
             .await?;
-            let valid = matches!(mode, "match" | "handshake" | "alias")
-                || (websocket && mode == "payload_only");
+            let valid = matches!(mode, "match" | "handshake" | "alias" | "payload_only");
             assert_eq!(
                 records[0]["completed"], valid,
                 "{websocket}/{mode}: {records:?}"
@@ -818,6 +821,13 @@ async fn public_queued_rosters_and_exact_attempt_controls_survive_restart() -> R
             );
             signal(pid, libc::SIGKILL)?;
             wait_for_exit(pid)?;
+            // Preserve this test's uncertain-liveness scheduling boundary. A
+            // verified dead owner now legitimately releases execution capacity.
+            let db = fixture_db(&daemon).await?;
+            sqlx::query("UPDATE audit_execution SET owner_process_json=NULL")
+                .execute(&db)
+                .await?;
+            db.close().await;
             daemon.lifecycle("start")?;
             let replay = command.output()?;
             check(&replay, 0)?;

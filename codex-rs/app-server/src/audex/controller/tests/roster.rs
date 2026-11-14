@@ -212,7 +212,8 @@ async fn model_disqualification_is_durable_and_fences_generations_without_discar
 -> anyhow::Result<()> {
     use crate::audex::store::activity::ActivityInput;
     use crate::audex::store::admission::AdmissionIdentity;
-    use crate::audex::store::attempts::{AttemptAction, ControlRequest};
+    use crate::audex::store::attempts::AttemptAction;
+    use crate::audex::store::attempts::ControlRequest;
     for mode in ["missing", "mismatch", "connection_only"] {
         let (_temp, controller, fake, id, attempts) = super::attempts::setup().await?;
         let store = controller.store().await?;
@@ -245,7 +246,7 @@ async fn model_disqualification_is_durable_and_fences_generations_without_discar
                     store
                         .admit_generation(&identity, "not-yet-qualified", "native_websocket", now)
                         .await
-                        .is_err()
+                        .is_ok()
                 );
             }
             store
@@ -315,9 +316,31 @@ async fn model_disqualification_is_durable_and_fences_generations_without_discar
             "UNVALIDATED_RECEIVED_PREFIX"
         );
         let evidence = reopened.model_evidence(&attempt.assignment_id).await?;
-        assert_eq!(evidence.len(), 1);
         assert_eq!(
-            evidence[0].state,
+            evidence.len(),
+            if mode == "connection_only" { 2 } else { 1 }
+        );
+        if mode == "connection_only" {
+            assert!(
+                !reopened
+                    .mark_generation_send(&identity, "not-yet-qualified", now)
+                    .await?
+            );
+            assert_eq!(
+                evidence
+                    .iter()
+                    .find(|e| e.request_id == "not-yet-qualified")
+                    .unwrap()
+                    .state,
+                "pending"
+            );
+        }
+        assert_eq!(
+            evidence
+                .iter()
+                .find(|e| e.request_id == "physical-first")
+                .unwrap()
+                .state,
             if mode != "mismatch" {
                 "missing"
             } else {

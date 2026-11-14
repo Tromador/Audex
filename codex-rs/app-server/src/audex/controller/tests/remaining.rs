@@ -287,3 +287,75 @@ async fn recovery_backoff_and_progress_deduplication_do_not_delay_explicit_cance
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn parked_attempts_back_off_but_observe_late_completion_and_revision_changes()
+-> anyhow::Result<()> {
+    for state in [AssignmentState::Failed, AssignmentState::Unknown] {
+        let (_temp, controller, fake, id, attempts) = attempts::setup().await?;
+        let original = &attempts[0];
+        let capture = attempts::capture(&controller, &fake, original).await?;
+        attempts::delta(&capture, "Original partial output").await;
+        let store = controller.store().await?;
+        fake.replace(
+            &original.operation_id,
+            WorkState::Failed("lost original".into()),
+        );
+        controller
+            .finish_observed_operation(
+                &original.operation_id,
+                original.attempt_revision,
+                state,
+                "lost original",
+            )
+            .await?;
+        store.mark_execution_stopped(&original.operation_id).await?;
+        scheduled_tick(&controller).await?;
+        for _ in 0..7 {
+            controller
+                .polling
+                .lock()
+                .await
+                .get_mut(&original.operation_id)
+                .unwrap()
+                .1 = tokio::time::Instant::now();
+            scheduled_tick(&controller).await?;
+        }
+        let (_, due, exponent) = controller.polling.lock().await[&original.operation_id];
+        assert!(exponent >= 6 && due.duration_since(tokio::time::Instant::now()).as_secs() >= 59);
+        let count = fake.observations.load(Ordering::SeqCst);
+        for _ in 0..10 {
+            scheduled_tick(&controller).await?;
+        }
+        assert_eq!(fake.observations.load(Ordering::SeqCst), count);
+        // Durable change bypasses the timer, even though the prior refusal was stable.
+        store
+            .set_recovery_status(&original.assignment_id, "new_retained_evidence")
+            .await?;
+        scheduled_tick(&controller).await?;
+        assert!(fake.observations.load(Ordering::SeqCst) > count);
+        assert_eq!(controller.polling.lock().await[&original.operation_id].2, 1);
+        // A receipt arriving without a revision notification is still eventually observed.
+        fake.replace(
+            &original.operation_id,
+            WorkState::Completed(empty_result(original)),
+        );
+        controller
+            .polling
+            .lock()
+            .await
+            .get_mut(&original.operation_id)
+            .unwrap()
+            .1 = tokio::time::Instant::now();
+        scheduled_tick(&controller).await?;
+        assert_eq!(
+            store
+                .run_for_operation(&original.operation_id)
+                .await?
+                .assignment_state,
+            AssignmentState::Succeeded
+        );
+        assert_eq!(store.attempts(&id).await?.len(), 3);
+    }
+    Ok(())
+}

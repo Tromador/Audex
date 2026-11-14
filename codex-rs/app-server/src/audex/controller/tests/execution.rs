@@ -16,10 +16,13 @@ use wiremock::{
 };
 
 mod admission;
+mod continuity;
 mod corrections;
 #[cfg(target_os = "linux")]
 mod external;
 mod foundations;
+#[cfg(target_os = "linux")]
+mod live_continuity;
 mod preparation;
 mod recovery;
 mod source_fidelity;
@@ -110,10 +113,22 @@ async fn fixture_at_path(
     hooks: crate::audex::dispatch::DispatchTestHooks,
     websockets: bool,
 ) -> (Arc<AuditController>, Arc<ThreadManager>) {
-    let mut config =
+    let config =
         Config::load_default_with_cli_overrides_for_codex_home(home.to_path_buf(), Vec::new())
             .await
             .expect("config");
+    fixture_from_config(config, url, auth, custom, listen, hooks, websockets).await
+}
+
+async fn fixture_from_config(
+    mut config: Config,
+    url: &str,
+    auth: CodexAuth,
+    custom: bool,
+    listen: crate::audex::dispatch::Listen,
+    hooks: crate::audex::dispatch::DispatchTestHooks,
+    websockets: bool,
+) -> (Arc<AuditController>, Arc<ThreadManager>) {
     config.model_provider.base_url = Some(format!("{url}/v1"));
     config.model_provider.supports_websockets = websockets;
     if let Some(configure) = &hooks.config {
@@ -466,7 +481,7 @@ fn unstructured_opinions_and_provider_failure_do_not_redispatch() -> anyhow::Res
                 assert_eq!(failed.phase, RunPhase::Reviewing);
                 assert!(!failed.collection_ready && failed.report.is_none());
                 assert!(!error.expect("failure diagnostic").is_empty());
-                assert_eq!(retry.as_deref(), Some("never_automatically_retry"));
+                assert_eq!(retry.as_deref(), Some("observe_original_before_recovery"));
             } else {
                 assert_eq!(failed.assignment_state, AssignmentState::Succeeded);
                 assert!(failed.collection_ready);
@@ -825,15 +840,21 @@ fn cancellation_or_terminal_classification_during_real_startup_prevents_sampling
                 assert_eq!(finished(&controller, &id).await["phase"], "cancelled");
             } else {
                 controller.drive(&id).await?;
-                let unknown = controller.store().await?.load_run(&id).await?;
+                let store = controller.store().await?;
+                let attempts = store.attempts(&id).await?;
+                assert_eq!(attempts.len(), 2, "one stopped empty replacement");
+                let original = attempts.iter().find(|a| !a.current).unwrap();
+                let unknown = store.run_for_operation(&original.operation_id).await?;
                 assert_eq!(unknown.assignment_state, AssignmentState::Unknown);
                 assert_eq!(unknown.operation_state, OperationState::Unknown);
-                assert_eq!(unknown.phase, RunPhase::Reviewing);
                 assert!(!unknown.observation_pending && !unknown.collection_ready);
                 assert!(unknown.outcome.is_none() && unknown.report.is_none());
-                let (error, retry) = recovery::issue(&controller, &unknown.operation_id).await?;
-                assert_eq!(error.as_deref(), Some("acceptance_or_outcome_unknown"));
-                assert_eq!(retry.as_deref(), Some("never_automatically_retry"));
+                let replacement = attempts.iter().find(|a| a.current).unwrap();
+                assert_eq!(replacement.attempt_ordinal, 2);
+                assert_eq!(replacement.snapshot_id, unknown.snapshot_id);
+                // Cancel before the fresh attempt starts. Stale startup must
+                // never sample, and cancellation must fence its successor too.
+                controller.abort_audit(&id).await?;
             }
             assert!(
                 server

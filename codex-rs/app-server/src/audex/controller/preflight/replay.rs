@@ -7,9 +7,27 @@ pub(in crate::audex::controller) fn request_identity(
     snapshot: &SnapshotId,
     preflight: Option<&AuditPreflightResponse>,
 ) -> anyhow::Result<String> {
+    let reviewers = reviewers
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    request_identity_values(
+        params,
+        &reviewers,
+        snapshot,
+        preflight.map(|p| p.identity.as_str()),
+    )
+}
+
+fn request_identity_values(
+    params: &AuditStartParams,
+    reviewers: &[serde_json::Value],
+    snapshot: &SnapshotId,
+    preflight_identity: Option<&str>,
+) -> anyhow::Result<String> {
     let mut identity = sha256_hex(&serde_json::to_vec(&serde_json::json!({
         "version":1,"snapshotId":snapshot,"brief":params.brief,
-        "provider":reviewers[0].provider,"model":reviewers[0].model,"reasoningEffort":reviewers[0].reasoning_effort,
+        "provider":reviewers[0]["provider"],"model":reviewers[0]["model"],"reasoningEffort":reviewers[0]["reasoning_effort"],
     }))?);
     if reviewers.len() != 1 {
         identity = sha256_hex(&serde_json::to_vec(&serde_json::json!({
@@ -17,7 +35,9 @@ pub(in crate::audex::controller) fn request_identity(
         }))?);
     }
     if params.scheduling != AuditScheduling::Automatic
-        || reviewers.iter().any(|r| r.expected_served_model.is_some())
+        || reviewers
+            .iter()
+            .any(|r| !r["expected_served_model"].is_null())
     {
         identity = sha256_hex(&serde_json::to_vec(&serde_json::json!({
             "base":identity,"scheduling":params.scheduling,"reviewers":reviewers,
@@ -25,17 +45,17 @@ pub(in crate::audex::controller) fn request_identity(
     }
     if reviewers
         .iter()
-        .any(|r| r.authentication_route == AuditAuthenticationRoute::ClaudeSubscription)
+        .any(|r| r["authentication_route"] == "claude_subscription")
     {
         identity = sha256_hex(&serde_json::to_vec(&serde_json::json!({
-            "base":identity,"reviewers":reviewers,"preflight":preflight.map(|p|&p.identity),
+            "base":identity,"reviewers":reviewers,"preflight":preflight_identity,
         }))?);
     }
     Ok(identity)
 }
 
 impl AuditController {
-    pub(super) async fn retained_preflight(
+    pub(in crate::audex::controller) async fn retained_preflight(
         &self,
         params: &AuditStartParams,
         selections: &[ReviewerSelection],
@@ -114,8 +134,46 @@ impl AuditController {
             });
         }
         let mut response = response(params, manifest, reviewers)?;
-        if request_identity(params, selections, &manifest.snapshot_id, Some(&response))?
-            != retained.identity
+        // Reconstruct the original approval hash, including inert historical
+        // settings, without exposing them as current controls or rewriting evidence.
+        let mut historical_selections = selections
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut historical_response = serde_json::to_value(&response)?;
+        historical_response["identity"] = serde_json::json!("");
+        for (index, (raw, _)) in retained.inputs.iter().enumerate() {
+            let value: serde_json::Value = serde_json::from_str(raw)?;
+            if let Some(limits) = value.get("operatorLimits").filter(|value| !value.is_null()) {
+                // The original typed selection serialised limits first. JSON
+                // object order is significant to the retained approval digest.
+                for selection in [
+                    &mut historical_selections[index],
+                    &mut historical_response["reviewers"][index]["selection"],
+                ] {
+                    let mut original = serde_json::json!({"limits":limits});
+                    if let (Some(original), Some(current)) =
+                        (original.as_object_mut(), selection.as_object())
+                    {
+                        original.extend(
+                            current
+                                .iter()
+                                .map(|(key, value)| (key.clone(), value.clone())),
+                        );
+                    }
+                    *selection = original;
+                }
+            }
+        }
+        let historical_preflight = sha256_hex(&serde_json::to_vec(&serde_json::json!({
+            "requestKey":params.request_key,"scheduling":params.scheduling,"bindings":historical_response,
+        }))?);
+        if request_identity_values(
+            params,
+            &historical_selections,
+            &manifest.snapshot_id,
+            Some(&historical_preflight),
+        )? != retained.identity
         {
             return Err(conflict().into());
         }

@@ -78,8 +78,28 @@ fn isolated_lifecycle_daemon() -> anyhow::Result<()> {
                 store.client_launch(operation).await?.unwrap().execution_id,
                 original.execution_id
             );
-            assert_eq!(store.unfinished_client_launches().await?.len(), 0);
-            let run = store.load_run(id).await?;
+            assert!(
+                !store
+                    .unfinished_client_launches()
+                    .await?
+                    .iter()
+                    .any(|id| id == operation)
+            );
+            let run = store.run_for_operation(operation).await?;
+            let attempts = store.attempts(id).await?;
+            let eligible = matches!(
+                stage.as_str(),
+                "launch_intent" | "child_identity" | "prompt_write_started"
+            );
+            assert_eq!(attempts.len(), if eligible { 2 } else { 1 }, "{stage}");
+            if eligible {
+                let next = attempts.iter().find(|a| a.current).unwrap();
+                assert_eq!(next.snapshot_id, run.snapshot_id);
+                assert_eq!(
+                    store.attempt_input(&next.operation_id).await?,
+                    store.attempt_input(operation).await?
+                );
+            }
             if matches!(stage.as_str(), "terminal_persisted" | "accepted") {
                 assert_eq!(run.assignment_state, AssignmentState::Succeeded);
                 assert!(store.client_terminal_result(operation).await?.is_some());
@@ -89,7 +109,7 @@ fn isolated_lifecycle_daemon() -> anyhow::Result<()> {
             if stage == "accepted" {
                 assert_eq!(read_report_identity(&store, id).await?, saved["report"]);
             }
-            if stage == "client_policy_stop" {
+            if stage == "client_continuation_observed" {
                 let events = store.activity(&run.assignment_id, 0, 256).await?;
                 assert!(
                     events
@@ -105,16 +125,28 @@ fn isolated_lifecycle_daemon() -> anyhow::Result<()> {
             let count = std::fs::read_to_string(home.join("stream-launches"))
                 .unwrap_or_default()
                 .lines()
+                .filter(|id| *id == original.execution_id)
                 .count();
             assert_eq!(
                 count,
                 usize::from(matches!(
                     stage.as_str(),
-                    "captured" | "terminal_persisted" | "accepted" | "client_policy_stop"
+                    "captured" | "terminal_persisted" | "accepted" | "client_continuation_observed"
                 ))
             );
             std::fs::write(root.join("recovered.json"), json!({"stage":stage,"execution":original.execution_id,
                 "prompt_count":count,"cleanup":clean,"completed":run.assignment_state==AssignmentState::Succeeded}).to_string())?;
+            controller.abort_audit(id).await?;
+            for attempt in store.attempts(id).await? {
+                if store.client_launch(&attempt.operation_id).await?.is_some() {
+                    super::lifecycle_qualification::reconcile_until(
+                        &controller,
+                        &attempt.operation_id,
+                    )
+                    .await?;
+                }
+            }
+            assert!(store.unfinished_client_launches().await?.is_empty());
             threads
                 .shutdown_all_threads_bounded(Duration::from_secs(5))
                 .await;
@@ -149,7 +181,7 @@ fn isolated_lifecycle_daemon() -> anyhow::Result<()> {
             hooks,
         )
         .await;
-        if stage == "client_policy_stop" {
+        if stage == "client_continuation_observed" {
             let id = super::repairs::seed(
                 &controller,
                 &temp,
@@ -207,7 +239,7 @@ fn daemon_restart_reconciles_every_durable_boundary_without_replay() -> anyhow::
             "captured",
             "terminal_persisted",
             "accepted",
-            "client_policy_stop",
+            "client_continuation_observed",
             "unreadable",
             "reused",
         ] {

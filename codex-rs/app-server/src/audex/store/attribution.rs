@@ -69,15 +69,15 @@ pub(super) async fn require_completion(
         .is_some_and(|i| i.version == 2 || i.require_served_identity)
     {
         let expected = input.as_ref().expect("strict input").expected_model();
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_request_admissions WHERE assignment_id=?)
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_request_admissions WHERE assignment_id=? AND identity_state='verified' AND model_scope='generation')
             AND NOT EXISTS(SELECT 1 FROM audit_request_admissions g WHERE g.assignment_id=? AND
-            (g.identity_state<>'verified' OR COALESCE(g.model_scope,'')<>'generation' OR g.expected_model IS NULL OR g.expected_model<>?
-             OR g.observed_model IS NULL OR g.observed_model<>? OR g.send_started_at_ms IS NULL
+            (g.identity_state IN ('missing','mismatch') OR g.expected_model IS NULL OR g.expected_model<>?
+             OR (g.observed_model IS NOT NULL AND g.observed_model<>?) OR g.send_started_at_ms IS NULL
              OR NOT EXISTS(SELECT 1 FROM operations o JOIN audit_execution e ON e.operation_id=o.id
                  WHERE o.assignment_id=g.assignment_id AND o.id=g.operation_id AND e.thread_id=g.execution_id)))")
             .bind(assignment).bind(assignment).bind(expected).bind(expected).fetch_one(&mut *connection).await?
     } else {
-        sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM audit_request_admissions WHERE assignment_id=? AND expected_model IS NOT NULL AND (identity_state<>'verified' OR COALESCE(model_scope,'')<>'generation'))")
+        sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM audit_request_admissions WHERE assignment_id=? AND expected_model IS NOT NULL AND identity_state IN ('missing','mismatch'))")
             .bind(assignment).fetch_one(&mut *connection).await?
     };
     if failed || !valid {

@@ -134,7 +134,6 @@ impl RouteAwareClientPool {
                 }
                 .map_err(RouteAwareRequestError::from);
                 let result = match result {
-                    result if self.client_builder.generation_admission.is_some() => result,
                     // A failed CONNECT identifies a proxy challenge. An origin 407 is a response.
                     #[cfg(windows)]
                     Err(error)
@@ -275,6 +274,12 @@ impl RouteAwareClientPool {
 
         set_remaining_timeout(&mut retry_request, timeout_deadline)?;
 
+        if let Some(admission) = &self.client_builder.generation_admission {
+            admission
+                .admit("native_http")
+                .await
+                .map_err(|error| RouteAwareRequestError::GenerationDenied(error.to_string()))?;
+        }
         let response = if self.follows_redirects_manually() {
             fallback_client
                 .execute_without_request_logging(retry_request)
@@ -332,6 +337,13 @@ impl RouteAwareClientPool {
         };
         let client = self.windows_proxy_client(current_route, selected_tls_backend, &pipe)?;
         set_remaining_timeout(&mut request, timeout_deadline)?;
+        // Recheck the original execution's cancellation fence after proxy auth.
+        if let Some(admission) = &self.client_builder.generation_admission {
+            admission
+                .admit("native_http")
+                .await
+                .map_err(|error| RouteAwareRequestError::GenerationDenied(error.to_string()))?;
+        }
         // Keep the listener alive through a possible TLS retry.
         let result = client.execute_without_request_logging(request).await;
         match result {

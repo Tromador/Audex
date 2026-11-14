@@ -16,6 +16,9 @@ mod roster;
 #[path = "audit/typed_selections.rs"]
 mod typed_selections;
 
+#[path = "audit/continuity.rs"]
+mod continuity;
+
 #[cfg(target_os = "linux")]
 #[path = "audit/subscription.rs"]
 mod subscription;
@@ -416,6 +419,11 @@ async fn cold_pending_and_terminal_unknown_are_exposed_without_resampling() -> R
     sqlx::query("UPDATE operations SET lease_expires_at_ms=0")
         .execute(&pool)
         .await?;
+    // This case exercises uncertain liveness. M5 can otherwise prove that
+    // this fixture daemon died and recover its stopped execution automatically.
+    sqlx::query("UPDATE audit_execution SET owner_process_json=NULL")
+        .execute(&pool)
+        .await?;
     pool.close().await;
     daemon.lifecycle("start")?;
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -500,6 +508,11 @@ async fn abort_after_runtime_loss_releases_capacity_without_replaying_the_origin
     wait_for_exit(pid)?;
     let pool = fixture_db(&daemon).await?;
     sqlx::query("UPDATE operations SET lease_expires_at_ms=0")
+        .execute(&pool)
+        .await?;
+    // This case exercises uncertain liveness. M5 can otherwise prove that
+    // this fixture daemon died and recover its stopped execution automatically.
+    sqlx::query("UPDATE audit_execution SET owner_process_json=NULL")
         .execute(&pool)
         .await?;
     pool.close().await;

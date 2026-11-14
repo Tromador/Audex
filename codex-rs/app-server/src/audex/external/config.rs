@@ -87,9 +87,9 @@ pub(super) async fn prepare(
             && binding.policy_digest == sha256_hex(policy.as_bytes())
             && binding.tool_exposure == tools
             && binding.native_configuration_identity.is_none()
-            && binding.limits.request_retries == 0
-            && binding.limits.stream_retries == 0
-            && !binding.limits.automatic_compaction
+            && binding.limits.request_retries.is_none()
+            && binding.limits.stream_retries.is_none()
+            && binding.limits.automatic_compaction
             && binding.limits.tool_argument_bytes == 16 * 1024
             && binding.limits.read_bytes == 64 * 1024
             && binding.limits.search_query_bytes
@@ -259,6 +259,18 @@ async fn prepare_files(
     #[cfg(test)]
     let mut billing_source = billing_source;
     #[cfg(test)]
+    if let Ok(percent) = std::fs::read_to_string(root.join("m5-compaction-percent")) {
+        let percent: u8 = percent.trim().parse()?;
+        anyhow::ensure!(
+            (1..=100).contains(&percent),
+            "invalid fixture compaction threshold"
+        );
+        environment.insert(
+            "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".into(),
+            percent.to_string(),
+        );
+    }
+    #[cfg(test)]
     if let Ok(endpoint) = std::fs::read_to_string(root.join("c63-fake-api")) {
         // This compiled-test-only fixture has no normal route or credential path.
         let endpoint = url::Url::parse(endpoint.trim())?;
@@ -351,12 +363,6 @@ pub(super) fn isolated_environment(
         ),
     ]);
     for (key, value) in [
-        ("CLAUDE_CODE_MAX_RETRIES", "0"),
-        ("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK", "1"),
-        ("CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES", "0"),
-        ("CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK", "1"),
-        ("CLAUDE_CODE_DISABLE_REFUSAL_RETRY", "1"),
-        ("DISABLE_COMPACT", "1"),
         ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
         ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1"),
         ("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1"),

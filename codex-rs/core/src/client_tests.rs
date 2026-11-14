@@ -2961,29 +2961,3 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
         );
     }
 }
-
-#[test]
-fn generation_identity_survives_transport_recovery_and_changes_for_real_continuations() {
-    let thread = ThreadId::new();
-    let original = super::logical_generation_id(&thread, Some("turn"), &[]).expect("identity");
-    assert_eq!(
-        super::logical_generation_id(&thread, Some("turn"), &[]).expect("recovery"),
-        original
-    );
-    let tool: ResponseItem = serde_json::from_value(
-        serde_json::json!({"type":"function_call_output","call_id":"read","output":"source bytes"}),
-    )
-    .expect("tool result");
-    assert_ne!(
-        super::logical_generation_id(&thread, Some("turn"), &[tool]).expect("continuation"),
-        original
-    );
-    assert_ne!(
-        super::logical_generation_id(&thread, Some("next-turn"), &[]).expect("next turn"),
-        original
-    );
-    assert_ne!(
-        super::logical_generation_id(&ThreadId::new(), Some("turn"), &[]).expect("fresh execution"),
-        original
-    );
-}

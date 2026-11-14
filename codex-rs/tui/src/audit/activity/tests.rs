@@ -21,6 +21,7 @@ fn entry(sequence: i64, kind: &str, payload: &str) -> AuditActivityEntry {
 }
 fn page(target: &AuditAttemptView, entries: Vec<AuditActivityEntry>) -> AuditAttemptReadResponse {
     AuditAttemptReadResponse {
+        recovered_output: None,
         attempt: target.clone(),
         next_sequence: entries.last().map_or(0, |e| e.sequence),
         entries,
@@ -254,7 +255,9 @@ fn contextual_actions_respect_modes_readiness_and_permanent_ignore() {
 
 #[tokio::test]
 async fn paging_reconnect_and_missed_notifications_replay_only_durable_cursors() {
-    use codex_app_server_client::{AppServerClient, CloudClient, CloudOperation};
+    use codex_app_server_client::AppServerClient;
+    use codex_app_server_client::CloudClient;
+    use codex_app_server_client::CloudOperation;
     let (cloud, mut commands, _incoming) = CloudClient::channel(8);
     let client = AppServerClient::Cloud(cloud);
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
@@ -319,4 +322,58 @@ async fn paging_reconnect_and_missed_notifications_replay_only_durable_cursors()
         new_commands.try_recv().is_err(),
         "closing only aborts observation"
     );
+}
+
+#[test]
+fn recovery_banner_is_state_gated_and_repeated_reads_do_not_duplicate_it() {
+    for state in ["running", "succeeded", "failed", "unknown"] {
+        let mut view = viewer();
+        view.target.assignment_state = state.into();
+        view.target.completed = state == "succeeded";
+        let mut response = page(&view.target, vec![]);
+        response.recovered_output = Some("RECOVERED_TEXT".into());
+        view.apply(Ok(response.clone()));
+        view.apply(Ok(response));
+        let rendered = text(&mut view);
+        let recovering = matches!(state, "failed" | "unknown");
+        assert_eq!(
+            rendered.matches("RECOVERED_TEXT").count(),
+            usize::from(recovering),
+            "{state}"
+        );
+        assert_eq!(
+            rendered.contains("completion unverified"),
+            recovering,
+            "{state}"
+        );
+        assert_eq!(
+            rendered.contains("Retry requires your decision"),
+            recovering,
+            "{state}"
+        );
+    }
+}
+
+#[test]
+fn recovery_projection_updates_in_place_and_clears_after_late_completion() {
+    let mut view = viewer();
+    view.target.assignment_state = "failed".into();
+    let mut response = page(&view.target, vec![]);
+    response.recovered_output = Some("RECOVERED_PREFIX".into());
+    view.apply(Ok(response.clone()));
+    response.attempt.assignment_state = "unknown".into();
+    response.recovered_output = Some("RECOVERED_PREFIX plus retained tail".into());
+    view.apply(Ok(response.clone()));
+    let rendered = text(&mut view);
+    assert_eq!(rendered.matches("RECOVERED_PREFIX").count(), 1);
+    assert_eq!(rendered.matches("Retry requires your decision").count(), 1);
+    assert!(!rendered.contains("Full completed opinion retained"));
+    response.attempt.assignment_state = "succeeded".into();
+    response.attempt.completed = true;
+    response.recovered_output = None;
+    view.apply(Ok(response));
+    let rendered = text(&mut view);
+    assert!(!rendered.contains("RECOVERED_PREFIX"));
+    assert!(!rendered.contains("completion unverified"));
+    assert!(!rendered.contains("Retry requires your decision"));
 }

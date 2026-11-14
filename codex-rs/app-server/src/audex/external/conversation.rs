@@ -114,7 +114,8 @@ pub(crate) async fn run(
     let mut environment = config::isolated_environment(&directory, Some(&policy));
     // Conversation retains the official client's context management. Audit policy is unchanged.
     environment.remove("DISABLE_COMPACT");
-    let mut command = Command::new(&binding.executable);
+    let executable = commissioning::executable(&binding.executable)?;
+    let mut command = Command::new(&executable);
     command
         .args([
             "-p",
@@ -161,9 +162,9 @@ pub(crate) async fn run(
         client_version: binding.client_version.clone(),
     })
     .await?;
+    let client_version = child.client_version.clone();
     let child =
-        handshake::qualify_conversation(child, &mut policy, model, &binding.client_version, &nonce)
-            .await?;
+        handshake::qualify_conversation(child, &mut policy, model, &client_version, &nonce).await?;
     policy.verify_before_prompt()?;
     anyhow::ensure!(
         std::fs::read(&mcp_path)? == mcp,

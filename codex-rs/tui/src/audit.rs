@@ -681,7 +681,7 @@ pub(crate) fn progress(view: &AuditRunView) -> String {
             ""
         },
         if view.observation_pending {
-            "; observation pending, no inference retry"
+            "; observing the original execution"
         } else {
             ""
         }

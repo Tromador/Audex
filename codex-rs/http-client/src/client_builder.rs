@@ -128,7 +128,7 @@ impl HttpClientBuilder {
         self
     }
 
-    /// One generation, with admission after routing and no automatic resend.
+    /// Bind client requests to an execution, checking ownership after routing.
     pub fn with_generation_admission(mut self, request: crate::GenerationRequest) -> Self {
         self.generation_admission = Some(request);
         self.follow_redirects = false;
@@ -409,9 +409,6 @@ impl HttpClientBuilder {
 
     fn base_reqwest_builder(self) -> reqwest::ClientBuilder {
         let mut builder = reqwest::Client::builder();
-        if self.generation_admission.is_some() {
-            builder = builder.retry(reqwest::retry::never());
-        }
         #[cfg(windows)]
         if let Some(path) = self.windows_proxy_pipe_path {
             builder = builder.windows_named_pipe(path);

@@ -12390,6 +12390,13 @@ class AuditAttemptView(BaseModel):
     possible_overlap: Annotated[bool, Field(alias="possibleOverlap")]
     provider: str
     reasoning_effort: Annotated[str | None, Field(alias="reasoningEffort")] = None
+    recovery_status: Annotated[
+        str | None,
+        Field(
+            alias="recoveryStatus",
+            description="Recovery decision for this attempt; ordinary client retries are separate.",
+        ),
+    ] = None
     requested_model: Annotated[str, Field(alias="requestedModel")]
     resolved_model: Annotated[str, Field(alias="resolvedModel")]
     retry_eligible: Annotated[bool, Field(alias="retryEligible")]
@@ -13790,6 +13797,13 @@ class AuditAttemptReadResponse(BaseModel):
         Field(
             alias="rawResult",
             description="The original terminal response, if retained; invalid JSON stays invalid.",
+        ),
+    ] = None
+    recovered_output: Annotated[
+        str | None,
+        Field(
+            alias="recoveredOutput",
+            description="Visible text recovered from the original history without terminal confirmation.",
         ),
     ] = None
 

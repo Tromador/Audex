@@ -232,3 +232,164 @@ async fn public_subscription_roster_is_atomic_idempotent_and_retry_keeps_approve
     assert!(!child.join("launches").exists());
     Ok(())
 }
+
+#[tokio::test]
+async fn normal_launcher_update_requires_fresh_preflight_without_a_version_pin()
+-> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (controller, fake, _) = fixture(&temp).await;
+    let child = subscription::configure(temp.path(), "valid")?;
+    std::fs::create_dir(controller.root.join("c71-system-policy"))?;
+    let launcher = child.join("claude");
+    std::os::unix::fs::symlink(child.join("client"), &launcher)?;
+    let path = controller.root.join("reviewer-backends.json");
+    let mut settings: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    settings["claudeSubscription"]["executable"] = json!(launcher);
+    settings["claudeSubscription"]
+        .as_object_mut()
+        .unwrap()
+        .remove("clientVersion");
+    std::fs::write(&path, settings.to_string())?;
+    let mut params = request(&controller);
+    let before = api(&controller, "audit/preflight", json!({"request":params}))
+        .await
+        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+    assert_eq!(before["reviewers"][1]["client"]["clientVersion"], "");
+    assert!(!child.join("launches").exists());
+    let updated = child.join("updated-client");
+    let mut bytes = std::fs::read(child.join("client"))?;
+    bytes.extend_from_slice(b"\n# installed client update\n");
+    std::fs::write(&updated, bytes)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&updated, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::remove_file(&launcher)?;
+    std::os::unix::fs::symlink(&updated, &launcher)?;
+    params["preflight"] = before.clone();
+    assert!(
+        api(&controller, "audit/start", params.clone())
+            .await
+            .is_err()
+    );
+    assert!(controller.store.get().is_none());
+    assert_eq!(fake.starts.load(Ordering::SeqCst), 0);
+    let after = api(
+        &controller,
+        "audit/preflight",
+        json!({"request":request(&controller)}),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+    assert_ne!(
+        before["reviewers"][1]["client"]["executableDigest"],
+        after["reviewers"][1]["client"]["executableDigest"]
+    );
+    params["preflight"] = after;
+    api(&controller, "audit/start", params)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+    assert!(
+        !child.join("launches").exists(),
+        "preflight and fake admission do not probe the client"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn obsolete_ceilings_preserve_retained_start_identity_without_new_execution()
+-> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (controller, fake, _) = fixture(&temp).await;
+    let child = subscription::configure(temp.path(), "valid")?;
+    std::fs::create_dir(controller.root.join("c71-system-policy"))?;
+    let mut params = request(&controller);
+    let preview = api(&controller, "audit/preflight", json!({"request":params}))
+        .await
+        .unwrap();
+    params["preflight"] = preview.clone();
+    let started = api(&controller, "audit/start", params.clone())
+        .await
+        .unwrap();
+    let id = started["run"]["runId"].as_str().unwrap();
+    let store = controller.store().await?;
+    let records = store.attempts(id).await?;
+    let obsolete = json!({"maxAttempts":1,"budgetUsd":"0.0001"});
+    let mut historical_preview = preview.clone();
+    historical_preview["identity"] = json!("");
+    let mut historical_selections = Vec::new();
+    let mut retained_bytes = Vec::new();
+    for (index, record) in records.iter().enumerate() {
+        retained_bytes
+            .push(super::limits::retain_legacy_limits(store, record, obsolete.clone()).await?);
+        let selection = &mut historical_preview["reviewers"][index]["selection"];
+        let mut old_selection = json!({"limits":obsolete});
+        old_selection
+            .as_object_mut()
+            .unwrap()
+            .extend(selection.as_object().unwrap().clone());
+        *selection = old_selection;
+        let wire = &params["reviewers"][index];
+        let mut selected = json!({"limits":obsolete,"provider":wire["provider"],"model":wire["model"],"reasoning_effort":null});
+        if index == 1 {
+            selected["execution_adapter"] = json!("claude_client");
+            selected["authentication_route"] = json!("claude_subscription");
+        }
+        historical_selections.push(selected);
+    }
+    let typed: AuditStartParams = serde_json::from_value(params.clone())?;
+    let actual = super::super::preflight::selections(&typed)?;
+    for (expected, selected) in historical_selections.iter().zip(actual) {
+        let mut expected = expected.clone();
+        expected.as_object_mut().unwrap().remove("limits");
+        assert_eq!(expected, serde_json::to_value(selected)?);
+    }
+    // Original candidate's identity format, including its now-removed settings.
+    let preflight_digest = sha256_hex(&serde_json::to_vec(&json!({
+        "requestKey":params["requestKey"],"scheduling":"sequential","bindings":historical_preview
+    }))?);
+    let base = sha256_hex(&serde_json::to_vec(&json!({
+        "snapshotId":preview["snapshotId"],"brief":params["brief"],"reviewers":historical_selections
+    }))?);
+    let scheduled = sha256_hex(&serde_json::to_vec(&json!({
+        "base":base,"scheduling":"sequential","reviewers":historical_selections
+    }))?);
+    let identity = sha256_hex(&serde_json::to_vec(&json!({
+        "base":scheduled,"reviewers":historical_selections,"preflight":preflight_digest
+    }))?);
+    sqlx::query("UPDATE audit_inputs SET request_identity_digest=? WHERE run_id=?")
+        .bind(&identity)
+        .bind(id)
+        .execute(&store.pool_for_tests())
+        .await?;
+    std::fs::write(child.join("client"), b"changed after original approval")?;
+    for _ in 0..2 {
+        let replay = api(&controller, "audit/preflight", json!({"request":params}))
+            .await
+            .unwrap();
+        assert_eq!(replay["existingRunId"], id);
+        assert!(replay["reviewers"][1]["selection"].get("limits").is_none());
+        params["preflight"] = replay;
+        assert_eq!(
+            api(&controller, "audit/start", params.clone())
+                .await
+                .unwrap()["run"]["runId"],
+            id
+        );
+    }
+    for field in ["brief", "model", "source", "order"] {
+        let mut changed = params.clone();
+        match field {
+            "model" => changed["reviewers"][1]["model"] = json!("different"),
+            "source" => changed["source"]["content"] = json!("different"),
+            "order" => changed["reviewers"].as_array_mut().unwrap().reverse(),
+            _ => changed[field] = json!("different"),
+        }
+        assert!(api(&controller, "audit/start", changed).await.is_err());
+    }
+    for (record, raw) in records.iter().zip(retained_bytes) {
+        assert_eq!(store.attempt_input(&record.operation_id).await?.0, raw);
+    }
+    assert_eq!(store.list_run_ids("", 100).await?.len(), 1);
+    assert_eq!(store.attempts(id).await?.len(), 2);
+    assert_eq!(fake.starts.load(Ordering::SeqCst), 0);
+    Ok(())
+}

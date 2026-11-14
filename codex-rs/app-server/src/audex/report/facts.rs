@@ -34,9 +34,19 @@ impl<T> Fact<T> {
     }
 }
 
+/// Decode and render immutable older reports only; never an execution setting.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(in crate::audex) struct HistoricalReviewerLimits {
+    max_attempts: Option<u32>,
+    budget_usd: Option<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::audex) struct ProviderFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_limits: Option<HistoricalReviewerLimits>,
     pub executor: Fact<AuditExecutionAdapter>,
     pub route: Fact<AuditAuthenticationRoute>,
     pub admission_policy: Fact<String>,
@@ -129,6 +139,8 @@ pub(in crate::audex) struct Cost {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::audex) struct GenerationReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_send_checks: Option<i64>,
     pub request_id: String,
     pub operation_id: String,
     pub execution_id: String,
@@ -174,6 +186,15 @@ pub(in crate::audex) fn render(
     field(output, "Executor", &facts.executor)?;
     field(output, "Route", &facts.route)?;
     field(output, "Admission policy", &facts.admission_policy)?;
+    if let Some(limits) = &facts.operator_limits {
+        push_line(
+            output,
+            &format!(
+                "- Operator limits: {}. Attempts count whole reviewer executions. Monetary enforcement uses client cost estimates and may overshoot; it is not a subscription charge or provider invoice.",
+                escape_inline(&serde_json::to_string(limits)?)
+            ),
+        );
+    }
     field(
         output,
         "Expected served model",

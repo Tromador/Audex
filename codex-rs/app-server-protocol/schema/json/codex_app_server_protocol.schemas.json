@@ -9066,6 +9066,13 @@
               "string",
               "null"
             ]
+          },
+          "recoveredOutput": {
+            "description": "Visible text recovered from the original history without terminal confirmation.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -9198,6 +9205,13 @@
             "type": "string"
           },
           "reasoningEffort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recoveryStatus": {
+            "description": "Recovery decision for this attempt; ordinary client retries are separate.",
             "type": [
               "string",
               "null"

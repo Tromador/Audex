@@ -4,7 +4,8 @@ mod capture;
 mod control_boundaries;
 mod guidance_parity;
 mod launch_qualification;
-mod lifecycle_qualification;
+pub(super) mod lifecycle_qualification;
+mod limits;
 mod native_peer;
 mod official_client;
 mod publication_races;
@@ -319,7 +320,8 @@ fn owned_launch_delivers_once_and_uses_real_bridge_with_revocation() -> anyhow::
 }
 
 #[test]
-fn crash_boundaries_are_observation_only_and_never_relaunch() -> anyhow::Result<()> {
+fn crash_boundaries_preserve_original_and_allow_one_stopped_empty_replacement() -> anyhow::Result<()>
+{
     run_test_with_large_stack("c61-crash-windows", || async {
         for stage in [
             "launch_intent",
@@ -393,8 +395,8 @@ fn crash_boundaries_are_observation_only_and_never_relaunch() -> anyhow::Result<
                 .execute(&store.pool_for_tests())
                 .await?;
             let (restarted, _) = real_fixture(&temp, &server.uri()).await;
-            for _ in 0..3 {
-                restarted.drive(&id).await?;
+            for _ in 0..5 {
+                restarted.tick().await?;
             }
             let after = store.client_launch(&run.operation_id).await?.unwrap();
             assert_eq!(after.execution_id, launch.execution_id);
@@ -411,16 +413,24 @@ fn crash_boundaries_are_observation_only_and_never_relaunch() -> anyhow::Result<
                 .lines()
                 .count();
             assert_eq!(count, usize::from(stage != "launch_intent"));
+            let attempts = store.attempts(&id).await?;
+            assert_eq!(attempts.len(), 2, "{stage}: one stopped, empty replacement");
+            assert_eq!(store.list_run_ids("", 100).await?.len(), 1);
+            let replacement = attempts.iter().find(|a| a.current).unwrap();
+            assert_ne!(replacement.assignment_id, run.assignment_id);
+            assert_eq!(replacement.snapshot_id, run.snapshot_id);
+            assert_eq!(replacement.attempt_ordinal, 2);
             assert_eq!(
-                std::fs::read_dir(temp.path().join("client-runtime"))?.count(),
-                1,
-                "recovery must not prepare another launch nonce"
+                store.attempt_input(&replacement.operation_id).await?,
+                store.attempt_input(&run.operation_id).await?
             );
             assert!(!directory.join("receipt.json").exists() || stage == "prompt_written");
             println!(
-                "C61 crash {stage}: original nonce={}, launches={count}, prompt boundary={:?}; no replay",
+                "M5 crash {stage}: original nonce={}, launches={count}, prompt boundary={:?}; original not replayed, one same-audit replacement",
                 after.execution_id, after.prompt_write_started_at_ms
             );
+            restarted.abort_audit(&id).await?;
+            restarted.dispatch.reconcile_resources().await?;
         }
         Ok(())
     })

@@ -505,15 +505,35 @@ impl AuditController {
             params.preflight.as_ref(),
         )?;
         *start_identity = Some(identity.clone());
-        if AuditStore::request_key_exists_read_only(&self.root, &params.request_key).await?
-            && let Some(existing) = self
+        if AuditStore::request_key_exists_read_only(&self.root, &params.request_key).await? {
+            match self
                 .store()
                 .await?
                 .find_idempotent_request(&params.request_key, &identity)
-                .await?
-        {
-            // A replay retrieves the original approval; it authorises no fresh execution.
-            return self.view(&existing.run_id).await;
+                .await
+            {
+                Ok(Some(existing)) => return self.view(&existing.run_id).await,
+                Err(super::store::AuditStoreError::IdempotencyConflict(_)) => {
+                    // Removed settings can change the incoming hash. Validate the
+                    // original retained approval before returning the same audit.
+                    if let Some(existing) = self
+                        .retained_preflight(&params, &reviewers, &preview)
+                        .await?
+                    {
+                        return self
+                            .view(&existing.existing_run_id.ok_or_else(|| {
+                                anyhow::anyhow!("retained preflight has no run identity")
+                            })?)
+                            .await;
+                    }
+                    return Err(super::store::AuditStoreError::IdempotencyConflict(
+                        params.request_key.clone(),
+                    )
+                    .into());
+                }
+                Err(error) => return Err(error.into()),
+                Ok(None) => {}
+            }
         }
         anyhow::ensure!(!self.stop.is_cancelled(), "server is quiescing");
         anyhow::ensure!(
@@ -853,8 +873,14 @@ impl AuditController {
                     .load_operation_metadata(&operation)
                     .await
                 {
-                    let n = if failed || after.observation_pending {
-                        previous.map_or(1, |(_, _, n)| n.saturating_add(1))
+                    let parked = matches!(
+                        after.assignment_state,
+                        AssignmentState::Failed | AssignmentState::Unknown
+                    );
+                    let n = if failed || after.observation_pending || parked {
+                        previous
+                            .filter(|(previous_version, _, _)| *previous_version == version)
+                            .map_or(1, |(_, _, n)| n.saturating_add(1))
                     } else {
                         0
                     };
@@ -917,6 +943,114 @@ impl AuditController {
         if capture_state.disposition != "active" {
             return Ok(());
         }
+        if matches!(
+            run.assignment_state,
+            AssignmentState::Failed | AssignmentState::Unknown
+        ) {
+            // Reobserve the original before considering a replacement: shutdown
+            // and retained history may have become available since the failure.
+            drop(_gate);
+            let observation = tokio::time::timeout(
+                OBSERVATION_TIMEOUT,
+                self.dispatch.inspect(run.operation_id.clone()),
+            )
+            .await
+            .unwrap_or_else(|_| Observation::Deferred("execution_observation_timeout".into()));
+            if let Observation::Accepted {
+                operation_id,
+                snapshot_id,
+                receipt,
+                state: WorkState::Completed(raw),
+            } = &observation
+            {
+                if operation_id == &run.operation_id
+                    && snapshot_id == &run.snapshot_id
+                    && !receipt.is_empty()
+                {
+                    // Preserve text even if its completion evidence subsequently
+                    // fails validation. Never replace a recoverable opinion.
+                    if let Ok(text) = std::str::from_utf8(raw)
+                        && store.recovered_output(operation).await?.is_none()
+                    {
+                        store.retain_recovered_output(operation, text).await?;
+                    }
+                    let recovered = async {
+                        let snapshot = self
+                            .snapshots()
+                            .open(&SnapshotId::parse(run.snapshot_id.clone())?)
+                            .await?;
+                        let current = store.run_for_operation(operation).await?;
+                        let outcome = store
+                            .recover_completed_result(
+                                operation,
+                                current.attempt_revision,
+                                &snapshot,
+                                raw,
+                            )
+                            .await?;
+                        anyhow::Ok(matches!(
+                            outcome,
+                            super::store::ResultCommitOutcome::Committed { .. }
+                                | super::store::ResultCommitOutcome::AlreadyCommitted { .. }
+                        ))
+                    }
+                    .await;
+                    store
+                        .set_recovery_status(
+                            &run.assignment_id,
+                            if matches!(recovered, Ok(true)) {
+                                "original_terminal_output_recovered"
+                            } else {
+                                "original_terminal_output_requires_investigation"
+                            },
+                        )
+                        .await?;
+                    return self.progress(id).await;
+                }
+            }
+            let observed_failure = matches!(&observation, Observation::Unsubmitted(_))
+                || matches!(&observation, Observation::Rejected(_))
+                || matches!(&observation, Observation::Accepted { operation_id, snapshot_id, receipt, state: WorkState::Failed(_) | WorkState::Interrupted }
+                    if operation_id == &run.operation_id && snapshot_id == &run.snapshot_id && !receipt.is_empty());
+            if !observed_failure {
+                store
+                    .set_recovery_status(
+                        &run.assignment_id,
+                        "original_observation_incomplete_no_replacement",
+                    )
+                    .await?;
+                return self.progress(id).await;
+            }
+            if matches!(observation, Observation::Unsubmitted(_)) {
+                self.dispatch
+                    .cleanup_preparation(run.operation_id.clone())
+                    .await;
+            }
+            if store.recovery_ready(&run.assignment_id).await? {
+                let recovery = async {
+                    self.revalidate_retained(&run, true).await?;
+                    store.recover_attempt(&super::store::attempts::ControlRequest {
+                        run_id: run.run_id.clone(), assignment_id: run.assignment_id.clone(),
+                        action_key: format!("automatic-recovery:{}", run.reviewer_id),
+                        action: super::store::attempts::AttemptAction::Retry,
+                        reason: "Original execution verified stopped with no recoverable review output".into(),
+                        authorise_retry: true, acknowledge_possible_overlap: false,
+                    }).await?;
+                    anyhow::Ok(())
+                }.await;
+                if recovery.is_err() {
+                    store
+                        .set_recovery_status(
+                            &run.assignment_id,
+                            "automatic_recovery_refused_retained_policy",
+                        )
+                        .await?;
+                } else {
+                    self.wake.notify_one();
+                }
+            }
+            return self.progress(id).await;
+        }
         if let Some(failure) = capture_state.failure {
             if !matches!(
                 run.assignment_state,
@@ -925,14 +1059,13 @@ impl AuditController {
                     | AssignmentState::Cancelled
                     | AssignmentState::Unknown
             ) {
-                store
-                    .finish_operation(
-                        &run.operation_id,
-                        run.attempt_revision,
-                        AssignmentState::Failed,
-                        &failure,
-                    )
-                    .await?;
+                self.finish_observed_operation(
+                    &run.operation_id,
+                    run.attempt_revision,
+                    AssignmentState::Failed,
+                    &failure,
+                )
+                .await?;
                 return self.progress(id).await;
             }
         }
@@ -1326,14 +1459,13 @@ impl AuditController {
                 return Ok(());
             }
             Observation::Uncertain(diagnostic) => {
-                store
-                    .finish_operation(
-                        &run.operation_id,
-                        run.attempt_revision,
-                        AssignmentState::Unknown,
-                        &diagnostic,
-                    )
-                    .await?;
+                self.finish_observed_operation(
+                    &run.operation_id,
+                    run.attempt_revision,
+                    AssignmentState::Unknown,
+                    &diagnostic,
+                )
+                .await?;
                 return Ok(());
             }
             Observation::Accepted {
@@ -1348,18 +1480,17 @@ impl AuditController {
                 (receipt, state)
             }
             Observation::Rejected(reason) if run.operation_state == OperationState::Dispatching => {
-                store
-                    .finish_operation(
-                        &run.operation_id,
-                        run.attempt_revision,
-                        if run.control_intent == "cancel_requested" {
-                            AssignmentState::Cancelled
-                        } else {
-                            AssignmentState::Failed
-                        },
-                        &reason,
-                    )
-                    .await?;
+                self.finish_observed_operation(
+                    &run.operation_id,
+                    run.attempt_revision,
+                    if run.control_intent == "cancel_requested" {
+                        AssignmentState::Cancelled
+                    } else {
+                        AssignmentState::Failed
+                    },
+                    &reason,
+                )
+                .await?;
                 return Ok(());
             }
             Observation::Accepted {
@@ -1367,25 +1498,23 @@ impl AuditController {
                 snapshot_id,
                 ..
             } if operation_id != run.operation_id || snapshot_id != run.snapshot_id => {
-                store
-                    .finish_operation(
-                        &run.operation_id,
-                        run.attempt_revision,
-                        AssignmentState::Unknown,
-                        "acceptance_identity_contradiction",
-                    )
-                    .await?;
+                self.finish_observed_operation(
+                    &run.operation_id,
+                    run.attempt_revision,
+                    AssignmentState::Unknown,
+                    "acceptance_identity_contradiction",
+                )
+                .await?;
                 return Ok(());
             }
             Observation::Rejected(reason) => {
-                store
-                    .finish_operation(
-                        &run.operation_id,
-                        run.attempt_revision,
-                        AssignmentState::Unknown,
-                        &format!("rejection_contradicts_acceptance: {reason}"),
-                    )
-                    .await?;
+                self.finish_observed_operation(
+                    &run.operation_id,
+                    run.attempt_revision,
+                    AssignmentState::Unknown,
+                    &format!("rejection_contradicts_acceptance: {reason}"),
+                )
+                .await?;
                 return Ok(());
             }
             Observation::Absent | Observation::Accepted { .. } => {
@@ -1457,14 +1586,13 @@ impl AuditController {
                 };
                 let capture = self.dispatch.capture(&run.operation_id);
                 if let Some(failure) = capture.as_ref().and_then(|capture| capture.failure()) {
-                    store
-                        .finish_operation(
-                            &run.operation_id,
-                            revision,
-                            AssignmentState::Failed,
-                            failure,
-                        )
-                        .await?;
+                    self.finish_observed_operation(
+                        &run.operation_id,
+                        revision,
+                        AssignmentState::Failed,
+                        failure,
+                    )
+                    .await?;
                     return Ok(());
                 }
                 let prefix = capture.as_ref().map(|capture| capture.control_prefix());

@@ -2013,11 +2013,14 @@ impl ResponsesHttpExecutor<'_> {
         inference_trace: &InferenceTraceContext,
         generation: Option<codex_api::GenerationRequest>,
     ) -> Result<ResponseStream> {
-        if generation.is_none() && self.client.generation_admission.is_some() {
-            return Err(CodexErr::InvalidRequest(
-                "background generation is disabled for this isolated execution".to_owned(),
-            ));
-        }
+        // Standalone compaction uses this executor directly. It belongs to the
+        // same authorised execution and retains the ordinary ownership fence.
+        let generation = generation.or_else(|| {
+            self.client
+                .generation_admission
+                .as_ref()
+                .map(|authority| authority.request(uuid::Uuid::now_v7().to_string()))
+        });
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
             .as_ref()
@@ -2162,10 +2165,7 @@ impl ResponsesHttpExecutor<'_> {
                         .client
                         .state
                         .provider
-                        .is_recoverable_auth_error(&unauthorized_transport)
-                        && !generation
-                            .as_ref()
-                            .is_some_and(|request| request.attempted()) =>
+                        .is_recoverable_auth_error(&unauthorized_transport) =>
                 {
                     let response_debug_context =
                         extract_response_debug_context(&unauthorized_transport);
@@ -2666,15 +2666,7 @@ impl ModelClientSession {
             .client
             .generation_admission
             .as_ref()
-            .map(|authority| {
-                logical_generation_id(
-                    &self.client.state.thread_id,
-                    responses_metadata.turn_id.as_deref(),
-                    &prompt.input,
-                )
-                .map(|id| authority.request(id))
-            })
-            .transpose()?;
+            .map(|authority| authority.request(uuid::Uuid::now_v7().to_string()));
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {
@@ -2740,19 +2732,6 @@ impl ModelClientSession {
         self.websocket_session = WebsocketSession::default();
         activated
     }
-}
-
-// Keep the logical identity across outer auth/transport recovery as well as
-// internal retries. A real tool result changes input; a resend cannot rename it.
-fn logical_generation_id(
-    thread: &ThreadId,
-    turn: Option<&str>,
-    input: &[ResponseItem],
-) -> Result<String> {
-    let identity = serde_json::to_vec(&(thread, turn, input)).map_err(|_| {
-        CodexErr::InvalidRequest("generation identity could not be encoded".to_owned())
-    })?;
-    Ok(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &identity).to_string())
 }
 
 /// Stamp a ResponsesWsRequest with the current time.
@@ -2865,7 +2844,6 @@ where
 
     tokio::spawn(async move {
         let mut logged_error = false;
-        let mut completed = false;
         let collect_output_items =
             last_response_tx.is_some() || inference_trace_attempt.needs_output_items();
         let mut items_added: Vec<ResponseItem> = Vec::new();
@@ -2953,7 +2931,6 @@ where
                     reasoning_removals,
                     end_turn,
                 }) => {
-                    completed = true;
                     feedback_tags!(last_model_response_id = &response_id);
                     if let Some(usage) = &token_usage {
                         session_telemetry.sse_event_completed(usage, ttft_ms);
@@ -3054,14 +3031,6 @@ where
             upstream_request_id,
             &items_added,
         );
-        if generation.is_some() && !completed {
-            let _ = tx_event
-                .send(Err(CodexErr::InvalidRequest(
-                    "generation ended without completion; automatic resubmission refused"
-                        .to_owned(),
-                )))
-                .await;
-        }
     });
 
     ResponseStream {

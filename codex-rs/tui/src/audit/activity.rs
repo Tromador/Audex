@@ -33,6 +33,8 @@ pub(crate) struct ActivityViewer {
     connected: bool,
     assistant_seen: bool,
     opinion_shown: Option<String>,
+    recovered_shown: Option<String>,
+    recovered_cell: Option<usize>,
     notice: Option<String>,
 }
 
@@ -60,6 +62,8 @@ impl ActivityViewer {
             connected: false,
             assistant_seen: false,
             opinion_shown: None,
+            recovered_shown: None,
+            recovered_cell: None,
             notice: None,
         }
     }
@@ -95,6 +99,30 @@ impl ActivityViewer {
         }
         self.connected = true;
         self.target = page.attempt;
+        let recovered = page.recovered_output.filter(|_| {
+            !self.target.completed
+                && matches!(self.target.assignment_state.as_str(), "failed" | "unknown")
+        });
+        if self.recovered_shown != recovered {
+            let mut lines = Vec::new();
+            if let Some(text) = &recovered {
+                lines.push(Line::from(
+                    "Recovered original output — completion unverified; Retry requires your decision",
+                ));
+                lines.extend(
+                    sanitize_user_text(text.as_str().into())
+                        .lines()
+                        .map(|line| Line::from(line.to_owned())),
+                );
+            }
+            let cell = Arc::new(PlainHistoryCell::new(lines));
+            if let Some(index) = self.recovered_cell {
+                self.transcript.consolidate_cells(index..index + 1, cell);
+            } else {
+                self.recovered_cell = Some(self.transcript.prepend(vec![cell]));
+            }
+            self.recovered_shown = recovered;
+        }
         let bound = self
             .target
             .output_cutoff
@@ -205,6 +233,8 @@ impl ActivityViewer {
         };
         let activity = if self.opinion_shown.is_some() {
             "Full completed opinion retained; structured extraction is separate"
+        } else if self.recovered_shown.is_some() {
+            "Recovered original output retained; completion unverified"
         } else if self.cursor == 0 && self.target.operation_state == "planned" {
             "Queued; no observable committed activity"
         } else if self.cursor == 0 {

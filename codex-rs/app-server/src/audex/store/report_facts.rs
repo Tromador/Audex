@@ -65,8 +65,9 @@ pub(super) async fn collect(
         expected_model: row.try_get("expected_model")?, observed_model: row.try_get("observed_model")?,
         state: row.try_get("identity_state")?, evidence_scope: row.try_get("model_scope")?,
     })).collect::<Result<Vec<_>, AuditStoreError>>()?;
-    let receipts = sqlx::query("SELECT request_id,operation_id,execution_id,transport,admitted_at_ms,send_started_at_ms,confirmed_at_ms,provider_response_id FROM audit_request_admissions WHERE assignment_id=? ORDER BY admitted_at_ms,request_id")
+    let receipts = sqlx::query("SELECT request_id,operation_id,execution_id,transport,admitted_at_ms,send_started_at_ms,confirmed_at_ms,provider_response_id,send_count FROM audit_request_admissions WHERE assignment_id=? ORDER BY admitted_at_ms,request_id")
         .bind(assignment).fetch_all(&mut *connection).await?.into_iter().map(|row| Ok(GenerationReceipt {
+            observed_send_checks: Some(row.try_get("send_count")?),
             request_id: row.try_get("request_id")?, operation_id: row.try_get("operation_id")?, execution_id: row.try_get("execution_id")?,
             transport: row.try_get("transport")?, admitted_at_ms: row.try_get("admitted_at_ms")?, send_started_at_ms: row.try_get("send_started_at_ms")?,
             confirmed_at_ms: row.try_get("confirmed_at_ms")?, provider_response_id: row.try_get("provider_response_id")?,
@@ -157,12 +158,15 @@ pub(super) async fn collect(
         .count() as u64;
     let admission = retained.map(|input| if subscription {
         "Bound successful client terminal and verified per-message identity; no Audex per-generation admission. Provider-internal corrective requests may occur."
+    } else if input.bindings.as_ref().is_some_and(|b| b.limits.automatic_compaction) {
+        "Execution ownership and served-model evidence retained; retries and compaction managed by the native client. Send counts are observations, not billing guarantees."
     } else if input.version == 2 || input.require_served_identity {
         "Strict per-generation Audex admission and verified served-model identity; no automatic inference replay."
     } else {
         "Legacy native admission policy; served-model identity was not required."
     }.to_owned());
     Ok(ProviderFacts {
+        operator_limits: None,
         executor: Fact::from_option(
             retained.map(RetainedInput::adapter),
             "no retained executor binding",
@@ -211,7 +215,11 @@ pub(super) async fn collect(
         },
         subscription: SubscriptionFacts {
             repair_disclosure: if subscription {
-                let mut disclosure = "Subscription permits the qualified client corrective requests without Audex generation admission. Interruption is best effort; initiated sends and remote charges are unconfirmed.".to_owned();
+                let mut disclosure = if retained.and_then(|input| input.bindings.as_ref()).is_some_and(|binding| binding.limits.automatic_compaction) {
+                    "Official-client retries, continuation and automatic compaction remain within this reviewer execution. Remote charges are unavailable; client costs are estimates."
+                } else {
+                    "Subscription permits the qualified client corrective requests without Audex generation admission. Interruption is best effort; initiated sends and remote charges are unconfirmed."
+                }.to_owned();
                 for notice in &policy_notices {
                     disclosure.push('\n');
                     disclosure.push_str(notice);

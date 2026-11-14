@@ -36,6 +36,7 @@ mod foundations;
 pub(super) mod launch;
 mod launch_lifecycle;
 mod preflight;
+mod recovery;
 mod report_facts;
 mod reporting;
 #[cfg(test)]
@@ -1211,11 +1212,19 @@ impl AuditStore {
         owner: &str,
         now: i64,
     ) -> Result<bool, AuditStoreError> {
-        Ok(sqlx::query("INSERT INTO audit_execution(operation_id,thread_id,policy_digest) SELECT id,?,? FROM operations
+        #[cfg(not(target_os = "linux"))]
+        let process: Option<String> = None;
+        #[cfg(target_os = "linux")]
+        let process = codex_app_server_daemon::read_linux_process_identity(std::process::id())
+            .ok()
+            .flatten()
+            .map(|identity| serde_json::to_string(&identity))
+            .transpose()?;
+        Ok(sqlx::query("INSERT INTO audit_execution(operation_id,thread_id,policy_digest,owner_process_json) SELECT id,?,?,? FROM operations
             WHERE id=? AND state='dispatching' AND submission_boundary='unsubmitted' AND lease_owner=? AND lease_expires_at_ms>?
             AND NOT EXISTS (SELECT 1 FROM audit_capacity_releases c WHERE c.operation_id=operations.id)
             ON CONFLICT(operation_id) DO NOTHING")
-            .bind(thread).bind(policy).bind(operation).bind(owner).bind(now).execute(&self.pool).await?.rows_affected() == 1)
+            .bind(thread).bind(policy).bind(process).bind(operation).bind(owner).bind(now).execute(&self.pool).await?.rows_affected() == 1)
     }
 
     /// Positive evidence only: called after Started, or after reading a matching
@@ -1429,10 +1438,22 @@ impl AuditStore {
             activity::append_batch(&mut tx, identity, inputs).await?;
         }
         let now = now_millis();
-        sqlx::query("UPDATE operations SET state=?, error=?, retry_classification='never_automatically_retry',
-            lease_owner=NULL, lease_expires_at_ms=NULL, updated_at_ms=? WHERE id=?")
-            .bind(operation).bind(bounded_error(reason.to_string())).bind(now).bind(operation_id)
-            .execute(&mut *tx).await?;
+        let recovery_policy = if terminal == AssignmentState::Cancelled {
+            "operator_stopped"
+        } else {
+            "observe_original_before_recovery"
+        };
+        sqlx::query(
+            "UPDATE operations SET state=?, error=?, retry_classification=?,
+            lease_owner=NULL, lease_expires_at_ms=NULL, updated_at_ms=? WHERE id=?",
+        )
+        .bind(operation)
+        .bind(bounded_error(reason.to_string()))
+        .bind(recovery_policy)
+        .bind(now)
+        .bind(operation_id)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "UPDATE reviewer_assignments SET state=?, failure_code=?, updated_at_ms=? WHERE id=?",
         )
@@ -1886,6 +1907,46 @@ impl AuditStore {
         raw_result: &[u8],
         prefix: Option<(&activity::CaptureIdentity, &[activity::ActivityInput])>,
     ) -> Result<ResultCommitOutcome, AuditStoreError> {
+        self.commit_observed_result(
+            operation_id,
+            expected_revision,
+            snapshot,
+            raw_result,
+            prefix,
+            false,
+        )
+        .await
+    }
+
+    /// A positive terminal observation may settle an active failed/unknown
+    /// original. It passes the same immutable-result and model-evidence checks.
+    pub(super) async fn recover_completed_result(
+        &self,
+        operation_id: &str,
+        expected_revision: i64,
+        snapshot: &super::snapshot::SnapshotHandle,
+        raw_result: &[u8],
+    ) -> Result<ResultCommitOutcome, AuditStoreError> {
+        self.commit_observed_result(
+            operation_id,
+            expected_revision,
+            snapshot,
+            raw_result,
+            None,
+            true,
+        )
+        .await
+    }
+
+    async fn commit_observed_result(
+        &self,
+        operation_id: &str,
+        expected_revision: i64,
+        snapshot: &super::snapshot::SnapshotHandle,
+        raw_result: &[u8],
+        prefix: Option<(&activity::CaptureIdentity, &[activity::ActivityInput])>,
+        recovered: bool,
+    ) -> Result<ResultCommitOutcome, AuditStoreError> {
         let manifest = snapshot.manifest();
         let digest = sha256_hex(raw_result);
         let initial = read_operation_context(&self.pool, operation_id).await?;
@@ -1895,8 +1956,19 @@ impl AuditStore {
             ));
         }
         let existing = read_result_status(&self.pool, &initial.assignment_id).await?;
-        if let Some(outcome) = existing_result_outcome(existing, &digest, initial.attempt_revision)?
+        let existing_outcome = if recovered
+            && matches!(
+                existing.state,
+                AssignmentState::Failed | AssignmentState::Unknown
+            )
+            && existing.digest.is_none()
+            && existing.relative_path.is_none()
         {
+            None
+        } else {
+            existing_result_outcome(existing, &digest, initial.attempt_revision)?
+        };
+        if let Some(outcome) = existing_outcome {
             match &outcome {
                 ResultCommitOutcome::AlreadyCommitted {
                     digest,
@@ -1916,12 +1988,34 @@ impl AuditStore {
             }
             return Ok(outcome);
         }
-        attempts::require_active_attempt(&mut *self.pool.acquire().await?, &initial.assignment_id)
+        if recovered {
+            recovery::require_recoverable_contribution(
+                &mut *self.pool.acquire().await?,
+                &initial.assignment_id,
+            )
             .await?;
+        } else {
+            attempts::require_active_attempt(
+                &mut *self.pool.acquire().await?,
+                &initial.assignment_id,
+            )
+            .await?;
+        }
         require_revision(expected_revision, initial.attempt_revision)?;
         require_phase(initial.run_phase, RunPhase::Reviewing)?;
-        require_assignment_state(initial.assignment_state, AssignmentState::Running)?;
-        require_operation_state(initial.operation_state, OperationState::Accepted)?;
+        if !(recovered
+            && matches!(
+                initial.assignment_state,
+                AssignmentState::Failed | AssignmentState::Unknown
+            )
+            && matches!(
+                initial.operation_state,
+                OperationState::Failed | OperationState::Unknown
+            ))
+        {
+            require_assignment_state(initial.assignment_state, AssignmentState::Running)?;
+            require_operation_state(initial.operation_state, OperationState::Accepted)?;
+        }
 
         let relative_path = format!("results/{}/{}.json", initial.assignment_id, digest);
         let published_path = if raw_result.len() <= result::MAX_RAW_RESULT_BYTES {
@@ -1956,10 +2050,9 @@ impl AuditStore {
         #[cfg(test)]
         self.wait_transition_for_test("result").await;
         let context = read_operation_context(&mut *transaction, operation_id).await?;
-        if matches!(
-            context.assignment_state,
-            AssignmentState::Succeeded | AssignmentState::Failed
-        ) {
+        if context.assignment_state == AssignmentState::Succeeded
+            || (!recovered && context.assignment_state == AssignmentState::Failed)
+        {
             let existing = read_result_status(&mut *transaction, &context.assignment_id).await?;
             let outcome = existing_result_outcome(existing, &digest, context.attempt_revision)?
                 .ok_or_else(|| {
@@ -1987,7 +2080,12 @@ impl AuditStore {
             }
             return Ok(outcome);
         }
-        attempts::require_active_attempt(&mut transaction, &context.assignment_id).await?;
+        if recovered {
+            recovery::require_recoverable_contribution(&mut transaction, &context.assignment_id)
+                .await?;
+        } else {
+            attempts::require_active_attempt(&mut transaction, &context.assignment_id).await?;
+        }
         if let Some((identity, inputs)) = prefix {
             if identity.assignment_id != context.assignment_id {
                 return Err(AuditStoreError::InvalidInput(
@@ -2005,8 +2103,19 @@ impl AuditStore {
         }
         require_revision(expected_revision, context.attempt_revision)?;
         require_phase(context.run_phase, RunPhase::Reviewing)?;
-        require_assignment_state(context.assignment_state, AssignmentState::Running)?;
-        require_operation_state(context.operation_state, OperationState::Accepted)?;
+        if !(recovered
+            && matches!(
+                context.assignment_state,
+                AssignmentState::Failed | AssignmentState::Unknown
+            )
+            && matches!(
+                context.operation_state,
+                OperationState::Failed | OperationState::Unknown
+            ))
+        {
+            require_assignment_state(context.assignment_state, AssignmentState::Running)?;
+            require_operation_state(context.operation_state, OperationState::Accepted)?;
+        }
         let next_revision = context.attempt_revision + 1;
         let now = now_millis();
         attribution::require_completion(&mut transaction, &context.assignment_id, &digest).await?;
@@ -2038,7 +2147,7 @@ impl AuditStore {
         .await?;
         sqlx::query(
             "UPDATE reviewer_assignments
-             SET state='succeeded', result_digest=?, result_path=?,
+             SET state='succeeded', failure_code=NULL, result_digest=?, result_path=?,
                  client_terminal_digest=(SELECT artefact_digest FROM audit_client_terminal_evidence WHERE assignment_id=reviewer_assignments.id),
                  result_schema_version=?, summary=?, result_extraction_json=?, result_extraction_digest=?, updated_at_ms=?
              WHERE id=?",

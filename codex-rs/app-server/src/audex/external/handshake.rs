@@ -60,6 +60,7 @@ async fn qualify_inner(
     audit: Option<(&AuditStore, &AdmissionIdentity)>,
 ) -> anyhow::Result<Spawned> {
     let Spawned {
+        client_version: observed_version,
         owned,
         stdin,
         stdout,
@@ -181,6 +182,7 @@ async fn qualify_inner(
     })
     .await??;
     Ok(Spawned {
+        client_version: observed_version,
         owned,
         stdin: stdin.into_inner(),
         stdout: stdout.into_inner(),

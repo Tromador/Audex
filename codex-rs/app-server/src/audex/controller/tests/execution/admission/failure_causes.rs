@@ -33,7 +33,7 @@ async fn failure_record(
     })
     .await??;
     let (error, retry) = recovery::issue(controller, &run.operation_id).await?;
-    assert_eq!(retry.as_deref(), Some("never_automatically_retry"));
+    assert_eq!(retry.as_deref(), Some("observe_original_before_recovery"));
     let error = error.expect("retained provider failure");
     let diagnostic: Value = serde_json::from_str(&error)?;
     assert_eq!(diagnostic["version"], 1);
@@ -57,7 +57,7 @@ async fn failure_record(
     assert!(attempt["rawResult"].is_null());
     assert!(store.result_extraction(&run.assignment_id).await?.is_none());
     let evidence = &attempt["attempt"]["modelEvidence"];
-    assert_eq!(evidence.as_array().unwrap().len(), 1);
+    assert!(!evidence.as_array().unwrap().is_empty());
     let attribution: Option<String> =
         sqlx::query_scalar("SELECT attribution_failure FROM audit_attempts WHERE assignment_id=?")
             .bind(&run.assignment_id)
@@ -91,7 +91,9 @@ async fn failure_record(
         controller.tick().await?;
     }
     let records = store.generation_records(&run.assignment_id).await?;
-    assert_eq!(records.len(), 1, "no additional admission or fallback");
+    assert_eq!(records.len(), evidence.as_array().unwrap().len());
+    assert_eq!(store.attempts(&run.run_id).await?.len(), 1);
+    assert_eq!(store.list_run_ids("", 100).await?.len(), 1);
     assert!(records[0].send_started_at_ms.is_some());
     let summary = json!({
         "category":category,"identityState":evidence[0]["state"],
@@ -204,7 +206,7 @@ pub(super) async fn websocket_errors() -> anyhow::Result<()> {
     }
     let mut actual = Vec::new();
     let mut wanted = Vec::new();
-    for (name, events, expected) in cases {
+    for (name, events, mut expected) in cases {
         // No synthetic identity headers: early failures have no model evidence.
         let provider = Provider::Websocket(
             responses::start_websocket_server_with_headers(vec![
@@ -220,14 +222,32 @@ pub(super) async fn websocket_errors() -> anyhow::Result<()> {
             ])
             .await,
         );
+        // Keep ordinary HTTP fallback available at the same endpoint. The
+        // WebSocket-only helper otherwise turns it into an unrelated URL error.
+        let fallback = responses::start_mock_server().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(
+                ResponseTemplate::new(503).set_body_json(wrapped_error(503, "server_error")),
+            )
+            .mount(&fallback)
+            .await;
+        let (endpoint, proxy) = dual_transport(&provider.uri(), &fallback.uri()).await?;
         let temp = tempfile::tempdir()?;
         let (controller, threads) = fixture_with_transport(
             &temp,
-            &provider.uri(),
+            &endpoint,
             CodexAuth::from_api_key("local-dummy"),
             false,
             native_reader(),
-            DispatchTestHooks::default(),
+            DispatchTestHooks {
+                config: Some(Arc::new(|config| {
+                    // This fixture isolates exhausted-failure classification.
+                    config.model_provider.request_max_retries = Some(0);
+                    config.model_provider.stream_max_retries = Some(0);
+                })),
+                ..Default::default()
+            },
             true,
         )
         .await;
@@ -241,6 +261,23 @@ pub(super) async fn websocket_errors() -> anyhow::Result<()> {
             .await?
             .expect("execution");
         settled(&threads, &thread).await?;
+        let fallback_requests = fallback.received_requests().await.unwrap();
+        let falls_back = matches!(
+            name.as_str(),
+            "ws-401" | "ws-503" | "ws-400" | "ws-rate-limit-false" | "ws-rate-limit-true"
+        );
+        assert_eq!(fallback_requests.len(), usize::from(falls_back), "{name}");
+        if falls_back {
+            expected["category"] = serde_json::to_value(CodexErrorInfo::HttpConnectionFailed {
+                http_status_code: Some(503),
+            })?;
+        }
+        let records = controller
+            .store()
+            .await?
+            .generation_records(&run.assignment_id)
+            .await?;
+        assert_eq!(records.len(), 1 + usize::from(falls_back), "{name}");
         actual.push((
             name.clone(),
             failure_record(&controller, &run, &name).await?,
@@ -248,12 +285,14 @@ pub(super) async fn websocket_errors() -> anyhow::Result<()> {
         wanted.push((name, expected));
         assert_eq!(provider.generations().await, 1, "no resend");
         if let Provider::Websocket(server) = &provider {
-            assert_eq!(server.handshakes().len(), 1, "no reconnect or fallback");
+            assert_eq!(server.handshakes().len(), 1, "no WebSocket reconnect");
         }
         threads
             .shutdown_all_threads_bounded(Duration::from_secs(5))
             .await;
         provider.shutdown().await;
+        proxy.abort();
+        let _ = proxy.await;
     }
     assert_eq!(actual, wanted);
     Ok(())
@@ -301,7 +340,14 @@ fn native_http_failure_categories_survive_public_reporting() -> anyhow::Result<(
                 CodexAuth::from_api_key("local-dummy"),
                 false,
                 native_reader(),
-                DispatchTestHooks::default(),
+                DispatchTestHooks {
+                    config: Some(Arc::new(|config| {
+                        // This fixture isolates exhausted-failure classification.
+                        config.model_provider.request_max_retries = Some(0);
+                        config.model_provider.stream_max_retries = Some(0);
+                    })),
+                    ..Default::default()
+                },
                 false,
             )
             .await;
@@ -335,4 +381,32 @@ fn native_http_failure_categories_survive_public_reporting() -> anyhow::Result<(
         assert_eq!(actual, wanted);
         Ok(())
     })
+}
+
+// A loopback byte relay keeps the established WS and HTTP fixtures on one URL.
+async fn dual_transport(
+    ws: &str,
+    http: &str,
+) -> anyhow::Result<(String, tokio::task::JoinHandle<()>)> {
+    let ws = ws.trim_start_matches("ws://").to_owned();
+    let http = http.trim_start_matches("http://").to_owned();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let uri = format!("http://{}", listener.local_addr()?);
+    let task = tokio::spawn(async move {
+        let mut clients = tokio::task::JoinSet::new();
+        while let Ok((mut incoming, _)) = listener.accept().await {
+            let (ws, http) = (ws.clone(), http.clone());
+            clients.spawn(async move {
+                let mut prefix = [0; 1];
+                if incoming.peek(&mut prefix).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                let destination = if prefix[0] == b'G' { ws } else { http };
+                if let Ok(mut outgoing) = tokio::net::TcpStream::connect(destination).await {
+                    let _ = tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await;
+                }
+            });
+        }
+    });
+    Ok((uri, task))
 }

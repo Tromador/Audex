@@ -57,7 +57,6 @@ impl Generation {
 
 pub(super) struct Notice {
     pub activity: ActivityInput,
-    pub anomaly: bool,
 }
 
 #[derive(Default)]
@@ -108,9 +107,9 @@ impl Tracker {
         let label = if within_qualification {
             "client-initiated repair occurred"
         } else {
-            "client request policy anomaly"
+            "client continuation observed"
         };
-        Some(Notice { anomaly: !within_qualification, activity: ActivityInput {
+        Some(Notice { activity: ActivityInput {
             producer_key: key,
             turn_id: session.into(),
             item_id: anchor.into(),
@@ -123,7 +122,7 @@ impl Tracker {
                 "predecessor_message_id": self.last,
                 "stop_reason": self.last.as_ref().and_then(|id| self.messages.get(id)).and_then(|g| g.stop.as_deref()),
                 "limit": "observed client behaviour; not Audex Retry or a request ceiling",
-                "stop": "best-effort interruption requested; send prevention and remote charges unconfirmed"
+                "stop": "client-managed continuation; remote charges unconfirmed"
             }).to_string(),
             text_offset: None,
         }})
@@ -252,6 +251,11 @@ impl Tracker {
                 } else {
                     notice = self.notice(session, uuid, None, "unexpected_client_prompt");
                 }
+            }
+            Some("system") if value["subtype"] == "compact_boundary" => {
+                self.last = None;
+                self.prompted = None;
+                self.chain = None;
             }
             Some("system") if value["subtype"] == "api_retry" => {
                 notice = self.notice(session, uuid, None, "client_resend_observed");

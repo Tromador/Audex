@@ -144,6 +144,7 @@ impl AuditController {
             revision: record.attempt_revision,
             owner_generation: record.owner_generation,
             current: record.current,
+            recovery_status: store.recovery_status(&record.assignment_id).await?,
             retry_eligible: record.current
                 && !record.collection_ready
                 && record.control_intent == "active"
@@ -232,6 +233,14 @@ impl AuditController {
         let next_sequence = entries.last().map_or(after, |entry| entry.sequence);
         Ok(AuditAttemptReadResponse {
             attempt: self.attempt_view(&record).await?,
+            recovered_output: if matches!(
+                record.assignment_state,
+                AssignmentState::Failed | AssignmentState::Unknown
+            ) {
+                store.recovered_output(&record.operation_id).await?
+            } else {
+                None
+            },
             entries,
             next_sequence,
             raw_result: store

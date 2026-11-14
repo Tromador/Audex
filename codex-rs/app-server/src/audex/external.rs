@@ -173,19 +173,20 @@ impl ExternalDispatch {
         // process-lifetime spawning thread remains alive throughout.
         anyhow::ensure!(
             store
-                .record_launch_child(&identity, &spawned.owned.identity)
+                .record_launch_child(&identity, &spawned.owned.identity, &spawned.client_version)
                 .await?,
             "child identity refused"
         );
         #[cfg(test)]
         self.checkpoint("child_identity").await;
+        let client_version = spawned.client_version.clone();
         let spawned = if let Some(policy) = &mut prepared.policy {
             handshake::qualify(
                 spawned,
                 policy,
                 input.resolved_model.as_deref().expect("decoded model"),
                 prepared.billing_source,
-                &prepared.record.client_version,
+                &client_version,
                 store,
                 &identity,
             )
@@ -336,6 +337,29 @@ impl ExternalDispatch {
             }
             Err(_) => return Observation::Uncertain("external_terminal_evidence_invalid".into()),
             Ok(None) => {}
+        }
+        // A durable lifecycle observation proves local termination independently
+        // of acceptance or stream capture. Terminal output above still wins.
+        match store.local_execution_view(operation).await {
+            Ok(Some(local)) if local.stop_confirmed_at_ms.is_some() => {
+                let reason = failure.unwrap_or_else(|| {
+                    "external_execution_stopped_without_terminal_confirmation".into()
+                });
+                return if run.operation_state == super::store::OperationState::Accepted
+                    || launch.client_accepted_at_ms.is_some()
+                {
+                    accepted(WorkState::Failed(reason))
+                } else if matches!(
+                    store.submission_boundary(operation).await,
+                    Ok(SubmissionBoundary::Unsubmitted)
+                ) {
+                    Observation::Unsubmitted(reason)
+                } else {
+                    Observation::Rejected(reason)
+                };
+            }
+            Err(_) => return Observation::Deferred("external_lifecycle_unavailable".into()),
+            _ => {}
         }
         if let Some(failure) = failure {
             return if run.operation_state == super::store::OperationState::Accepted

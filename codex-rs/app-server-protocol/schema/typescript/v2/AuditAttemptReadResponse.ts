@@ -8,4 +8,8 @@ export type AuditAttemptReadResponse = { attempt: AuditAttemptView, entries: Arr
 /**
  * The original terminal response, if retained; invalid JSON stays invalid.
  */
-rawResult: string | null, };
+rawResult: string | null,
+/**
+ * Visible text recovered from the original history without terminal confirmation.
+ */
+recoveredOutput?: string, };

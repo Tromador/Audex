@@ -354,7 +354,7 @@ async fn does_not_retry_a_non_replayable_streaming_request() {
     );
 }
 
-fn use_native_tls_for_direct_route(pool: &RouteAwareClientPool) {
+pub(super) fn use_native_tls_for_direct_route(pool: &RouteAwareClientPool) {
     // Start with reqwest's default native backend even when the environment supplies a CA bundle.
     let client = reqwest::Client::builder()
         .no_proxy()

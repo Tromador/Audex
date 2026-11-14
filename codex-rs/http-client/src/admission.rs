@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub type AdmissionFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
 
-/// Implementations must commit one-use admission before returning success.
-/// A receipt is operational evidence; it does not authorise another request.
+/// Implementations bind a request to its authorised execution before sending.
+/// Client-managed retries reuse that binding and recheck the durable stop fence.
+/// A receipt is operational evidence, not proof of exactly-once provider billing.
 pub trait GenerationAdmission: Debug + Send + Sync {
     fn admit<'a>(&'a self, request_id: &'a str, transport: &'a str) -> AdmissionFuture<'a, ()>;
     fn may_send<'a>(&'a self, request_id: &'a str) -> AdmissionFuture<'a, bool>;
@@ -68,16 +69,13 @@ impl GenerationRequest {
 
     /// Invoked only after auth/preparation and, for WS, the writer lock.
     pub async fn admit(&self, transport: &str) -> Result<(), TransportError> {
-        if self.attempted.swap(true, Ordering::SeqCst) {
-            return Err(TransportError::GenerationDenied(
-                "generation admission is one-use".to_owned(),
-            ));
+        if !self.attempted.swap(true, Ordering::SeqCst) {
+            self.control
+                .0
+                .admit(&self.request_id, transport)
+                .await
+                .map_err(TransportError::GenerationDenied)?;
         }
-        self.control
-            .0
-            .admit(&self.request_id, transport)
-            .await
-            .map_err(TransportError::GenerationDenied)?;
         // Suppress a pre-admitted send where the durable stop is already visible.
         // The admission remains irreversible even when this check refuses sending.
         if !self

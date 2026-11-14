@@ -67,11 +67,12 @@ assert "--setting-sources=user" in sys.argv
 assert os.environ["PATH"] == "/usr/bin:/bin"
 assert os.environ["USER"] == "audex-reviewer"
 assert os.environ["LANG"] == "C.UTF-8" and os.environ["TERM"] == "dumb"
-for key in ["CLAUDE_CODE_MAX_RETRIES", "CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES"]:
-    assert os.environ[key] == "0"
-for key in ["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK", "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK",
-            "CLAUDE_CODE_DISABLE_REFUSAL_RETRY", "DISABLE_COMPACT", "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
-            "CLAUDE_CODE_DISABLE_CLAUDE_MDS", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]:
+for key in ["CLAUDE_CODE_MAX_RETRIES", "CLAUDE_CODE_NONSTREAMING_TIMEOUT_RETRIES",
+            "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK", "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK",
+            "CLAUDE_CODE_DISABLE_REFUSAL_RETRY", "DISABLE_COMPACT"]:
+    assert key not in os.environ
+for key in ["CLAUDE_CODE_DISABLE_AUTO_MEMORY", "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
+            "CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]:
     assert os.environ[key] == "1"
 assert sys.argv[sys.argv.index("--tools") + 1] == ""
 assert sys.argv[sys.argv.index("--allowedTools") + 1].split(",") == [f"mcp__audex_source__{n}" for n in ["list", "read", "search"]]

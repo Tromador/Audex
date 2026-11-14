@@ -9,11 +9,13 @@ use std::path::{Path, PathBuf};
 
 pub(super) fn executable(path: &str) -> anyhow::Result<PathBuf> {
     let path = PathBuf::from(path);
+    anyhow::ensure!(path.is_absolute(), "client executable must be absolute");
+    // Resolve the supported launcher for this execution, retaining its digest.
+    // A later client update is selected by a new commissioning decision.
+    let path = path.canonicalize()?;
     anyhow::ensure!(
-        path == path.canonicalize()?
-            && path.is_file()
-            && std::fs::metadata(&path)?.mode() & 0o111 != 0,
-        "client executable must be resolved and executable"
+        path.is_file() && std::fs::metadata(&path)?.mode() & 0o111 != 0,
+        "client executable must be executable"
     );
     Ok(path)
 }

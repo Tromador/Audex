@@ -95,6 +95,7 @@ fn request() -> ResponsesApiRequest {
         stream_options: None,
         include: Vec::new(),
         prompt_cache_key: None,
+        prompt_cache_options: None,
         text: None,
         client_metadata: None,
         access_programs: None,
@@ -158,7 +159,7 @@ async fn asynchronous_http_auth_does_not_admit_until_after_auth_and_stop_prevent
 }
 
 #[tokio::test]
-async fn guarded_http_failure_sends_once_while_ordinary_http_keeps_its_retry_behaviour() {
+async fn guarded_http_failure_uses_the_same_client_retry_as_ordinary_http() {
     for guarded in [true, false] {
         let server = MockServer::start().await;
         let seen = Arc::new(AtomicUsize::new(0));
@@ -193,21 +194,8 @@ async fn guarded_http_failure_sends_once_while_ordinary_http_keeps_its_retry_beh
                 None,
             )
             .await;
-        if guarded {
-            assert!(
-                matches!(
-                    result,
-                    Err(ApiError::Transport(TransportError::Http {
-                        status: StatusCode::SERVICE_UNAVAILABLE,
-                        ..
-                    }))
-                ),
-                "the provider failure must not become a second-admission denial"
-            );
-        } else {
-            assert!(result.is_ok());
-        }
-        assert_eq!(seen.load(Ordering::SeqCst), if guarded { 1 } else { 2 });
+        assert!(result.is_ok());
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
         assert_eq!(
             authority.admissions.load(Ordering::SeqCst),
             usize::from(guarded)

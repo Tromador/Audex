@@ -171,8 +171,7 @@ fn successful_client_terminal_requires_a_finished_generation() -> anyhow::Result
 }
 
 #[test]
-fn cut_off_terminal_arriving_before_policy_stop_requires_validated_structure() -> anyhow::Result<()>
-{
+fn cut_off_continuation_requires_complete_validated_structure() -> anyhow::Result<()> {
     run_test_with_large_stack("cutoff-terminal-first", || async {
         for (form, eligible) in [
             ("structured", true),
@@ -182,16 +181,7 @@ fn cut_off_terminal_arriving_before_policy_stop_requires_validated_structure() -
         ] {
             let temp = tempfile::tempdir()?;
             let server = responses::start_mock_server().await;
-            let (hooks, entered, release) = hold("client_policy_stop");
-            let (controller, threads) = fixture_with_hooks(
-                &temp,
-                &server.uri(),
-                CodexAuth::from_api_key("dummy"),
-                false,
-                Arc::new(|_, _| Box::pin(async { Ok(()) })),
-                hooks,
-            )
-            .await;
+            let (controller, threads) = real_fixture(&temp, &server.uri()).await;
             let id = seed(
                 &controller,
                 &temp,
@@ -200,9 +190,6 @@ fn cut_off_terminal_arriving_before_policy_stop_requires_validated_structure() -
             )
             .await?;
             controller.drive(&id).await?;
-            tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
-            // The internal stop transaction is held until after terminal processing,
-            // result disposition, explicit operator decision (if needed) and publication.
             let run = settled(&controller, &id).await?;
             let store = controller.store().await?;
             assert_eq!(
@@ -267,7 +254,6 @@ fn cut_off_terminal_arriving_before_policy_stop_requires_validated_structure() -
             let report = store.load_run(&id).await?.report.unwrap();
             let bytes = store.read_report(&report)?;
             assert!(std::str::from_utf8(&bytes)?.contains("client-initiated repair occurred"));
-            release.add_permits(1);
             one_prompt(&temp, &controller, &run.operation_id).await?;
             assert_eq!(
                 serde_json::to_vec(&store.freeze_report(&id).await?)?,

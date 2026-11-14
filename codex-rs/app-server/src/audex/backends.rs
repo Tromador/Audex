@@ -19,6 +19,7 @@ pub(super) struct BackendSettings {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(super) struct ClaudeSubscription {
     pub executable: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub client_version: String,
     pub profile: String,
     pub runtime_root: String,
@@ -28,6 +29,7 @@ pub(super) struct ClaudeSubscription {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(super) struct ClaudeApi {
     pub executable: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub client_version: String,
     pub runtime_root: String,
     pub credential: CredentialReference,
@@ -118,13 +120,17 @@ impl BackendSettings {
         }
         if let Some(c) = &self.claude_subscription {
             absolute(&c.executable)?;
-            bounded(&c.client_version)?;
+            if !c.client_version.is_empty() {
+                bounded(&c.client_version)?;
+            }
             absolute(&c.profile)?;
             absolute(&c.runtime_root)?;
         }
         if let Some(c) = &self.claude_api {
             absolute(&c.executable)?;
-            bounded(&c.client_version)?;
+            if !c.client_version.is_empty() {
+                bounded(&c.client_version)?;
+            }
             absolute(&c.runtime_root)?;
             endpoint(&c.upstream)?;
             match &c.credential {

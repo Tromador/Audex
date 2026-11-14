@@ -153,21 +153,24 @@ The daemon reads `$CODEX_HOME/audex/reviewer-backends.json`. Provisioning this c
 {
   "version": 1,
   "claudeSubscription": {
-    "executable": "/absolute/resolved/path/to/claude",
-    "clientVersion": "2.1.319",
+    "executable": "/home/your-user/.local/bin/claude",
     "profile": "/absolute/resolved/path/to/dedicated-profile",
     "runtimeRoot": "/var/tmp/audex"
   }
 }
 ```
 
-A dedicated subscription profile and the official Claude Code executable are required. Set `clientVersion` to the version that executable reports; Audex refuses a client that reports anything else. To change version, update `executable` and `clientVersion` together. Do not put credentials in this file. The profile must pass the existing isolation policy, including disabled hooks, connectors, synchronised plugins/skills, memory and cross-session messaging. The runtime must be an owned private directory outside the daemon's `HOME`, separate from the profile and short enough for the client's 103-byte Unix-socket path limit. Preflight refuses missing or incompatible setup; it does not create directories, modify a profile, refresh credentials or launch a client.
+A dedicated subscription profile and the official Claude Code executable are required. Use the absolute path to the normal Claude launcher; Audex resolves its current target and binds the executable digest for each commissioning decision. Leave `clientVersion` absent to use the installed version. Audex observes the actual version with a bounded `--version` probe, checks it against the same-process handshake and retains it with the executable digest. An optional `clientVersion` assertion refuses any other reported version. A client update invalidates an outstanding preflight; request a fresh preflight to select the updated client. Do not put credentials in this file. The profile must pass the existing isolation policy, including disabled hooks, connectors, synchronised plugins/skills, memory and cross-session messaging. The runtime must be an owned private directory outside the daemon's `HOME`, separate from the profile and short enough for the client's 103-byte Unix-socket path limit. Preflight refuses missing or incompatible setup; it does not create directories, modify a profile, refresh credentials or launch a client.
 
-Before TUI confirmation, the daemon checks the entire ordered roster, including queued reviewers. Disclosure identifies source, brief and context hashes, execution/authentication routes, requested/resolved/expected served models, executable/version/hash, profile, runtime and backend/policy bindings. Start checks them again. Drift refuses commissioning without creating runnable attempts. Account eligibility and effective billing are checked by the owned client before Audex writes the prompt. The CLI prints the disclosure during submission and does not pause for confirmation.
+Before TUI confirmation, the daemon checks the entire ordered roster, including queued reviewers. Disclosure identifies source, brief and context hashes, execution/authentication routes, requested/resolved/expected served models, executable/hash and any configured version assertion, profile, runtime and backend/policy bindings. Start checks them again. Drift refuses commissioning without creating runnable attempts. Account eligibility and effective billing are checked by the owned client before Audex writes the prompt. The CLI prints the disclosure during submission and does not pause for confirmation.
 
 An identical request key retrieves the existing audit even after configuration becomes unavailable; it starts no new work. Older audits without configuration bindings remain retrievable when their retained request identity matches. Changed request content under that key is refused.
 
-This route consumes subscription quota. The official client can initiate corrective requests: up to three continuations after truncated output, two retries for a missing tool call and one empty-output nudge **per occurrence**. These are not a total request ceiling. Observed corrections and anomalies are retained in activity and reports, including interrupted attempts.
+This route consumes subscription quota. Native Codex and the official Claude client handle their own ordinary retries, tool continuation and automatic compaction. Audex retains observed client activity, usage and model evidence. Internal requests and compaction are part of the authorised reviewer execution; they do not count as additional reviewer attempts.
+
+If a whole execution fails, Audex first observes the original and uses verified completed output where available. Any surviving partial or unverified opinion is retained for the operator to inspect and decide whether to Retry. If the original is verified stopped with no recoverable opinion, Audex may create one replacement for that reviewer within the same audit and sealed source. A failed replacement stops automatic recovery. Further explicit retries of unfinished contributions remain available without an Audex-imposed attempt or spending ceiling. Verified complete contributions are used as-is.
+
+Audex does not configure or enforce monetary budgets or reviewer-attempt ceilings. Previously retained ceilings do not restrict continuation. Usage and cost information supports the operator's decisions: measured token counts, client cost estimates and unavailable billing evidence remain distinct in diagnostics. Client estimates are not subscription charges or provider invoices.
 
 Cancel, Ignore, Retry and whole-audit Abort retain their existing exact-target behaviour. Stopping the owned client is best effort; already initiated requests or remote quota charges may continue. Retry creates fresh execution from the retained source and policy, and refuses configuration drift. Reconnect, viewing and history navigation do not replay or resume a subscription request.
 
@@ -268,7 +271,7 @@ audex audit attempt retry RUN ASSIGNMENT --action-key MY_RETRY_KEY --authorise-r
 
 Cancel and Ignore acknowledge a durable decision: the available received prefix is frozen and the attempt's scheduling reservation is released. They return without waiting for the reviewer to terminate. Healthy siblings continue. A completed review that committed first remains completed.
 
-Each native HTTP or WebSocket generation requires durable, one-use admission immediately before submission. Once an attempt's stop decision commits, later admissions for that attempt are refused. The same applies to superseded attempts and whole-audit stop decisions. A request admitted earlier may still be submitted or remain uncertain; a cancellation acknowledgement does not prove that provider-side inference or charging has stopped. Admission records survive restart, and uncertain requests are not automatically replayed.
+Each logical native generation is durably admitted within its reviewer attempt. The native client manages ordinary transport retries, with audit authority checked before observed sends. Once an attempt is stopped or superseded, later sends are refused. A request already in flight may still complete or incur charges; cancellation is not a billing guarantee. Admission records survive restart. A whole execution with uncertain liveness remains under observation and is not automatically replaced.
 
 Retry creates a fresh attempt using the retained source and original brief, with fresh execution history. If the earlier request may still be active, the command warns about overlapping charges and also requires `--acknowledge-possible-overlap`. The superseded attempt's output remains available in history; it is not supplied to the replacement.
 

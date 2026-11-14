@@ -15,7 +15,7 @@ pub(super) struct SpawnSpec {
     pub nonce_argument: String,
     pub executable_digest: String,
     pub binding_argument: String,
-    /// The operator-configured version this executable must report.
+    /// Optional operator version assertion; empty discovers the installed version.
     pub client_version: String,
 }
 
@@ -42,6 +42,7 @@ impl Drop for OwnedChild {
 }
 
 pub(super) struct Spawned {
+    pub client_version: String,
     pub owned: OwnedChild,
     pub stdin: ChildStdin,
     pub stdout: ChildStdout,
@@ -186,7 +187,7 @@ fn spawn(
     children: &mut HashMap<String, Running>,
 ) -> anyhow::Result<Spawned> {
     anyhow::ensure!(!children.contains_key(&spec.nonce), "launch already owned");
-    verify_version(&spec)?;
+    let client_version = verify_version(&spec)?;
     anyhow::ensure!(
         super::super::snapshot::manifest::sha256_hex(&std::fs::read(spec.command.get_program())?)
             == spec.executable_digest,
@@ -250,6 +251,7 @@ fn spawn(
         },
     );
     Ok(Spawned {
+        client_version,
         owned: OwnedChild {
             identity,
             nonce: spec.nonce,
@@ -306,7 +308,7 @@ pub(super) async fn write_prompt(stdin: ChildStdin, prompt: &[u8]) -> anyhow::Re
 }
 
 // A bounded, no-prompt identity probe on the same lifetime owner and isolated env.
-fn verify_version(spec: &SpawnSpec) -> anyhow::Result<()> {
+fn verify_version(spec: &SpawnSpec) -> anyhow::Result<String> {
     let mut command = Command::new(spec.command.get_program());
     command.arg("--version").env_clear();
     for (key, value) in spec.command.get_envs() {
@@ -355,11 +357,18 @@ fn verify_version(spec: &SpawnSpec) -> anyhow::Result<()> {
     };
     let mut bytes = [0u8; 1024];
     let n = stdout.read(&mut bytes)?;
+    let version = std::str::from_utf8(&bytes[..n])?
+        .trim()
+        .strip_suffix(" (Claude Code)")
+        .filter(|version| !version.is_empty() && !version.chars().any(char::is_whitespace))
+        .ok_or_else(|| anyhow::anyhow!("client version report is invalid"))?;
     anyhow::ensure!(
-        status.success()
-            && std::str::from_utf8(&bytes[..n])?.trim()
-                == format!("{} (Claude Code)", spec.client_version),
+        status.success() && n < bytes.len(),
+        "client version probe failed"
+    );
+    anyhow::ensure!(
+        spec.client_version.is_empty() || version == spec.client_version,
         "client executable does not report the configured version"
     );
-    Ok(())
+    Ok(version.to_owned())
 }
