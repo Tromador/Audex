@@ -11,9 +11,9 @@ fn personal_preflight_needs_no_machine_policy_but_binds_absence() -> anyhow::Res
     let absent_directory = f.inspect()?;
     assert!(!absent_directory.has_managed);
     absent_directory.recheck()?;
-    std::fs::create_dir(&f.machine)?;
-    std::fs::write(
-        f.machine.join("managed-settings.json"),
+    create_policy_dir(&f.machine)?;
+    write_policy(
+        &f.machine.join("managed-settings.json"),
         br#"{"theme":"dark"}"#,
     )?;
     assert!(empty_directory.recheck().is_err());
@@ -26,18 +26,18 @@ fn personal_preflight_needs_no_machine_policy_but_binds_absence() -> anyhow::Res
 fn refresh_flag_is_optional_and_cache_never_establishes_authority() -> anyhow::Result<()> {
     let f = Fixture::new()?;
     for flag in [true, false] {
-        std::fs::write(
-            f.machine.join("managed-settings.json"),
+        write_policy(
+            &f.machine.join("managed-settings.json"),
             json!({"forceRemoteSettingsRefresh":flag}).to_string(),
         )?;
         f.inspect()?.recheck()?;
     }
     std::fs::remove_file(f.machine.join("managed-settings.json"))?;
     for cache in [json!({}), json!({"forceRemoteSettingsRefresh":true})] {
-        std::fs::write(f.profile.join("remote-settings.json"), cache.to_string())?;
+        write_policy(&f.profile.join("remote-settings.json"), cache.to_string())?;
         assert!(!f.inspect()?.has_managed);
     }
-    std::fs::write(f.profile.join("remote-settings.json"), b"{")?;
+    write_policy(&f.profile.join("remote-settings.json"), b"{")?;
     assert!(f.inspect().is_err());
     Ok(())
 }
@@ -130,8 +130,8 @@ fn wsl_hkcu_requires_double_opt_in_and_no_admin_policy() -> anyhow::Result<()> {
     }
     registry_pair(&f, None, true)?;
     assert!(f.inspect().is_err(), "eligible HKCU must be readable");
-    std::fs::write(
-        f.machine.join("managed-settings.json"),
+    write_policy(
+        &f.machine.join("managed-settings.json"),
         br#"{"theme":"dark"}"#,
     )?;
     // A present admin policy makes the unreadable HKCU ineligible again.

@@ -63,8 +63,8 @@ async fn retain_external(
     let profile = temp.path().join("subscription-profile");
     std::fs::create_dir_all(&profile)?;
     std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700))?;
-    std::fs::write(
-        profile.join("settings.json"),
+    write_policy(
+        &profile.join("settings.json"),
         json!({
             "disableAllHooks":true,"disableClaudeAiConnectors":true,"syncClaudeAiPlugins":false,
             "syncClaudeAiSkills":false,"autoMemoryEnabled":false,"crossSessionInbound":"refuse",
@@ -72,9 +72,9 @@ async fn retain_external(
         })
         .to_string(),
     )?;
-    std::fs::create_dir_all(controller.root.join("c71-system-policy"))?;
-    std::fs::write(
-        controller
+    create_policy_dir(&controller.root.join("c71-system-policy"))?;
+    write_policy(
+        &controller
             .root
             .join("c71-system-policy/managed-settings.json"),
         r#"{"forceRemoteSettingsRefresh":true}"#,

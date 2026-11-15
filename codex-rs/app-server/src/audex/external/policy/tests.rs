@@ -2,6 +2,18 @@ use super::*;
 mod personal;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
+/// Policy sources are refused when group- or world-writable, so fixtures set
+/// their modes explicitly rather than inheriting the process umask.
+pub(super) fn write_policy(path: &Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path, contents)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+pub(super) fn create_policy_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
 pub(super) struct Fixture {
     _temp: tempfile::TempDir,
     profile: PathBuf,
@@ -19,9 +31,9 @@ impl Fixture {
             std::fs::create_dir(path)?;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
         }
-        std::fs::write(profile.join("settings.json"), settings().to_string())?;
-        std::fs::write(
-            machine.join("managed-settings.json"),
+        write_policy(&profile.join("settings.json"), settings().to_string())?;
+        write_policy(
+            &machine.join("managed-settings.json"),
             r#"{"forceRemoteSettingsRefresh":true}"#,
         )?;
         Ok(Self {
@@ -61,13 +73,13 @@ fn dedicated_profile_preserves_settings_and_never_opens_oauth() -> anyhow::Resul
     // Changing permissions changes ctime; capture a fresh metadata binding.
     let policy = f.inspect()?;
     // Normal client state creation does not invalidate the non-secret settings binding.
-    std::fs::write(
-        f.profile.join(".claude.json"),
+    write_policy(
+        &f.profile.join(".claude.json"),
         r#"{"firstStartVersion":"2.1.314"}"#,
     )?;
     policy.recheck()?;
-    std::fs::write(
-        f.profile.join(".claude.json"),
+    write_policy(
+        &f.profile.join(".claude.json"),
         r#"{"primaryApiKey":"dummy"}"#,
     )?;
     assert!(policy.recheck().is_err());
@@ -102,27 +114,27 @@ fn shared_linked_or_ordinary_profiles_are_refused() -> anyhow::Result<()> {
 fn managed_file_then_sorted_drop_ins_have_scalar_and_array_precedence() -> anyhow::Result<()> {
     let f = Fixture::new()?;
     let d = f.machine.join("managed-settings.d");
-    std::fs::create_dir(&d)?;
-    std::fs::write(
-        f.machine.join("managed-settings.json"),
+    create_policy_dir(&d)?;
+    write_policy(
+        &f.machine.join("managed-settings.json"),
         r#"{"forceRemoteSettingsRefresh":true,"autoMemoryEnabled":true}"#,
     )?;
-    std::fs::write(
-        d.join("20-final.json"),
+    write_policy(
+        &d.join("20-final.json"),
         r#"{"autoMemoryEnabled":false,"permissions":{"deny":["ListAgents"]}}"#,
     )?;
-    std::fs::write(
-        d.join("10-earlier.json"),
+    write_policy(
+        &d.join("10-earlier.json"),
         r#"{"autoMemoryEnabled":true,"permissions":{"deny":["SendMessage"]}}"#,
     )?;
     // The pinned loader ignores hidden and non-JSON entries.
     std::fs::write(d.join(".hidden.json"), b"invalid")?;
     std::fs::write(d.join("ignored.txt"), b"invalid")?;
     let p = f.inspect()?;
-    std::fs::write(d.join("30-unsafe.json"), r#"{"autoMemoryEnabled":true}"#)?;
+    write_policy(&d.join("30-unsafe.json"), r#"{"autoMemoryEnabled":true}"#)?;
     assert!(p.recheck().is_err());
     std::fs::remove_file(d.join("30-unsafe.json"))?;
-    std::fs::write(d.join("30-safe.json"), r#"{"theme":"light"}"#)?;
+    write_policy(&d.join("30-safe.json"), r#"{"theme":"light"}"#)?;
     assert!(
         p.recheck().is_err(),
         "safe changes still break the retained binding"
@@ -162,12 +174,12 @@ fn unsafe_contributions_are_refused_even_when_shadowed() -> anyhow::Result<()> {
     ] {
         let f = Fixture::new()?;
         let d = f.machine.join("managed-settings.d");
-        std::fs::create_dir(&d)?;
-        std::fs::write(d.join("10-unsafe.json"), value.to_string())?;
-        std::fs::write(d.join("20-safe.json"), settings().to_string())?;
+        create_policy_dir(&d)?;
+        write_policy(&d.join("10-unsafe.json"), value.to_string())?;
+        write_policy(&d.join("20-safe.json"), settings().to_string())?;
         assert!(f.inspect().is_err(), "unsafe contribution: {value}");
         std::fs::remove_file(d.join("10-unsafe.json"))?;
-        std::fs::write(f.profile.join("remote-settings.json"), value.to_string())?;
+        write_policy(&f.profile.join("remote-settings.json"), value.to_string())?;
         assert!(f.inspect().is_err(), "unsafe remote cache: {value}");
     }
     Ok(())
@@ -183,8 +195,8 @@ fn missing_incomplete_and_unsafe_policy_sources_fail_closed() -> anyhow::Result<
         ] {
             let f = Fixture::new()?;
             let path = f.machine.join(source);
-            std::fs::create_dir_all(path.parent().unwrap())?;
-            std::fs::write(&path, bytes)?;
+            create_policy_dir(path.parent().unwrap())?;
+            write_policy(&path, bytes)?;
             assert!(f.inspect().is_err());
         }
     }
@@ -193,12 +205,12 @@ fn missing_incomplete_and_unsafe_policy_sources_fail_closed() -> anyhow::Result<
     assert!(!f.inspect()?.has_managed);
     let mut user = settings();
     user["forceRemoteSettingsRefresh"] = true.into();
-    std::fs::write(f.profile.join("settings.json"), user.to_string())?;
+    write_policy(&f.profile.join("settings.json"), user.to_string())?;
     // A user flag supplies no remote authority; personal-tier qualification is
     // still required in the same process. No admin lock is necessary for it.
     assert!(!f.inspect()?.has_managed);
-    std::fs::write(
-        f.machine.join("managed-settings.json"),
+    write_policy(
+        &f.machine.join("managed-settings.json"),
         r#"{"forceRemoteSettingsRefresh":true}"#,
     )?;
     std::fs::write(f.machine.join("managed-mcp.json"), b"{}")?;
@@ -208,7 +220,7 @@ fn missing_incomplete_and_unsafe_policy_sources_fail_closed() -> anyhow::Result<
     assert!(f.inspect().is_err());
     std::fs::set_permissions(&f.machine, std::fs::Permissions::from_mode(0o700))?;
     let path = f.profile.join("settings.json");
-    std::fs::write(&path, vec![b' '; MAX_FILE as usize + 1])?;
+    write_policy(&path, vec![b' '; MAX_FILE as usize + 1])?;
     assert!(f.inspect().is_err());
     std::fs::remove_file(&path)?;
     symlink(f.machine.join("managed-settings.json"), &path)?;

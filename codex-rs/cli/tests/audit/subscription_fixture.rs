@@ -33,6 +33,11 @@ pub fn configure(home: &Path, mode: &str) -> anyhow::Result<PathBuf> {
         })
         .to_string(),
     )?;
+    // Policy sources are refused when group- or world-writable; never inherit the umask.
+    std::fs::set_permissions(
+        profile.join("settings.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )?;
     std::fs::write(
         root.join("policy-scenario.json"),
         json!({"managed_settings":{},"setting_source":"User settings"}).to_string(),

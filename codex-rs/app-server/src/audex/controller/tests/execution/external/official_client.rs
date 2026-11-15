@@ -23,7 +23,7 @@ fn pinned_client_fake_api_and_real_bridge_complete_the_production_path() -> anyh
         let native_server = responses::start_mock_server().await;
         let (controller, threads) = real_fixture(&temp, &native_server.uri()).await;
         let child = public_fixture::configure(temp.path(), "valid")?;
-        std::fs::create_dir(controller.root.join("c71-system-policy"))?;
+        create_policy_dir(&controller.root.join("c71-system-policy"))?;
         let settings_path = controller.root.join("reviewer-backends.json");
         let mut settings: Value = serde_json::from_slice(&std::fs::read(&settings_path)?)?;
         settings["claudeSubscription"]["executable"] = json!(binary);

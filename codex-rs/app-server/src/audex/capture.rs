@@ -397,6 +397,12 @@ impl CaptureHandle {
         Ok(!appended.fenced)
     }
 
+    /// Closure is set when capture fails, completes, is cut off by a control, or is
+    /// fenced by the store during a flush. Reading it needs no store round trip.
+    pub(super) fn is_closed(&self) -> bool {
+        self.0.pending.lock().expect("capture buffer").closed
+    }
+
     pub(super) async fn allowed(&self) -> bool {
         if self.0.pending.lock().expect("capture buffer").closed {
             return false;

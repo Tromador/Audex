@@ -120,17 +120,17 @@ fn local_policy_refusal_precedes_client_launch() -> anyhow::Result<()> {
                     r#"{"forceRemoteSettingsRefresh":true,"env":{"ANTHROPIC_API_KEY":"dummy"}}"#,
                 )?,
                 "drop_in" => {
-                    std::fs::create_dir(machine.join("managed-settings.d"))?;
-                    std::fs::write(
-                        machine.join("managed-settings.d/10.json"),
+                    create_policy_dir(&machine.join("managed-settings.d"))?;
+                    write_policy(
+                        &machine.join("managed-settings.d/10.json"),
                         r#"{"disableAllHooks":false}"#,
                     )?;
                 }
                 "profile" => {
                     std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o755))?
                 }
-                "remote_cache" => std::fs::write(
-                    profile.join("remote-settings.json"),
+                "remote_cache" => write_policy(
+                    &profile.join("remote-settings.json"),
                     r#"{"forceLoginMethod":"gateway"}"#,
                 )?,
                 "windows_query_unreadable" => {

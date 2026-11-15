@@ -66,7 +66,7 @@ async fn subscription_preview_binds_local_policy_and_refuses_every_drift_before_
         let temp = tempfile::tempdir()?;
         let (controller, fake, _) = fixture(&temp).await;
         let child = subscription::configure(temp.path(), "valid")?;
-        std::fs::create_dir(controller.root.join("c71-system-policy"))?;
+        create_policy_dir(&controller.root.join("c71-system-policy"))?;
         let mut params = request(&controller);
         let before = std::fs::read(child.join("subscription-profile/settings.json"))?;
         let preview = api(&controller, "audit/preflight", json!({"request":params}))
@@ -155,7 +155,7 @@ async fn public_subscription_roster_is_atomic_idempotent_and_retry_keeps_approve
     let temp = tempfile::tempdir()?;
     let (controller, fake, _) = fixture(&temp).await;
     let child = subscription::configure(temp.path(), "valid")?;
-    std::fs::create_dir(controller.root.join("c71-system-policy"))?;
+    create_policy_dir(&controller.root.join("c71-system-policy"))?;
     let mut params = request(&controller);
     params["preflight"] = api(&controller, "audit/preflight", json!({"request":params}))
         .await
@@ -239,7 +239,7 @@ async fn normal_launcher_update_requires_fresh_preflight_without_a_version_pin()
     let temp = tempfile::tempdir()?;
     let (controller, fake, _) = fixture(&temp).await;
     let child = subscription::configure(temp.path(), "valid")?;
-    std::fs::create_dir(controller.root.join("c71-system-policy"))?;
+    create_policy_dir(&controller.root.join("c71-system-policy"))?;
     let launcher = child.join("claude");
     std::os::unix::fs::symlink(child.join("client"), &launcher)?;
     let path = controller.root.join("reviewer-backends.json");
@@ -300,7 +300,7 @@ async fn obsolete_ceilings_preserve_retained_start_identity_without_new_executio
     let temp = tempfile::tempdir()?;
     let (controller, fake, _) = fixture(&temp).await;
     let child = subscription::configure(temp.path(), "valid")?;
-    std::fs::create_dir(controller.root.join("c71-system-policy"))?;
+    create_policy_dir(&controller.root.join("c71-system-policy"))?;
     let mut params = request(&controller);
     let preview = api(&controller, "audit/preflight", json!({"request":params}))
         .await

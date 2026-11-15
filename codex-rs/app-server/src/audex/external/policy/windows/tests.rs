@@ -50,8 +50,8 @@ fn ordinary_wsl_with_registry_tool_and_windows_directory_retains_linux() -> anyh
     assert!(!policy.windows_registry);
     policy.recheck()?;
     // Prove Linux remains authoritative, rather than bypassing its safeguards.
-    std::fs::write(
-        f.machine.join("managed-settings.json"),
+    crate::audex::external::policy::tests::write_policy(
+        &f.machine.join("managed-settings.json"),
         br#"{"disableAllHooks":false}"#,
     )?;
     assert!(f.inspect().is_err());

@@ -223,7 +223,10 @@ impl Collector {
                     if n == 0 {
                         return Err(if line.is_empty() { "external_eof_without_terminal" } else { "external_truncated_jsonl_tail" });
                     }
-                    if !self.capture.allowed().await { return Err("external_capture_authority_unavailable"); }
+                    // Authority is enforced where it takes effect: each durable write
+                    // re-checks ownership in its transaction, and revocation closes this
+                    // capture and stops the owned client. No per-chunk store query.
+                    if self.capture.is_closed() { return Err("external_capture_authority_unavailable"); }
                     total += n;
                     if total > MAX_STREAM { return Err("external_stream_byte_bound_exhausted"); }
                     for byte in &bytes[..n] {

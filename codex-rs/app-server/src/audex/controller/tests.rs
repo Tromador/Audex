@@ -22,6 +22,22 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+/// Policy sources are refused when group- or world-writable, so fixtures set
+/// their modes explicitly rather than inheriting the process umask.
+#[cfg(target_os = "linux")]
+fn write_policy(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, contents)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(target_os = "linux")]
+fn create_policy_dir(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
 #[derive(Default)]
 struct Fake {
     observations: AtomicUsize,
