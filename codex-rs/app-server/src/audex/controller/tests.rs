@@ -1,3 +1,4 @@
+mod multi_file;
 use super::*;
 
 mod admission;

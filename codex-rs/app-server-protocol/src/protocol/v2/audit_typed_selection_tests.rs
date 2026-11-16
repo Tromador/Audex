@@ -96,3 +96,20 @@ fn incompatible_pairs_and_malformed_selections_are_rejected() {
         );
     }
 }
+
+#[test]
+fn file_list_source_roundtrips_with_explicit_names_and_strict_fields() {
+    let wire = json!({"type":"fileList","files":[
+        {"name":"client/shared.rs","path":"/input/client/shared.rs"},
+        {"name":"server/shared.rs","path":"/input/server/shared.rs"}
+    ]});
+    let source: AuditSource = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(source).unwrap(), wire);
+    for invalid in [
+        json!({"type":"fileList","files":[{"path":"/x"}]}),
+        json!({"type":"fileList","files":[{"name":"x","path":"/x","recursive":true}]}),
+        json!({"type":"fileList","files":[],"directory":"/input"}),
+    ] {
+        assert!(serde_json::from_value::<AuditSource>(invalid).is_err());
+    }
+}

@@ -2,7 +2,7 @@ use crate::{JsonSchema, TS};
 use serde::{Deserialize, Serialize};
 
 /// Audex CLI contract, independent of the Codex executable's package version.
-pub const AUDIT_PROTOCOL_VERSION: u32 = 8;
+pub const AUDIT_PROTOCOL_VERSION: u32 = 9;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -20,8 +20,28 @@ pub struct AuditCapabilitiesResponse {
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export_to = "v2/")]
 pub enum AuditSource {
-    Snippet { name: String, content: String },
-    File { name: String, path: String },
+    Snippet {
+        name: String,
+        content: String,
+    },
+    File {
+        name: String,
+        path: String,
+    },
+    /// Explicit files, each with a unique snapshot-relative name.
+    FileList {
+        files: Vec<AuditSourceFile>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct AuditSourceFile {
+    /// Portable relative path in the sealed snapshot, used by citations.
+    pub name: String,
+    /// Absolute input path at the server boundary.
+    pub path: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -409,7 +429,7 @@ mod tests {
         assert!(params.reviewers.is_none());
         assert_eq!(params.model.as_deref(), Some("model"));
         assert_eq!(params.scheduling, AuditScheduling::Automatic);
-        assert_eq!(AUDIT_PROTOCOL_VERSION, 8);
+        assert_eq!(AUDIT_PROTOCOL_VERSION, 9);
     }
 }
 

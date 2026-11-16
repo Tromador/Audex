@@ -14,6 +14,7 @@ use codex_app_server_protocol::{
     RequestId, ServerNotification,
 };
 use codex_core::config::find_codex_home;
+#[cfg(windows)]
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -76,9 +77,9 @@ pub(crate) struct AuditCommand {
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
 struct SourceArgs {
-    /// Capture this regular file on the local daemon; source bytes and mode are preserved.
+    /// Select a regular file; repeat --file to audit related files together.
     #[arg(long)]
-    file: Option<PathBuf>,
+    file: Vec<PathBuf>,
     /// Read up to 32 MiB of UTF-8 source from stdin; requires --name.
     #[arg(long, requires = "name")]
     stdin: bool,
@@ -227,19 +228,12 @@ fn id(name: &str) -> RequestId {
 pub(crate) async fn run(command: AuditCommand) -> anyhow::Result<i32> {
     // Read explicit input before connecting; no project discovery or source execution.
     let source = if command.action.is_none() {
-        Some(if let Some(path) = &command.source.file {
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .context("file needs a UTF-8 filename")?
-                .to_string();
-            // Lexical absolute resolution preserves symlinks for the server to reject.
-            let absolute = AbsolutePathBuf::relative_to_current_dir(path)?;
-            let path = absolute
-                .to_str()
-                .context("source path must be UTF-8")?
-                .to_string();
-            AuditSource::File { name, path }
+        Some(if !command.source.file.is_empty() {
+            codex_app_server_client::audit::file_source(
+                &command.source.file,
+                &std::env::current_dir()?,
+            )
+            .map_err(anyhow::Error::msg)?
         } else {
             AuditSource::Snippet {
                 name: command.name.clone().context("--stdin requires --name")?,

@@ -1,3 +1,4 @@
+mod multi_file;
 use super::*;
 
 mod fidelity;
@@ -39,6 +40,17 @@ impl Fixture {
 
     async fn with_path(path: &str, bytes: &[u8]) -> anyhow::Result<Self> {
         let temp = tempfile::tempdir()?;
+        Self::with_source(
+            temp,
+            CaptureSource::Snippet {
+                logical_path: SnapshotPath::new(path)?,
+                bytes: bytes.to_vec(),
+            },
+        )
+        .await
+    }
+
+    async fn with_source(temp: tempfile::TempDir, source: CaptureSource) -> anyhow::Result<Self> {
         let root = AbsolutePathBuf::from_absolute_path(temp.path())?;
         let snapshot = SnapshotStore::new(
             root.join("snapshots"),
@@ -46,10 +58,7 @@ impl Fixture {
             CaptureLimits::default(),
         )
         .capture(CaptureRequest {
-            source: CaptureSource::Snippet {
-                logical_path: SnapshotPath::new(path)?,
-                bytes: bytes.to_vec(),
-            },
+            source,
             context_documents: ContextDocuments::default(),
         })
         .await?;

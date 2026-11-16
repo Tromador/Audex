@@ -99,6 +99,7 @@ export type { AuditRunPhase } from "./AuditRunPhase";
 export type { AuditRunView } from "./AuditRunView";
 export type { AuditScheduling } from "./AuditScheduling";
 export type { AuditSource } from "./AuditSource";
+export type { AuditSourceFile } from "./AuditSourceFile";
 export type { AuditStartParams } from "./AuditStartParams";
 export type { AuditStartResponse } from "./AuditStartResponse";
 export type { AuthRecoveryNotification } from "./AuthRecoveryNotification";

@@ -1,6 +1,9 @@
 //! Real CLI + managed daemon + real Codex loop; provider HTTP stays on loopback.
 #![cfg(unix)]
 
+#[path = "audit/multi_file.rs"]
+mod multi_file;
+
 #[path = "app_server_daemon/support.rs"]
 mod support;
 
@@ -607,19 +610,19 @@ async fn incompatible_protocol_and_missing_selection_fail_before_submission() ->
             Some(5),
             json!({}),
             vec!["--model", "audit-test", "--provider", "audit_fixture"],
-            "incompatible Audex daemon protocol 5; this client requires 8",
+            "incompatible Audex daemon protocol 5; this client requires 9",
         ),
         (
             Some(6),
             json!({}),
             vec!["--model", "audit-test", "--provider", "audit_fixture"],
-            "incompatible Audex daemon protocol 6; this client requires 8",
+            "incompatible Audex daemon protocol 6; this client requires 9",
         ),
         (
             Some(7),
             json!({}),
             vec!["--model", "audit-test", "--provider", "audit_fixture"],
-            "incompatible Audex daemon protocol 7; this client requires 8",
+            "incompatible Audex daemon protocol 7; this client requires 9",
         ),
         (
             Some(AUDIT_PROTOCOL_VERSION + 1),

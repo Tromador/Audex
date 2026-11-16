@@ -31,6 +31,14 @@ pub(crate) enum CaptureSource {
         source_path: AbsolutePathBuf,
         logical_path: SnapshotPath,
     },
+    FileList {
+        files: Vec<CaptureFile>,
+    },
+}
+
+pub(crate) struct CaptureFile {
+    pub source_path: AbsolutePathBuf,
+    pub logical_path: SnapshotPath,
 }
 
 #[derive(Default)]
@@ -45,7 +53,6 @@ pub(crate) struct CaptureRequest {
 }
 
 struct PreparedSource {
-    form: SourceFormV1,
     logical_path: SnapshotPath,
     executable: bool,
     bytes: Vec<u8>,
@@ -60,7 +67,7 @@ struct PublicationInput {
     root: PathBuf,
     manifest: SnapshotManifestV1,
     manifest_bytes: Vec<u8>,
-    source_bytes: Vec<u8>,
+    sources: Vec<PreparedSource>,
     context_documents: Vec<PreparedContextDocument>,
     #[cfg(test)]
     fail_before_publication: bool,
@@ -89,20 +96,23 @@ async fn prepare(
     store: &SnapshotStore,
     request: CaptureRequest,
 ) -> Result<PublicationInput, SnapshotError> {
-    let prepared_source = prepare_source(store, request.source).await?;
+    let (form, mut sources) = prepare_sources(store, request.source).await?;
+    sources.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
     let prepared_documents = prepare_context_documents(request.context_documents)?;
-    let source_digest = sha256_hex(&prepared_source.bytes);
-    let source_entry = SnapshotEntryV1 {
-        path: prepared_source.logical_path,
-        kind: SnapshotEntryKindV1::RegularFile,
-        executable: prepared_source.executable,
-        size: prepared_source.bytes.len() as u64,
-        sha256: source_digest,
-    };
+    let entries = sources
+        .iter()
+        .map(|source| SnapshotEntryV1 {
+            path: source.logical_path.clone(),
+            kind: SnapshotEntryKindV1::RegularFile,
+            executable: source.executable,
+            size: source.bytes.len() as u64,
+            sha256: sha256_hex(&source.bytes),
+        })
+        .collect();
     let manifest = SnapshotManifestV1::build(
-        prepared_source.form,
+        form,
         store.limits,
-        vec![source_entry],
+        entries,
         prepared_documents
             .iter()
             .map(|document| document.record.clone())
@@ -113,7 +123,7 @@ async fn prepare(
         root: store.root.as_path().to_path_buf(),
         manifest,
         manifest_bytes,
-        source_bytes: prepared_source.bytes,
+        sources,
         context_documents: prepared_documents,
         #[cfg(test)]
         fail_before_publication: store.fail_before_publication,
@@ -122,27 +132,70 @@ async fn prepare(
     Ok(publication)
 }
 
-async fn prepare_source(
+async fn prepare_sources(
     store: &SnapshotStore,
     source: CaptureSource,
-) -> Result<PreparedSource, SnapshotError> {
+) -> Result<(SourceFormV1, Vec<PreparedSource>), SnapshotError> {
     match source {
         CaptureSource::Snippet {
             logical_path,
             bytes,
         } => {
             enforce_source_size(bytes.len() as u64, store.limits)?;
-            Ok(PreparedSource {
-                form: SourceFormV1::Snippet,
-                logical_path,
-                executable: false,
-                bytes,
-            })
+            Ok((
+                SourceFormV1::Snippet,
+                vec![PreparedSource {
+                    logical_path,
+                    executable: false,
+                    bytes,
+                }],
+            ))
         }
         CaptureSource::File {
             source_path,
             logical_path,
-        } => prepare_file(store, source_path, logical_path).await,
+        } => Ok((
+            SourceFormV1::File,
+            vec![prepare_file(store, source_path, logical_path).await?],
+        )),
+        CaptureSource::FileList { mut files } => {
+            if files.is_empty() {
+                return Err(SnapshotError::InvalidSource(
+                    "file list must not be empty".to_string(),
+                ));
+            }
+            files.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+            if files
+                .windows(2)
+                .any(|pair| pair[0].logical_path == pair[1].logical_path)
+            {
+                return Err(SnapshotError::InvalidSource(
+                    "duplicate logical source path".to_string(),
+                ));
+            }
+            // Bracket the whole selection as well as each file's existing double read.
+            // A change to an earlier file while capturing a later one rejects the set.
+            let before = files
+                .iter()
+                .map(|file| LocalFileFingerprint::read(file.source_path.as_path()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut sources = Vec::with_capacity(files.len());
+            for file in &files {
+                sources.push(
+                    prepare_file(store, file.source_path.clone(), file.logical_path.clone())
+                        .await?,
+                );
+            }
+            for (file, fingerprint) in files.iter().zip(before) {
+                if LocalFileFingerprint::read(file.source_path.as_path())
+                    .map_err(|_| SnapshotError::SourceChanged)?
+                    != fingerprint
+                {
+                    return Err(SnapshotError::SourceChanged);
+                }
+            }
+            Ok((SourceFormV1::FileList, sources))
+        }
     }
 }
 
@@ -203,7 +256,6 @@ async fn prepare_file(
     }
     enforce_source_size(second.len() as u64, store.limits)?;
     Ok(PreparedSource {
-        form: SourceFormV1::File,
         logical_path,
         executable,
         bytes: first,
@@ -260,10 +312,18 @@ fn publish(input: PublicationInput) -> Result<(), SnapshotError> {
         .tempdir_in(&staging_root)?;
     let object_root = staging.path().join("objects").join("sha256");
     std::fs::create_dir_all(&object_root)?;
-    write_new_file(
-        &object_root.join(&input.manifest.identity.entries[0].sha256),
-        &input.source_bytes,
-    )?;
+    for (entry, source) in input.manifest.identity.entries.iter().zip(&input.sources) {
+        let object_path = object_root.join(&entry.sha256);
+        if !object_path.exists() {
+            write_new_file(&object_path, &source.bytes)?;
+        }
+        let source_path = join_logical(staging.path().join("source"), &entry.path);
+        let source_parent = source_path.parent().ok_or_else(|| {
+            SnapshotError::InvalidPath("source entry has no materialisation parent".to_string())
+        })?;
+        std::fs::create_dir_all(source_parent)?;
+        write_new_file(&source_path, &source.bytes)?;
+    }
     for document in &input.context_documents {
         let path = object_root.join(&document.record.sha256);
         if !path.exists() {
@@ -271,28 +331,24 @@ fn publish(input: PublicationInput) -> Result<(), SnapshotError> {
         }
     }
 
-    let entry = &input.manifest.identity.entries[0];
-    let source_path = join_logical(staging.path().join("source"), &entry.path);
-    let source_parent = source_path.parent().ok_or_else(|| {
-        SnapshotError::InvalidPath("source entry has no materialisation parent".to_string())
-    })?;
-    std::fs::create_dir_all(source_parent)?;
-    write_new_file(&source_path, &input.source_bytes)?;
-
     // The manifest is written last. A staging directory is never a published snapshot.
     write_new_file(&staging.path().join("manifest.json"), &input.manifest_bytes)?;
-    sync_directory(&object_root)?;
-    sync_directory(source_parent)?;
-    sync_directory(staging.path())?;
+    for path in walk_paths(staging.path())? {
+        if path.is_dir() {
+            sync_directory(&path)?;
+        }
+    }
     #[cfg(test)]
     if input.fail_before_publication {
         return Err(SnapshotError::Io(io::Error::other(
             "injected failure before snapshot publication",
         )));
     }
-    make_tree_read_only(staging.path(), entry).map_err(|source| SnapshotError::IoContext {
-        context: "making the staged snapshot read-only".to_string(),
-        source,
+    make_tree_read_only(staging.path(), &input.manifest.identity.entries).map_err(|source| {
+        SnapshotError::IoContext {
+            context: "making the staged snapshot read-only".to_string(),
+            source,
+        }
     })?;
 
     match std::fs::rename(staging.path(), &final_root) {
@@ -454,8 +510,12 @@ fn sync_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn make_tree_read_only(root: &Path, source_entry: &SnapshotEntryV1) -> io::Result<()> {
-    let source_path = join_logical(root.join("source"), &source_entry.path);
+fn make_tree_read_only(root: &Path, source_entries: &[SnapshotEntryV1]) -> io::Result<()> {
+    let executable_paths: std::collections::HashSet<_> = source_entries
+        .iter()
+        .filter(|entry| entry.executable)
+        .map(|entry| join_logical(root.join("source"), &entry.path))
+        .collect();
     for entry in walk_paths(root)? {
         let metadata = std::fs::symlink_metadata(&entry)?;
         if metadata.is_dir() {
@@ -463,7 +523,7 @@ fn make_tree_read_only(root: &Path, source_entry: &SnapshotEntryV1) -> io::Resul
                 set_directory_read_only(&entry)?;
             }
         } else {
-            set_file_read_only(&entry, entry == source_path && source_entry.executable)?;
+            set_file_read_only(&entry, executable_paths.contains(&entry))?;
         }
     }
     Ok(())

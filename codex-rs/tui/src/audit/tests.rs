@@ -552,3 +552,47 @@ fn explicit_diagnostics_are_lossless_continuable_and_do_not_create_a_new_audit()
     );
     // UTF-8 continuation assertions now live beside the shared app-server paginator.
 }
+
+#[tokio::test]
+async fn file_list_command_and_model_tool_admit_the_same_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let action = parse_command("--file 'client/shared file.rs' --file 'server/shared file.rs' --file main.rs --reviewer p:first --reviewer p:second")
+        .unwrap().action(temp.path()).await.unwrap();
+    let AuditAction::Start(args) = action else {
+        panic!("start");
+    };
+    let AuditSource::FileList { files } = &args.source else {
+        panic!("list");
+    };
+    assert_eq!(files.len(), 3);
+    assert_eq!(files[0].name, "client/shared file.rs");
+    assert_eq!(files[1].name, "server/shared file.rs");
+    let AuditAction::Start(tool) = tool_action(
+        "audit_start",
+        json!({"source":args.source,"reviewers":args.reviewers}),
+    )
+    .unwrap() else {
+        panic!("tool start");
+    };
+    assert_eq!(tool.source, args.source);
+    assert_eq!(tool.reviewers, args.reviewers);
+    let DynamicToolSpec::Function(spec) = &tool_specs()[0] else {
+        panic!("spec");
+    };
+    let forms = spec.input_schema["properties"]["source"]["oneOf"]
+        .as_array()
+        .unwrap();
+    let list = forms
+        .iter()
+        .find(|form| form["properties"]["type"]["const"] == "fileList")
+        .unwrap();
+    assert_eq!(list["properties"]["files"]["minItems"], 1);
+    assert!(list["properties"]["files"].get("maxItems").is_none());
+    assert!(
+        tool_action(
+            "audit_start",
+            json!({"source":{"type":"fileList","files":[{"name":"x","path":"x","recursive":true}]}})
+        )
+        .is_err()
+    );
+}

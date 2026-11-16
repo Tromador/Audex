@@ -165,16 +165,26 @@ impl AuditController {
                 }
             }
         }
-        let historical_preflight = sha256_hex(&serde_json::to_vec(&serde_json::json!({
-            "requestKey":params.request_key,"scheduling":params.scheduling,"bindings":historical_response,
-        }))?);
-        if request_identity_values(
-            params,
-            &historical_selections,
-            &manifest.snapshot_id,
-            Some(&historical_preflight),
-        )? != retained.identity
-        {
+        // Protocol 8 approvals include their wire version in the digest. Keep
+        // recognising that original approval without rewriting retained inputs.
+        let mut matches_retained = false;
+        for version in [AUDIT_PROTOCOL_VERSION, 8] {
+            historical_response["protocolVersion"] = serde_json::json!(version);
+            let historical_preflight = sha256_hex(&serde_json::to_vec(&serde_json::json!({
+                "requestKey":params.request_key,"scheduling":params.scheduling,"bindings":historical_response,
+            }))?);
+            if request_identity_values(
+                params,
+                &historical_selections,
+                &manifest.snapshot_id,
+                Some(&historical_preflight),
+            )? == retained.identity
+            {
+                matches_retained = true;
+                break;
+            }
+        }
+        if !matches_retained {
             return Err(conflict().into());
         }
         response.existing_run_id = Some(retained.run_id);

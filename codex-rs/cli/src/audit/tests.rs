@@ -354,3 +354,33 @@ fn typed_reviewer_json_accepts_exact_routes_and_rejects_malformed_pairs() {
         codex_app_server_protocol::AuditAuthenticationRoute::DaemonConfiguredNative
     );
 }
+
+#[test]
+fn repeatable_files_admit_one_collection_and_keep_snippet_exclusive() {
+    let command = AuditCommand::try_parse_from([
+        "audit",
+        "--file",
+        "client/shared.rs",
+        "--file",
+        "server/shared.rs",
+        "--file",
+        "main.rs",
+        "--reviewer",
+        "openai:luna",
+        "--reviewer",
+        "other:model",
+    ])
+    .unwrap();
+    assert_eq!(command.source.file.len(), 3);
+    assert_eq!(command.reviewers.len(), 2);
+    let temp = tempfile::tempdir().unwrap();
+    let source =
+        codex_app_server_client::audit::file_source(&command.source.file, temp.path()).unwrap();
+    assert!(matches!(source, AuditSource::FileList { files } if files.len() == 3));
+    assert!(
+        AuditCommand::try_parse_from([
+            "audit", "--file", "a", "--file", "b", "--stdin", "--name", "x"
+        ])
+        .is_err()
+    );
+}

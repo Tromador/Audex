@@ -762,3 +762,73 @@ fn pending_observer_recovers_and_delivers_report_once_without_another_inference(
 
 #[path = "typed_selections.rs"]
 mod typed_selections;
+
+#[test]
+fn model_file_list_confirmation_shows_all_sources_before_commissioning() -> anyhow::Result<()> {
+    run_test_with_large_stack("tui-multi-file-confirm", || async {
+        multi_file_confirmation()
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:#}"))
+    })
+}
+
+async fn multi_file_confirmation() -> Result<()> {
+    let provider = responses::start_mock_server().await;
+    let (_home, config, session, thread) = boxed_future!(fixture(&provider)).await?;
+    let mut files = Vec::new();
+    for name in ["client/shared.rs", "server/shared.rs", "main.rs"] {
+        let path = config.cwd.join(name);
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::write(path, "source\n")?;
+        files.push(json!({"name":name,"path":name}));
+    }
+    let action = tool_action("audit_start", json!({"source":{"type":"fileList","files":files},
+        "reviewers":[{"provider":"mock_provider","model":"audit-test"},{"provider":"mock_provider","model":"audit-test"}]}))
+        .map_err(color_eyre::eyre::Report::msg)?;
+    let (tx, mut events) = mpsc::unbounded_channel();
+    let task = tokio::spawn(execute(
+        session.request_handle(),
+        thread,
+        action,
+        AppEventSender::new(tx),
+    ));
+    let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
+        .await?
+        .unwrap();
+    let AppEvent::AuditConfirm {
+        params, decision, ..
+    } = event
+    else {
+        panic!("confirmation");
+    };
+    let text = codex_app_server_client::audit::start_disclosure(&params);
+    for file in files {
+        assert!(
+            text.contains(
+                config
+                    .cwd
+                    .join(file["path"].as_str().unwrap())
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert!(text.contains(&format!("snapshot name {}", file["name"].as_str().unwrap())));
+    }
+    assert_eq!(params.preflight.unwrap().reviewers.len(), 2);
+    assert!(provider.received_requests().await.unwrap().is_empty());
+    decision.send(false).unwrap();
+    assert!(task.await?.is_err());
+    assert!(provider.received_requests().await.unwrap().is_empty());
+    assert!(
+        AuditClient::new(session.request_handle())
+            .list(AuditListParams {
+                after: None,
+                limit: None
+            })
+            .await?
+            .runs
+            .is_empty()
+    );
+    session.shutdown().await?;
+    Ok(())
+}

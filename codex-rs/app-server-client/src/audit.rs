@@ -8,6 +8,9 @@ use codex_app_server_protocol::{
 };
 use std::fmt;
 
+mod source;
+pub use source::{file_source, resolve_source_paths};
+
 #[derive(Debug)]
 pub enum AuditClientError {
     Request(TypedRequestError),
@@ -122,6 +125,18 @@ pub fn start_disclosure(params: &codex_app_server_protocol::AuditStartParams) ->
     let source = match &params.source {
         codex_app_server_protocol::AuditSource::File { name, path } => {
             format!("file {path} (snapshot name {name})")
+        }
+        codex_app_server_protocol::AuditSource::FileList { files } => {
+            let mut text = format!("{} explicit files:\n", files.len());
+            for (index, file) in files.iter().enumerate() {
+                text.push_str(&format!(
+                    "{}. {} (snapshot name {})\n",
+                    index + 1,
+                    file.path,
+                    file.name
+                ));
+            }
+            text
         }
         codex_app_server_protocol::AuditSource::Snippet { name, content } => format!(
             "snippet {name} ({} UTF-8 bytes); preview: {}",

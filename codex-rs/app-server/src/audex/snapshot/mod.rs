@@ -21,6 +21,8 @@ pub(crate) use access::SnapshotAccess;
 #[allow(unused_imports)]
 pub(crate) use access::VerifiedBytes;
 #[allow(unused_imports)]
+pub(crate) use capture::CaptureFile;
+#[allow(unused_imports)]
 pub(crate) use capture::CaptureRequest;
 #[allow(unused_imports)]
 pub(crate) use capture::CaptureSource;

@@ -165,6 +165,7 @@ impl fmt::Display for SnapshotId {
 pub(crate) enum SourceFormV1 {
     Snippet,
     File,
+    FileList,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -369,9 +370,11 @@ fn validate_identity(identity: &SnapshotIdentityV1) -> Result<(), SnapshotError>
             ));
         }
     }
-    if identity.entries.len() != 1 {
+    if identity.entries.is_empty()
+        || (identity.source_form != SourceFormV1::FileList && identity.entries.len() != 1)
+    {
         return Err(SnapshotError::InvalidManifest(
-            "first-slice snapshots must contain exactly one source entry".to_string(),
+            "source form requires one entry, or a nonempty explicit file list".to_string(),
         ));
     }
     if !identity
@@ -384,6 +387,19 @@ fn validate_identity(identity: &SnapshotIdentityV1) -> Result<(), SnapshotError>
         ));
     }
     for entry in &identity.entries {
+        // A file cannot also be a parent directory of another selected entry.
+        for (index, _) in entry.path.as_str().match_indices('/') {
+            let parent = &entry.path.as_str()[..index];
+            if identity
+                .entries
+                .binary_search_by(|candidate| candidate.path.as_str().cmp(parent))
+                .is_ok()
+            {
+                return Err(SnapshotError::InvalidManifest(
+                    "source paths conflict as file and directory".to_string(),
+                ));
+            }
+        }
         validate_digest(&entry.sha256)?;
         if entry.size > identity.capture_policy.max_source_bytes {
             return Err(SnapshotError::InvalidManifest(

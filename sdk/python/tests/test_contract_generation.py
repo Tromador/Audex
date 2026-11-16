@@ -199,3 +199,18 @@ def test_answer_display_is_read_in_thread_history_and_notifications():
     ).item.root.moderation
     assert moderated.moderated is True
     assert moderated.display is None
+
+
+def test_explicit_file_list_source_preserves_wire_paths():
+    from openai_codex.generated.v2_all import AuditSource, FileListAuditSource
+
+    payload = {
+        "type": "fileList",
+        "files": [
+            {"name": "client/shared.rs", "path": "/input/client/shared.rs"},
+            {"name": "server/shared.rs", "path": "/input/server/shared.rs"},
+        ],
+    }
+    source = AuditSource.model_validate(payload)
+    assert isinstance(source.root, FileListAuditSource)
+    assert source.model_dump(by_alias=True, exclude_unset=True) == payload

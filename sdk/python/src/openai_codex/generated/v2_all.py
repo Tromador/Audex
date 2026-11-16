@@ -829,8 +829,15 @@ class FileAuditSource(BaseModel):
     type: Annotated[Literal["file"], Field(title="FileAuditSourceType")]
 
 
-class AuditSource(RootModel[SnippetAuditSource | FileAuditSource]):
-    root: SnippetAuditSource | FileAuditSource
+class AuditSourceFile(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    name: Annotated[
+        str, Field(description="Portable relative path in the sealed snapshot, used by citations.")
+    ]
+    path: Annotated[str, Field(description="Absolute input path at the server boundary.")]
 
 
 class AuthMode(Enum):
@@ -8135,6 +8142,19 @@ class AuditReviewerBinding(BaseModel):
     reasoning_effort: Annotated[str | None, Field(alias="reasoningEffort")] = None
     resolved_model: Annotated[str, Field(alias="resolvedModel")]
     selection: AuditReviewerSelection
+
+
+class FileListAuditSource(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    files: list[AuditSourceFile]
+    type: Annotated[Literal["fileList"], Field(title="FileListAuditSourceType")]
+
+
+class AuditSource(RootModel[SnippetAuditSource | FileAuditSource | FileListAuditSource]):
+    root: SnippetAuditSource | FileAuditSource | FileListAuditSource
 
 
 class Preflight(BaseModel):

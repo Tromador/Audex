@@ -208,8 +208,51 @@
           ],
           "title": "FileAuditSource",
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Explicit files, each with a unique snapshot-relative name.",
+          "properties": {
+            "files": {
+              "items": {
+                "$ref": "#/definitions/AuditSourceFile"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "fileList"
+              ],
+              "title": "FileListAuditSourceType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "files",
+            "type"
+          ],
+          "title": "FileListAuditSource",
+          "type": "object"
         }
       ]
+    },
+    "AuditSourceFile": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Portable relative path in the sealed snapshot, used by citations.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute input path at the server boundary.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ],
+      "type": "object"
     }
   },
   "properties": {

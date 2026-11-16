@@ -69,6 +69,17 @@ pub(super) fn capture_request(params: &AuditStartParams) -> anyhow::Result<Captu
                 logical_path: SnapshotPath::new(name.clone())?,
                 source_path: AbsolutePathBuf::from_absolute_path(path)?,
             },
+            AuditSource::FileList { files } => CaptureSource::FileList {
+                files: files
+                    .iter()
+                    .map(|file| {
+                        Ok(super::super::snapshot::CaptureFile {
+                            logical_path: SnapshotPath::new(file.name.clone())?,
+                            source_path: AbsolutePathBuf::from_absolute_path(&file.path)?,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+            },
         },
         context_documents: ContextDocuments {
             audex_guidance: params

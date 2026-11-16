@@ -1,4 +1,4 @@
-//! Protocol-8 preflight must remain read-only and bind the whole commissioning decision.
+//! Typed preflight must remain read-only and bind the whole commissioning decision.
 use super::*;
 mod legacy;
 #[path = "../../../../../cli/tests/audit/subscription_fixture.rs"]
@@ -24,7 +24,7 @@ async fn native_preview_has_no_store_snapshot_or_dispatch_side_effects() -> anyh
         .await
         .map_err(|error| anyhow::anyhow!("{error:?}"))?;
     assert_eq!(first, second);
-    assert_eq!(first["protocolVersion"], 8);
+    assert_eq!(first["protocolVersion"], AUDIT_PROTOCOL_VERSION);
     assert_eq!(first["reviewers"][0]["resolvedModel"], "audit-test");
     assert!(first["identity"].as_str().unwrap().len() == 64);
     assert!(!controller.root.exists());
@@ -390,6 +390,68 @@ async fn obsolete_ceilings_preserve_retained_start_identity_without_new_executio
     }
     assert_eq!(store.list_run_ids("", 100).await?.len(), 1);
     assert_eq!(store.attempts(id).await?.len(), 2);
+    assert_eq!(fake.starts.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn protocol_eight_subscription_approval_reopens_without_rewriting_or_dispatch()
+-> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (controller, fake, _) = fixture(&temp).await;
+    let child = subscription::configure(temp.path(), "valid")?;
+    create_policy_dir(&controller.root.join("c71-system-policy"))?;
+    let mut params = request(&controller);
+    let preview = api(&controller, "audit/preflight", json!({"request":params}))
+        .await
+        .unwrap();
+    params["preflight"] = preview.clone();
+    let started = api(&controller, "audit/start", params.clone())
+        .await
+        .unwrap();
+    let id = started["run"]["runId"].as_str().unwrap();
+    let store = controller.store().await?;
+    let records = store.attempts(id).await?;
+    let mut original_inputs = Vec::new();
+    for record in &records {
+        original_inputs.push(store.attempt_input(&record.operation_id).await?);
+    }
+    let mut historical: AuditPreflightResponse = serde_json::from_value(preview)?;
+    historical.protocol_version = 8;
+    historical.identity.clear();
+    historical.identity = sha256_hex(&serde_json::to_vec(&json!({
+        "requestKey":params["requestKey"],"scheduling":"sequential","bindings":historical,
+    }))?);
+    let mut typed: AuditStartParams = serde_json::from_value(params.clone())?;
+    typed.preflight = Some(historical);
+    let selections = super::super::preflight::selections(&typed)?;
+    let snapshot = SnapshotId::parse(started["run"]["snapshotId"].as_str().unwrap())?;
+    let identity = super::super::preflight::request_identity(
+        &typed,
+        &selections,
+        &snapshot,
+        typed.preflight.as_ref(),
+    )?;
+    sqlx::query("UPDATE audit_inputs SET request_identity_digest=? WHERE run_id=?")
+        .bind(&identity)
+        .bind(id)
+        .execute(&store.pool_for_tests())
+        .await?;
+    std::fs::write(child.join("client"), "unavailable after original approval")?;
+    let replay = api(&controller, "audit/preflight", json!({"request":params}))
+        .await
+        .unwrap();
+    assert_eq!(replay["existingRunId"], id);
+    assert_eq!(replay["protocolVersion"], AUDIT_PROTOCOL_VERSION);
+    params["preflight"] = replay;
+    assert_eq!(
+        api(&controller, "audit/start", params).await.unwrap()["run"]["runId"],
+        id
+    );
+    for (record, original) in records.iter().zip(original_inputs) {
+        assert_eq!(store.attempt_input(&record.operation_id).await?, original);
+    }
+    assert_eq!(store.list_run_ids("", 100).await?.len(), 1);
     assert_eq!(fake.starts.load(Ordering::SeqCst), 0);
     Ok(())
 }

@@ -1,6 +1,6 @@
 # Audex User Guide
 
-Audex adds **durable, isolated source auditing** to the Codex command-line application. An audit captures an immutable copy of one explicitly selected source file or snippet, runs a restricted reviewer against that snapshot, and retains a report that can be retrieved after the terminal disconnects or the application restarts.
+Audex adds **durable, isolated source auditing** to the Codex command-line application. An audit captures an immutable copy of explicitly selected source files or a snippet, runs a restricted reviewer against that snapshot, and retains a report that can be retrieved after the terminal disconnects or the application restarts.
 
 Audex currently provides two operator interfaces:
 
@@ -61,7 +61,7 @@ The CLI prints progress to **stderr** and the completed Markdown report to **std
 
 ## 2. How an audit works
 
-1. **Select a source.** Supply one regular file or named snippet, plus an optional audit brief and explicit context documents.
+1. **Select a source.** Supply explicit regular files or a named snippet, plus an optional audit brief and explicit context documents.
 2. **Confirm disclosure (TUI).** The operator sees the chosen source, provider and model before any reviewer request is submitted. The CLI submission is itself the explicit action.
 3. **Capture a snapshot.** The server retains the source and manifest with content hashes. Subsequent edits to the working file do not change that audit's evidence.
 4. **Run the reviewer.** An independent Codex reviewer receives the selected snapshot and only the restricted snapshot inspection tools. It does not inherit the operator conversation, tools, instructions or history.
@@ -80,6 +80,7 @@ Launch the TUI using `audex --remote unix://`. Slash commands act directly throu
 | --- | --- |
 | `/audit` | Open the durable audit picker, including existing runs and the option to start one. |
 | `/audit --file ./src/example.rs` | Audit the indicated file. |
+| `/audit --file ./client/shared.rs --file ./server/shared.rs` | Audit both files together in one snapshot. |
 | `/audit --snippet 'fn main() {}' --name example.rs` | Audit a named source snippet. |
 | `/audit --file ./src/example.rs --model MODEL --provider PROVIDER` | Override the reviewer selection. |
 | `/audit --file ./src/example.rs --brief 'Check error handling and state transitions'` | Supply specific review priorities. |
@@ -213,15 +214,19 @@ Run `audex audit --help` for the local executable's current options.
 ### Submit
 
 ```bash
-audex audit --file PATH [--model MODEL] [--provider PROVIDER]
+audex audit --file PATH [--file PATH ...] [--model MODEL] [--provider PROVIDER]
 audex audit --stdin --name LOGICAL_FILENAME [--model MODEL] [--provider PROVIDER]
 ```
+
+Repeat `--file` in the CLI or `/audit` command to select several files. Every selected input path and its snapshot name appear with the reviewer roster before commissioning. One file keeps its basename; multiple files retain paths relative to their common parent. For example, `client/shared.rs` and `server/shared.rs` remain distinct. Manifest entries are sorted by snapshot path, independent of selection order. Duplicate snapshot paths are rejected.
+
+All selected files must capture successfully before the snapshot is published. Reviewers share that immutable set, and findings and follow-up source reads use its paths. No directories are expanded or searched for additional files. The conversational `audit_start` tool uses `{"type":"fileList","files":[{"name":"client/shared.rs","path":"client/shared.rs"},{"name":"server/shared.rs","path":"server/shared.rs"}]}`; names are explicit snapshot paths and input paths resolve against the conversation directory.
 
 Submission options:
 
 | Option | Meaning |
 | --- | --- |
-| `--file PATH` | Capture one local regular file; relative paths use the CLI process's current directory. |
+| `--file PATH` | Select a local regular file; repeat for one multi-file audit. Relative paths use the CLI process's current directory. |
 | `--stdin --name NAME` | Read a UTF-8 snippet from standard input and give it a logical filename. |
 | `--model MODEL` | Set reviewer model. |
 | `--provider PROVIDER` | Set reviewer provider. |
@@ -233,7 +238,7 @@ Submission options:
 
 When `--model` or `--provider` is omitted, the CLI consults the **daemon's configuration**, not an open TUI conversation. Specify them when reproducibility matters. If the daemon has no configured model, provide `--model`.
 
-Context documents are **not discovered automatically**; they are supplied only when requested. They are disclosed to the reviewer as untrusted information, not inherited operator instructions. Source capture is limited to **32 MiB**; each optional context document to **64 KiB**. Native and Claude subscription reviewers receive the complete captured contents within that document limit. `AUDEX.md` may guide priorities within Audex’s fundamental rules; `AGENTS.md` remains evidence of conventions and cannot change scope or permissions.
+Context documents are **not discovered automatically**; they are supplied only when requested. They are disclosed to the reviewer as untrusted information, not inherited operator instructions. Each source file is limited to **32 MiB**; each optional context document to **64 KiB**. Native and Claude subscription reviewers receive the complete captured contents within that document limit. `AUDEX.md` may guide priorities within Audex’s fundamental rules; `AGENTS.md` remains evidence of conventions and cannot change scope or permissions.
 
 By default, a submitted CLI audit waits for progress and the terminal result. Use `--detach` for non-blocking operation.
 
@@ -389,7 +394,7 @@ If a start request loses its acknowledgement, **do not automatically submit anot
 
 If the server retained a matching request before its response failed, the error includes its run ID and request key. Reusing a key for different input returns an explicit idempotency conflict without a recovery run ID. Recover that run with `audit read RUN --follow` or `/audit read RUN`. An identical retry compares the captured source, explicit brief and requested reviewer settings, not today's resolved model catalogue or policy. Changed source contents or explicit inputs conflict with the original key. Older runs created before stable requested-input identities were recorded retain their conservative legacy comparison; recover using a known run ID or inspect the listing; the server does not claim that a legacy request key alone proves matching input.
 
-Compatibility is checked using `audit/capabilities`, independently of historical runs and artefact integrity. Both daemon and client must support this endpoint and audit protocol version **8**. Older daemons are refused before submission; the audit workflow does not upgrade them or fall back automatically.
+Compatibility is checked using `audit/capabilities`, independently of historical runs and artefact integrity. Both daemon and client must support this endpoint and audit protocol version **9**. Older daemons are refused before submission; the audit workflow does not upgrade them or fall back automatically.
 
 Preparation leases are renewed while their owner remains active and unexpired. Cancellation, explicit slot release and lease expiry fence submission; an expired owner cannot revive its lease. Known unsubmitted failures and abandoned preparation are cleaned up without creating replacement inference. Potentially submitted work remains observation-only.
 
@@ -464,7 +469,7 @@ Stopping the daemon is optional after using the TUI or CLI. Leave it running whe
 
 ## 9. Current boundaries
 
-The implemented auditing workflow accepts **one source file or snippet and an ordered roster of independent reviewers per run**. Native reviewers and explicitly configured Claude subscription reviewers share the sealed snapshot and common brief. Report format 5 preserves each reviewer's attribution and extraction status, including full unstructured opinions and completed peers alongside failed or interrupted attempts. Historical reports, including formats 2, 3 and 4, retain their original identities and bytes. Clients use audit protocol 8; incompatible daemons must be updated explicitly before submitting new work.
+The implemented auditing workflow accepts **an explicit file list, one source file or a snippet, with an ordered roster of independent reviewers per run**. Native reviewers and explicitly configured Claude subscription reviewers share the sealed snapshot and common brief. Report format 5 preserves each reviewer's attribution and extraction status, including full unstructured opinions and completed peers alongside failed or interrupted attempts. Historical reports, including formats 2, 3 and 4, retain their original identities and bytes. Clients use audit protocol 9; incompatible daemons must be updated explicitly before submitting new work.
 
 Automatic whole-repository source selection, deterministic finding deduplication and automated build/test verification remain outside the current public workflow. The TUI completion comparison is a Codex assessment of retained independent claims; it does not replace them or establish verification.
 
