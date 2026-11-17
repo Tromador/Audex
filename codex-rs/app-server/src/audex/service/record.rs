@@ -64,6 +64,8 @@ pub struct AttemptStatus {
     pub finished_at: Option<String>,
     pub reviewer: ReviewerSelection,
     pub tool_calls: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_model: Option<String>,
     pub native_thread_id: Option<String>,
     pub rollout_path: Option<PathBuf>,
 }
@@ -80,6 +82,7 @@ impl AttemptStatus {
             finished_at: None,
             reviewer,
             tool_calls: 0,
+            reported_model: None,
             native_thread_id: None,
             rollout_path: None,
         }
@@ -105,6 +108,16 @@ pub struct Usage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cost_usd: Option<f64>,
+    /// When absent, the original basis applies to both tokens and cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_basis: Option<Measurement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
+    /// Client-reported per-model accounting, including compaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<serde_json::Value>,
 }
 
 pub fn now() -> String {

@@ -116,11 +116,16 @@ impl Reviewer for FakeReviewer {
             Ok(Outcome {
                 completion,
                 output,
+                structured_output: None,
                 usage: Some(Usage {
                     basis: Measurement::Measured,
                     input_tokens: Some(12),
                     output_tokens: Some(4),
                     cost_usd: Some(0.0),
+                    cost_basis: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    model_usage: None,
                 }),
             })
         })

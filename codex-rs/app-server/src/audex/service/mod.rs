@@ -1,4 +1,6 @@
 //! File-backed audit orchestration. Deliberately not connected to RPC or the TUI.
+#[cfg(target_os = "linux")]
+pub(crate) mod claude;
 pub(crate) mod native;
 mod record;
 mod result;
@@ -84,6 +86,8 @@ pub enum Completion {
 pub struct Outcome {
     pub completion: Completion,
     pub output: Option<Vec<u8>>,
+    /// Client-supplied findings, kept separate from the literal final text.
+    pub structured_output: Option<serde_json::Value>,
     pub usage: Option<Usage>,
 }
 
@@ -109,6 +113,11 @@ impl Attempt {
 
     pub fn progress(&mut self, tool_calls: u64) -> Result<()> {
         self.status.tool_calls = tool_calls;
+        self.publish()
+    }
+
+    pub fn reported_model(&mut self, model: String) -> Result<()> {
+        self.status.reported_model = Some(model);
         self.publish()
     }
 
@@ -527,11 +536,13 @@ async fn drive(
             Ok(Err(error)) => Outcome {
                 completion: Completion::Failed(error.to_string()),
                 output: None,
+                structured_output: None,
                 usage: None,
             },
             Err(_) => Outcome {
                 completion: Completion::Failed("Reviewer task panicked".into()),
                 output: None,
+                structured_output: None,
                 usage: None,
             },
         };
@@ -542,10 +553,13 @@ async fn drive(
             record::write_json(&attempt.directory.join("usage.json"), &usage)?;
         }
         let output = record::read_optional(&attempt.directory.join("output.txt"))?;
-        if let Some(result) = output
-            .as_deref()
-            .and_then(|raw| result::collect(raw, &attempt.run.targets))
-        {
+        let findings = match outcome.structured_output {
+            Some(value) => result::collect(&serde_json::to_vec(&value)?, &attempt.run.targets),
+            None => output
+                .as_deref()
+                .and_then(|raw| result::collect(raw, &attempt.run.targets)),
+        };
+        if let Some(result) = findings {
             record::write_json(&attempt.directory.join("result.json"), &result)?;
         }
         let (state, reason) = if attempt.cancellation.is_cancelled() {

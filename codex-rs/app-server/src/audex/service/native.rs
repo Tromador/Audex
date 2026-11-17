@@ -55,6 +55,7 @@ impl Reviewer for NativeReviewer {
                 return Ok(Outcome {
                     completion: Completion::Cancelled,
                     output: None,
+                    structured_output: None,
                     usage: None,
                 });
             }
@@ -136,6 +137,7 @@ impl Reviewer for NativeReviewer {
             Ok(Outcome {
                 completion,
                 output: (!state.output.is_empty()).then(|| state.output.into_bytes()),
+                structured_output: None,
                 usage: state.usage,
             })
         })
@@ -272,6 +274,10 @@ impl NativeEvents {
                         input_tokens: info.total_token_usage.input_tokens.try_into().ok(),
                         output_tokens: info.total_token_usage.output_tokens.try_into().ok(),
                         cost_usd: None,
+                        cost_basis: None,
+                        cache_read_input_tokens: None,
+                        cache_creation_input_tokens: None,
+                        model_usage: None,
                     });
                 }
                 EventMsg::TurnComplete(completed) => {
