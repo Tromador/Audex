@@ -421,3 +421,103 @@ async fn resume_preserves_recovery_turn_before_status_publication() -> Result<()
     processor.skills_watcher.shutdown();
     Ok(())
 }
+
+#[test]
+fn native_audit_service_uses_the_existing_app_server_listener() -> Result<()> {
+    core_test_support::test_codex::run_test_with_large_stack("s2-app-server-listener", || async {
+        use crate::audex::service::native::NativeReviewer;
+        use crate::audex::service::{
+            AttemptStatus, AuditService, Input, ReviewerSelection, StartRequest, State, Usage,
+        };
+
+        let server = responses::start_mock_server().await;
+        let result = r#"{"summary":"Native listener result","findings":[]}"#;
+        responses::mount_sse_once(
+            &server,
+            responses::sse(vec![
+                responses::ev_response_created("native-listener"),
+                responses::ev_assistant_message("answer", result),
+                responses::ev_completed_with_tokens("native-listener", 79),
+            ]),
+        )
+        .await;
+        let test = test_codex().build_with_auto_env(&server).await?;
+        let (processor, mut outgoing) = test_processor(&test).await?;
+        let processor = Arc::new(processor);
+        let relay = tokio::spawn(async move { while outgoing.recv().await.is_some() {} });
+        let listen = {
+            let processor = processor.clone();
+            Arc::new(move |id, thread| {
+                let processor = processor.clone();
+                Box::pin(async move { processor.listen_for_audex(id, thread).await })
+                    as futures::future::BoxFuture<'static, Result<()>>
+            })
+        };
+        let cleanup = {
+            let processor = processor.clone();
+            Arc::new(move |id, thread| {
+                let processor = processor.clone();
+                Box::pin(async move {
+                    processor.cleanup_audex(id, thread).await;
+                    Ok(())
+                }) as futures::future::BoxFuture<'static, Result<()>>
+            })
+        };
+        let mut config = test.config.clone();
+        config.model_provider_id = "s2-local-fixture".into();
+        config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+        config.model_provider.supports_websockets = false;
+        config.model_providers = [(
+            config.model_provider_id.clone(),
+            config.model_provider.clone(),
+        )]
+        .into_iter()
+        .collect();
+        let runner = Arc::new(NativeReviewer::new(
+            Arc::new(config),
+            test.thread_manager.clone(),
+            listen,
+            cleanup,
+        ));
+        let source = tempfile::tempdir()?;
+        std::fs::write(
+            source.path().join("AGENTS.md"),
+            "UNTRUSTED_SOURCE_INSTRUCTIONS",
+        )?;
+        let mut service =
+            AuditService::open(test.config.codex_home.as_path(), runner, Arc::new(|_| {}))?;
+        let id = service.start(StartRequest {
+            input: Input::Paths(vec![source.path().to_path_buf()]),
+            brief: "Static review".into(),
+            guidance: None,
+            reviewers: vec![ReviewerSelection {
+                label: "native".into(),
+                route: "native".into(),
+                model: test.config.model.clone().unwrap(),
+                effort: None,
+                permission_summary: String::new(),
+            }],
+        })?;
+        tokio::time::timeout(Duration::from_secs(30), service.wait(id)).await??;
+        let attempt = service
+            .run_directory(id)
+            .join("reviewers/01-native/attempt-1");
+        let status: AttemptStatus =
+            serde_json::from_slice(&std::fs::read(attempt.join("status.json"))?)?;
+        assert_eq!(status.state, State::Succeeded, "{status:?}");
+        assert_eq!(std::fs::read_to_string(attempt.join("output.txt"))?, result);
+        let usage: Usage = serde_json::from_slice(&std::fs::read(attempt.join("usage.json"))?)?;
+        assert_eq!(usage.input_tokens, Some(79));
+        assert!(
+            status
+                .rollout_path
+                .as_ref()
+                .is_some_and(|path| path.exists())
+        );
+        let reviewer_id = ThreadId::from_string(status.native_thread_id.as_deref().unwrap())?;
+        assert!(test.thread_manager.get_thread(reviewer_id).await.is_err());
+        test.codex.shutdown_and_wait().await?;
+        relay.abort();
+        Ok(())
+    })
+}

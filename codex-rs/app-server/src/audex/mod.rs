@@ -12,6 +12,7 @@ mod result;
 mod retained;
 mod reviewer;
 mod routing;
+pub(crate) mod service;
 pub(crate) mod snapshot;
 mod source;
 pub(crate) mod source_mcp;

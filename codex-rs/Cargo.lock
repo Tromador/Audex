@@ -2189,6 +2189,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "pretty_assertions",
+ "pulldown-cmark",
  "rcgen",
  "rmcp",
  "schemars 0.8.22",

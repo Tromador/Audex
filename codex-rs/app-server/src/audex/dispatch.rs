@@ -720,7 +720,7 @@ impl CodexDispatch {
                 .map_err(|e| DispatchFailure::new("persist_acceptance", e, false))?;
         }
         if let Some(info) = history.items.iter().rev().find_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::TokenCount(event)) => event.info.as_ref(),
+            RolloutItem::EventMsg(event) => token_usage(event),
             _ => None,
         }) {
             let usage = serde_json::to_string(info)
@@ -865,6 +865,17 @@ impl Drop for PreparationLease {
     }
 }
 
+pub(super) fn token_usage(event: &EventMsg) -> Option<&codex_protocol::protocol::TokenUsageInfo> {
+    match event {
+        EventMsg::TokenCount(event) => event.info.as_ref(),
+        _ => None,
+    }
+}
+
+pub(super) fn final_output(event: &codex_protocol::protocol::TurnCompleteEvent) -> Option<&str> {
+    event.last_agent_message.as_deref()
+}
+
 fn terminal_state(items: &[RolloutItem], turn: &str) -> Option<WorkState> {
     let mut terminal = None;
     for item in items {
@@ -877,11 +888,7 @@ fn terminal_state(items: &[RolloutItem], turn: &str) -> Option<WorkState> {
                     ));
                 } else {
                     return Some(WorkState::Completed(
-                        event
-                            .last_agent_message
-                            .clone()
-                            .unwrap_or_default()
-                            .into_bytes(),
+                        final_output(event).unwrap_or_default().as_bytes().to_vec(),
                     ));
                 }
             }

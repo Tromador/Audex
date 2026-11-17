@@ -504,6 +504,10 @@ async fn start_listener(
         ..
     } = listener_task_context;
     let outgoing_for_task = Arc::clone(&outgoing);
+    let native_listener = conversation
+        .thread_extension_data()
+        .get::<crate::audex::service::native::NativeEvents>()
+        .map(|events| events.listener());
     tokio::spawn(async move {
         let shutdown_complete = loop {
             tokio::select! {
@@ -540,6 +544,9 @@ async fn start_listener(
 
                     if let Some(capture) = conversation.thread_extension_data().get::<crate::audex::capture::CaptureHandle>() {
                         capture.observe(&event).await;
+                    }
+                    if let Some(events) = conversation.thread_extension_data().get::<crate::audex::service::native::NativeEvents>() {
+                        events.observe(&event);
                     }
 
                     if let Some(worker) = &turn_cost_worker {
@@ -750,6 +757,7 @@ async fn start_listener(
                 }
             }
         };
+        drop(native_listener);
         // The thread owns its event sender, so waiting for channel closure retains
         // the runtime. Keep only the notification relay after ShutdownComplete.
         drop(conversation);

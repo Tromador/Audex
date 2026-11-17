@@ -40,7 +40,7 @@ stream_max_retries = 0
             params: AuditCapabilitiesParams {},
         })
         .await?;
-    assert_eq!(capability.protocol_version, 8);
+    assert_eq!(capability.protocol_version, 9);
     let base = json!({"requestKey":"rejected", "source":{"type":"snippet", "name":"x.rs", "content":"source"},
         "brief":"brief", "reviewers":[{"provider":"local_audit_test", "model":"audit-test"},
         {"provider":"local_audit_test", "model":"audit-test"}, {"provider":"local_audit_test", "model":"audit-test"}]});
