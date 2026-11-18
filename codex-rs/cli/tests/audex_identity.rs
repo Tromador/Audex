@@ -17,7 +17,6 @@ fn compiled_identity_default_home_explicit_home_completion_and_update_fences() -
     for command in [
         vec!["--version"],
         vec!["--help"],
-        vec!["audit", "--help"],
         vec!["exec", "--help"],
         vec!["completion", "bash"],
     ] {

@@ -151,3 +151,58 @@ pub struct AuditProgress {
     pub complete: bool,
     pub error: Option<String>,
 }
+
+#[cfg(test)]
+mod removal_tests {
+    use crate::ClientRequest;
+    use serde_json::json;
+
+    #[test]
+    fn only_file_backed_audit_requests_are_exposed() {
+        for method in [
+            "audit/capabilities",
+            "audit/preflight",
+            "audit/evidence",
+            "audit/attempts",
+            "audit/attempt/read",
+            "audit/attempt/control",
+            "audit/release-slot",
+            "audit/source",
+            "audit/source/read",
+            "audit/source/list",
+            "audit/source/search",
+        ] {
+            let Err(error) = serde_json::from_value::<ClientRequest>(
+                json!({"id":1,"method":method,"params":{}}),
+            ) else {
+                panic!("obsolete method {method} was accepted");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .starts_with(&format!("unknown variant `{method}`")),
+                "{method}: {error}"
+            );
+        }
+        for (method, params) in [
+            (
+                "audit/start",
+                json!({"input":{"type":"paths","paths":["/source"]},"cwd":"/","brief":"review","reviewers":[{"route":"native","model":"fixture"}]}),
+            ),
+            ("audit/list", json!({})),
+            ("audit/read", json!({"runId":"run"})),
+            ("audit/cancel", json!({"runId":"run"})),
+            ("audit/retry", json!({"runId":"run","reviewer":"1"})),
+            ("thread/list", json!({})),
+            ("thread/read", json!({"threadId":"thread"})),
+        ] {
+            assert!(
+                serde_json::from_value::<ClientRequest>(
+                    json!({"id":1,"method":method,"params":params})
+                )
+                .is_ok(),
+                "{method}"
+            );
+        }
+    }
+}

@@ -23,7 +23,7 @@ impl ThreadRequestProcessor {
                 continue;
             };
             let config = thread.config_snapshot().await;
-            if crate::audex::controller::is_reviewer_source(config.thread_source.as_ref()) {
+            if crate::audex::service::native::is_reviewer_source(config.thread_source.as_ref()) {
                 continue;
             }
             if !config.ephemeral

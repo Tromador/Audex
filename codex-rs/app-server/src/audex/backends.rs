@@ -1,6 +1,4 @@
 //! Non-secret configuration references. Loading never probes or enables a backend.
-use super::snapshot::manifest::sha256_hex;
-use codex_app_server_protocol::AuditAuthenticationRoute;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -92,25 +90,6 @@ impl BackendSettings {
             .map_err(|_| anyhow::anyhow!("invalid reviewer-backends.json schema"))?;
         settings.validate()?;
         Ok(settings)
-    }
-
-    /// Validate the complete file, then bind only this route's configuration.
-    pub fn identity(&self, route: &AuditAuthenticationRoute) -> anyhow::Result<String> {
-        self.validate()?;
-        let mut selected = serde_json::json!({"version": self.version});
-        match route {
-            AuditAuthenticationRoute::DaemonConfiguredNative => {}
-            AuditAuthenticationRoute::ClaudeSubscription => {
-                selected["claudeSubscription"] = serde_json::to_value(&self.claude_subscription)?;
-            }
-            AuditAuthenticationRoute::ClaudeApi => {
-                selected["claudeApi"] = serde_json::to_value(&self.claude_api)?;
-            }
-            AuditAuthenticationRoute::OllamaLocal => {
-                selected["ollamaLocal"] = serde_json::to_value(&self.ollama_local)?;
-            }
-        }
-        Ok(sha256_hex(&serde_json::to_vec(&selected)?))
     }
 
     fn validate(&self) -> anyhow::Result<()> {

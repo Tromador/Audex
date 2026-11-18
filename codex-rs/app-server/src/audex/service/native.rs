@@ -256,12 +256,15 @@ impl NativeEvents {
                         .collect();
                 }
                 EventMsg::RawResponseItem(raw) => {
-                    let codex_protocol::models::ResponseItem::FunctionCall { name, .. } = &raw.item
-                    else {
-                        return false;
-                    };
-                    if !matches!(name.as_str(), "exec_command" | "write_stdin") {
-                        return false;
+                    // Count model-issued calls once. Nested Code Mode commands emit
+                    // execution events, not model response items, and are not counted again.
+                    match &raw.item {
+                        codex_protocol::models::ResponseItem::FunctionCall { name, .. }
+                            if matches!(name.as_str(), "exec_command" | "write_stdin" | "wait") => {
+                        }
+                        codex_protocol::models::ResponseItem::CustomToolCall { name, .. }
+                            if name == "exec" => {}
+                        _ => return false,
                     }
                     state.tool_calls += 1;
                 }
@@ -317,3 +320,7 @@ impl Drop for NativeListener {
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) fn is_reviewer_source(source: Option<&codex_protocol::protocol::ThreadSource>) -> bool {
+    matches!(source, Some(codex_protocol::protocol::ThreadSource::Feature(name)) if name == "audex-reviewer")
+}

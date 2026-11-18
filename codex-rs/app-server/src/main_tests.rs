@@ -83,3 +83,9 @@ fn app_server_rejects_invalid_code_mode_host() {
         assert!(!rendered_error.contains("secret"));
     }
 }
+
+#[test]
+fn app_server_rejects_removed_source_mcp_command() {
+    assert!(AppServerArgs::try_parse_from(["codex-app-server", "audit-source-mcp"]).is_err());
+    assert!(AppServerArgs::try_parse_from(["codex-app-server", "--listen", "off"]).is_ok());
+}

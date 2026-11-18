@@ -1,4 +1,4 @@
-//! Shared isolation for native and legacy reviewer construction.
+//! Isolated configuration for the native reviewer.
 use super::*;
 
 pub(super) async fn isolated_config(
@@ -77,7 +77,6 @@ pub(super) async fn isolated_config(
         );
     }
     config.model_reasoning_effort = effort.clone();
-    config.developer_instructions = Some(AUDIT_RULES.to_string());
     config.project_doc_max_bytes = 0;
     config.project_doc_fallback_filenames.clear();
     config.include_permissions_instructions = false;

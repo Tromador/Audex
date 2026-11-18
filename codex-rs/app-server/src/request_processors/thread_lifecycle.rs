@@ -542,9 +542,6 @@ async fn start_listener(
                         }
                     };
 
-                    if let Some(capture) = conversation.thread_extension_data().get::<crate::audex::capture::CaptureHandle>() {
-                        capture.observe(&event).await;
-                    }
                     if let Some(events) = conversation.thread_extension_data().get::<crate::audex::service::native::NativeEvents>() {
                         events.observe(&event);
                     }

@@ -84,10 +84,43 @@ pub(super) fn prepare(
     assignment: Value,
     audit_run: Option<&Path>,
 ) -> Result<Launch> {
+    prepare_inner(
+        settings,
+        selection,
+        directories,
+        rules,
+        assignment,
+        audit_run,
+        false,
+    )
+}
+
+pub(super) fn prepare_conversation(
+    settings: &BackendSettings,
+    model: &str,
+    rules: &str,
+    assignment: Value,
+) -> Result<Launch> {
+    let selection = ReviewerSelection {
+        label: "conversation".into(),
+        route: "claude_subscription".into(),
+        model: model.into(),
+        effort: None,
+        permission_summary: String::new(),
+    };
+    prepare_inner(settings, &selection, &[], rules, assignment, None, true)
+}
+
+fn prepare_inner(
+    settings: &BackendSettings,
+    selection: &ReviewerSelection,
+    directories: &[PathBuf],
+    rules: &str,
+    assignment: Value,
+    audit_run: Option<&Path>,
+    conversation: bool,
+) -> Result<Launch> {
     validate(settings, selection)?;
-    let cwd = directories
-        .first()
-        .context("Claude needs a working directory")?;
     let (executable, runtime_root) = match selection.route.as_str() {
         "claude_subscription" => {
             let config = settings
@@ -113,6 +146,18 @@ pub(super) fn prepare(
             .mode(0o700)
             .create(runtime.path().join(name))?;
     }
+    let conversation_cwd = runtime.path().join("cwd");
+    let cwd = if conversation {
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&conversation_cwd)?;
+        &conversation_cwd
+    } else {
+        directories
+            .first()
+            .context("Claude needs a working directory")?
+    };
+    let tools = if conversation { "" } else { "Read,Grep,Glob" };
     let mut command = Command::new(executable);
     command.args([
         "-p",
@@ -125,9 +170,12 @@ pub(super) fn prepare(
         "--model",
         &selection.model,
         "--tools",
-        "Read,Grep,Glob",
-        "--allowedTools",
-        "Read,Grep,Glob",
+        tools,
+    ]);
+    if !conversation {
+        command.args(["--allowedTools", tools]);
+    }
+    command.args([
         "--permission-mode",
         "dontAsk",
         "--strict-mcp-config",
@@ -138,7 +186,9 @@ pub(super) fn prepare(
         "--system-prompt",
         rules,
     ]);
-    if let Some(run) = audit_run {
+    if conversation {
+        command.arg("--include-partial-messages");
+    } else if let Some(run) = audit_run {
         // Follow-up can inspect retained results as well as every live source root.
         command.arg("--add-dir").arg(run);
         for directory in directories {

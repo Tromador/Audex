@@ -144,30 +144,6 @@ def test_model_provider_errors_round_trip_wire_names(payload):
     assert error.model_dump(by_alias=True) == payload
 
 
-@pytest.mark.skip(reason="Obsolete snapshot RPC contract; retained until S5")
-def test_audit_evidence_keeps_sdk_names_and_supports_complete_collections():
-    from openai_codex.generated.v2_all import (
-        AuditEvidenceParams,
-        AuditEvidenceQuery1,
-        AuditEvidenceQuery2,
-        AuditEvidenceQuery3,
-        ViewAuditEvidenceQuery,
-    )
-
-    cases = [
-        ({"view": "reviewers"}, ViewAuditEvidenceQuery),
-        ({"view": "findings"}, AuditEvidenceQuery1),
-        ({"view": "findings", "reviewer": "haiku", "limit": 1}, AuditEvidenceQuery1),
-        ({"view": "finding", "reviewer": "haiku", "number": 2}, AuditEvidenceQuery2),
-        ({"view": "source", "snapshot": "captured", "path": "file.cpp"}, AuditEvidenceQuery3),
-    ]
-    for query, expected_type in cases:
-        payload = {"runId": "retained", "query": query}
-        parsed = AuditEvidenceParams.model_validate(payload)
-        assert isinstance(parsed.query.root, expected_type)
-        assert parsed.model_dump(by_alias=True, exclude_unset=True) == payload
-
-
 def test_answer_display_is_read_in_thread_history_and_notifications():
     from openai_codex.generated.v2_all import ItemCompletedNotification, ThreadItemsListResponse
 
@@ -200,22 +176,6 @@ def test_answer_display_is_read_in_thread_history_and_notifications():
     ).item.root.moderation
     assert moderated.moderated is True
     assert moderated.display is None
-
-
-@pytest.mark.skip(reason="Obsolete snapshot RPC contract; retained until S5")
-def test_explicit_file_list_source_preserves_wire_paths():
-    from openai_codex.generated.v2_all import AuditSource, FileListAuditSource
-
-    payload = {
-        "type": "fileList",
-        "files": [
-            {"name": "client/shared.rs", "path": "/input/client/shared.rs"},
-            {"name": "server/shared.rs", "path": "/input/server/shared.rs"},
-        ],
-    }
-    source = AuditSource.model_validate(payload)
-    assert isinstance(source.root, FileListAuditSource)
-    assert source.model_dump(by_alias=True, exclude_unset=True) == payload
 
 
 def test_file_backed_audit_contract_round_trips_all_read_views():

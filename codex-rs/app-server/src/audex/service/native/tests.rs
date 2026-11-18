@@ -17,6 +17,7 @@ use serde_json::json;
 use std::time::Duration;
 
 mod sandbox;
+mod tool_availability;
 
 fn selection() -> ReviewerSelection {
     ReviewerSelection {
@@ -220,15 +221,10 @@ async fn construction_preserves_targets_and_enforces_isolation() -> Result<()> {
         assert!(registry.config_contributors().is_empty());
         assert!(registry.model_request_contributors().is_empty());
         assert!(registry.turn_lifecycle_contributors().is_empty());
-        assert!(
-            extensions
-                .get::<crate::audex::admission::NativeAdmission>()
-                .is_none()
-        );
         let policy = extensions.get::<ToolPolicy>().unwrap();
         assert_eq!(
             policy.allowed_tools.as_ref().unwrap(),
-            &["exec_command", "write_stdin"]
+            &["exec_command", "write_stdin", "exec", "wait"]
                 .into_iter()
                 .map(|n| ToolName::namespaced("functions", n))
                 .collect::<Vec<_>>()
@@ -464,6 +460,57 @@ async fn events_retain_partial_output_and_terminal_failure_and_count_both_tools(
     assert!(
         matches!(&current.terminal, Some((_, Terminal::Failed(reason))) if reason == "controlled failure")
     );
+    Ok(())
+}
+
+#[test]
+fn tool_activity_counts_model_calls_without_outputs_or_nested_execution() -> Result<()> {
+    for namespace in [None, Some("functions")] {
+        for calls in [
+            vec![
+                json!({"type":"function_call", "name":"exec_command", "call_id":"a", "arguments":"{}", "namespace":namespace}),
+                json!({"type":"function_call", "name":"write_stdin", "call_id":"b", "arguments":"{}", "namespace":namespace}),
+            ],
+            vec![
+                json!({"type":"custom_tool_call", "name":"exec", "call_id":"a", "input":"text(await tools.exec_command({cmd:'cat source'}));", "namespace":namespace}),
+                json!({"type":"function_call", "name":"wait", "call_id":"b", "arguments":"{}", "namespace":namespace}),
+            ],
+        ] {
+            let (events, state) = NativeEvents::new();
+            for (index, item) in calls.into_iter().enumerate() {
+                events.observe(&Event {
+                    id: "turn".into(),
+                    msg: serde_json::from_value(json!({"type":"raw_response_item", "item":item}))?,
+                });
+                assert_eq!(state.borrow().tool_calls, (index + 1) as u64);
+            }
+            for item in [
+                json!({"type":"function_call_output", "call_id":"b", "output":"done"}),
+                json!({"type":"custom_tool_call_output", "call_id":"a", "output":"source"}),
+                json!({"type":"function_call", "name":"unrelated", "call_id":"c", "arguments":"{}"}),
+                json!({"type":"custom_tool_call", "name":"unrelated", "call_id":"d", "input":""}),
+                json!({"type":"function_call", "name":"exec", "call_id":"e", "arguments":"{}"}),
+                json!({"type":"custom_tool_call", "name":"wait", "call_id":"f", "input":""}),
+            ] {
+                events.observe(&Event {
+                    id: "turn".into(),
+                    msg: serde_json::from_value(json!({"type":"raw_response_item", "item":item}))?,
+                });
+                assert_eq!(state.borrow().tool_calls, 2);
+            }
+            // Both direct and nested shell execution report these lifecycle events.
+            for msg in [
+                json!({"type":"exec_command_begin", "call_id":"shell", "turn_id":"turn", "command":["cat","source"], "cwd":"file:///", "parsed_cmd":[]}),
+                json!({"type":"exec_command_end", "call_id":"shell", "turn_id":"turn", "command":["cat","source"], "cwd":"file:///", "parsed_cmd":[], "exit_code":0, "duration":{"secs":0,"nanos":1}, "status":"completed"}),
+            ] {
+                events.observe(&Event {
+                    id: "turn".into(),
+                    msg: serde_json::from_value(msg)?,
+                });
+                assert_eq!(state.borrow().tool_calls, 2);
+            }
+        }
+    }
     Ok(())
 }
 

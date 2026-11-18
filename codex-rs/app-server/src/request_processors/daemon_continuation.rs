@@ -27,7 +27,7 @@ impl ThreadRequestProcessor {
         let Ok(thread) = self.thread_manager.get_thread(thread_id).await else {
             return;
         };
-        if crate::audex::controller::is_reviewer_source(
+        if crate::audex::service::native::is_reviewer_source(
             thread.config_snapshot().await.thread_source.as_ref(),
         ) {
             return;

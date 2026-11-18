@@ -1,5 +1,5 @@
 //! Official Claude CLI adapter for file-backed reviews and retained-run discussion.
-//! Neither entry point is connected to the legacy RPC/TUI path.
+pub(crate) mod conversation;
 mod launch;
 mod owner;
 mod stream;

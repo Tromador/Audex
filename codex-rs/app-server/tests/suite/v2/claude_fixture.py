@@ -7,39 +7,19 @@ import sys
 import time
 
 root = Path(sys.argv[0]).parent
-if sys.argv[1:] == ["--version"]:
-    print("2.1.319 (Claude Code)")
-    sys.exit(0)
 args = sys.argv[1:]
 model = args[args.index("--model") + 1]
 assert args[args.index("--tools") + 1] == ""
-mcp = json.loads(Path(args[args.index("--mcp-config") + 1]).read_text())
-evidence_enabled = bool(mcp["mcpServers"])
-tool_names = ["mcp__audex_source__" + name for name in ["list", "read", "search", "evidence"]] if evidence_enabled else []
-assert set(mcp["mcpServers"]) == ({"audex_source"} if evidence_enabled else set())
-if evidence_enabled:
-    assert args[args.index("--allowedTools") + 1].split(",") == tool_names
+assert "--restricted" in args and "--strict-mcp-config" in args
+assert "--mcp-config" not in args and "--json-schema" not in args
+assert "--add-dir" not in args and "--include-partial-messages" in args
+assert "--allowedTools" not in args
 assert args[args.index("--permission-mode") + 1] == "dontAsk"
 assert "--no-session-persistence" in args and "--disable-slash-commands" in args
 assert "--effort" not in args and "--fallback-model" not in args
 assert "DISABLE_COMPACT" not in os.environ
 assert not any(key in os.environ for key in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"])
 assert list(Path.cwd().iterdir()) == []
-settings = json.loads(Path(os.environ["CLAUDE_CONFIG_DIR"], "settings.json").read_text())
-for subtype in ["initialize", "get_usage", "get_settings", "get_hooks_listing", "get_status"]:
-    request = json.loads(sys.stdin.buffer.readline())
-    assert request["request"]["subtype"] == subtype
-    if subtype == "initialize":
-        result = {"pid":os.getpid(), "claude_code_version":"2.1.319", "current_permission_mode":"dontAsk", "commands":[], "output_style":"default", "account":{"apiProvider":"firstParty", "subscriptionType":"Claude Max"}}
-    elif subtype == "get_usage":
-        result = {"subscription_type":"max"}
-    elif subtype == "get_settings":
-        result = {"effective":settings, "sources":[{"source":"userSettings", "settings":settings}], "applied":{"model":model, "advisor":None, "ultracode":False, "ultracodeRequested":False}}
-    elif subtype == "get_hooks_listing":
-        result = {"events":[], "hooks":[], "policy":{"allDisabled":True,"policyHookCount":0}}
-    else:
-        result = {"sections":[{"title":"Environment","rows":[{"label":"Setting sources","value":"User settings"}]}]}
-    print(json.dumps({"type":"control_response", "response":{"subtype":"success", "request_id":request["request_id"], "response":result}}), flush=True)
 prompt = json.loads(sys.stdin.buffer.readline())
 assert sys.stdin.buffer.read() == b""
 prompt = json.loads(prompt["message"]["content"])
@@ -55,13 +35,10 @@ session = "fixture-session"
 def emit(kind, **fields):
     print(json.dumps({"type":kind,"session_id":session,"uuid":kind,**fields}), flush=True)
 served = "claude-wrong-model" if mode == "wrong_model" else model
-emit("system", subtype="init", model=served, tools=["Bash"] if mode == "tools" else tool_names, mcp_servers=[{"name":"audex_source","status":"connected","source":"dynamic"}] if evidence_enabled else [], permissionMode="dontAsk", apiKeySource="none")
+emit("system", subtype="init", model=served, tools=["Bash"] if mode == "tools" else [], mcp_servers=[], permissionMode="dontAsk", apiKeySource="none")
 if mode == "rate_limit":
     emit("rate_limit_event", rate_limit_info={"status":"allowed"})
 text = "Claude fixture answer: " + prompt["operator_message"]
-if evidence_enabled:
-    exec((root / "evidence_fixture.py").read_text())
-    text += exercise_evidence()
 emit("stream_event", event={"type":"message_start","message":{"id":"answer","model":served,"content":[]}})
 if mode in ["text_blocks", "text_mismatch"]:
     # Official client sequence retained in cycle-6-3/pinned-stream-probe.json:

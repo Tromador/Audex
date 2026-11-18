@@ -87,8 +87,6 @@ pub enum RouteAwareClientPoolError {
 /// Error returned while building, routing, or sending a route-aware request.
 #[derive(Debug, thiserror::Error)]
 pub enum RouteAwareRequestError {
-    #[error("generation not authorised: {0}")]
-    GenerationDenied(String),
     #[error(transparent)]
     Policy(#[from] NetworkPolicyDenied),
     #[error(transparent)]
@@ -149,7 +147,6 @@ impl RouteAwareRequestError {
             | Self::Request(_)
             | Self::Policy(_)
             | Self::Build(_)
-            | Self::GenerationDenied(_)
             | Self::UnsupportedRedirectScheme(_)
             | Self::TooManyRedirects
             | Self::Timeout => None,
@@ -162,7 +159,6 @@ impl RouteAwareRequestError {
             Self::Route(_)
             | Self::Policy(_)
             | Self::Build(_)
-            | Self::GenerationDenied(_)
             | Self::UnsupportedRedirectScheme(_)
             | Self::TooManyRedirects
             | Self::Timeout => None,
@@ -208,13 +204,6 @@ impl RouteAwareRequestError {
 }
 
 impl RouteAwareClientPool {
-    pub(crate) fn generation_request_id(&self) -> Option<&str> {
-        self.client_builder
-            .generation_admission
-            .as_ref()
-            .map(|request| request.request_id.as_str())
-    }
-
     pub(crate) fn request_logging_enabled(&self) -> bool {
         self.client_builder.request_logging_enabled()
     }

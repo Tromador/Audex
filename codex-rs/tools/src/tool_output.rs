@@ -142,7 +142,6 @@ pub struct JsonToolOutput {
     value: JsonValue,
     success: Option<bool>,
     contains_external_context: bool,
-    fallback_token_limit_override: Option<usize>,
 }
 
 impl JsonToolOutput {
@@ -151,7 +150,6 @@ impl JsonToolOutput {
             value,
             success: Some(true),
             contains_external_context: false,
-            fallback_token_limit_override: None,
         }
     }
 
@@ -160,17 +158,7 @@ impl JsonToolOutput {
             value,
             success,
             contains_external_context: false,
-            fallback_token_limit_override: None,
         }
-    }
-
-    /// Preserve an already bounded JSON result in model-visible history.
-    /// The budget includes the actual JSON encoding, rather than the source byte count.
-    pub fn with_full_output(mut self) -> Self {
-        self.fallback_token_limit_override = Some(
-            codex_utils_output_truncation::approx_token_count(&self.value.to_string()),
-        );
-        self
     }
 
     pub fn with_external_context(mut self) -> Self {
@@ -180,10 +168,6 @@ impl JsonToolOutput {
 }
 
 impl ToolOutput for JsonToolOutput {
-    fn fallback_token_limit_override(&self) -> Option<usize> {
-        self.fallback_token_limit_override
-    }
-
     fn log_output(&self) -> String {
         self.value.to_string()
     }

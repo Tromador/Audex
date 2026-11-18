@@ -354,7 +354,7 @@ async fn does_not_retry_a_non_replayable_streaming_request() {
     );
 }
 
-pub(super) fn use_native_tls_for_direct_route(pool: &RouteAwareClientPool) {
+fn use_native_tls_for_direct_route(pool: &RouteAwareClientPool) {
     // Start with reqwest's default native backend even when the environment supplies a CA bundle.
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -500,7 +500,7 @@ fn spawn_successful_tls_fallback_server() -> io::Result<SuccessfulTlsFallbackSer
     ))
 }
 
-pub(super) fn spawn_protocol_version_rejection_server(
+fn spawn_protocol_version_rejection_server(
     maximum_attempts: usize,
 ) -> io::Result<(String, mpsc::Receiver<io::Result<usize>>, mpsc::Sender<()>)> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;

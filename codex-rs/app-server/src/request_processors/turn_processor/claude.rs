@@ -20,7 +20,7 @@ impl TurnRequestProcessor {
         }
         #[cfg(target_os = "linux")]
         {
-            use crate::audex::external::conversation;
+            use crate::audex::service::claude::conversation;
             if params.message.trim().is_empty() {
                 return Err(invalid_request(
                     "Usage: /claude [--model MODEL] [--audit RUN_ID] <message>",
@@ -115,14 +115,8 @@ impl TurnRequestProcessor {
                         )
                         .await
                     } else {
-                        conversation::run(
-                            &root,
-                            &execution_model,
-                            discussion,
-                            &params.message,
-                            None,
-                        )
-                        .await
+                        conversation::run(&root, &execution_model, discussion, &params.message)
+                            .await
                     }
                 };
                 tokio::select! {
@@ -134,35 +128,6 @@ impl TurnRequestProcessor {
             Ok(Some(ThreadClaudeResponse { turn_id, model }.into()))
         }
     }
-}
-
-// Selection lives in the existing operator turn, including its immutable identity.
-// Assistant claims, tool output and ordinary discussion cannot change it.
-#[cfg(any())] // Obsolete snapshot selection retained for S5.
-fn inherited_evidence(turns: &[codex_app_server_protocol::Turn]) -> Option<EvidenceIdentity> {
-    turns
-        .iter()
-        .rev()
-        .flat_map(|turn| turn.items.iter().rev())
-        .find_map(|item| {
-            let ThreadItemPayload::UserMessage { content, .. } = &item.payload else {
-                return None;
-            };
-            content.iter().find_map(|input| {
-                let V2UserInput::Text { text, .. } = input else {
-                    return None;
-                };
-                if !text.starts_with("/claude --model ") {
-                    return None;
-                }
-                let identity = text
-                    .lines()
-                    .last()?
-                    .strip_prefix("[Audex evidence identity: ")?
-                    .strip_suffix(']')?;
-                serde_json::from_str(identity).ok()
-            })
-        })
 }
 
 fn visible_discussion(
@@ -204,27 +169,6 @@ fn visible_discussion(
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[cfg(any())] // Obsolete snapshot selection retained for S5.
-    #[test]
-    fn selection_comes_only_from_operator_route_identity() {
-        let identity = EvidenceIdentity {
-            run_id: "run-a".into(),
-            snapshot_id: "snapshot-a".into(),
-            manifest_digest: "digest-a".into(),
-        };
-        let text = format!(
-            "/claude --model m --audit run-a question\n[Audex evidence identity: {}]",
-            serde_json::to_string(&identity).unwrap()
-        );
-        let assistant = serde_json::from_value(json!({"id":"a","status":"completed","items":[
-            {"type":"agentMessage","id":"a","text":text}]}))
-        .unwrap();
-        assert_eq!(inherited_evidence(&[assistant]), None);
-        let user = serde_json::from_value(json!({"id":"u","status":"completed","items":[
-            {"type":"userMessage","id":"u","content":[{"type":"text","text":text,"text_elements":[]}]}]})).unwrap();
-        assert_eq!(inherited_evidence(&[user]), Some(identity));
-    }
 
     #[test]
     fn visible_discussion_preserves_long_dialogue_and_excludes_internal_items() {

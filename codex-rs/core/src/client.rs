@@ -58,7 +58,6 @@ use codex_api::RealtimeSessionConfig as ApiRealtimeSessionConfig;
 use codex_api::Reasoning;
 use codex_api::ReasoningContext;
 use codex_api::RequestTelemetry;
-use codex_api::ReqwestTransport;
 use codex_api::ResponseCreateWsRequest;
 use codex_api::ResponsesApiRequest;
 use codex_api::ResponsesClient as ApiResponsesClient;
@@ -75,7 +74,6 @@ use codex_api::auth_header_telemetry;
 use codex_api::build_session_headers;
 use codex_api::create_text_param_for_request;
 use codex_api::response_create_client_metadata;
-use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -280,26 +278,6 @@ enum ClientRouting {
     ConfiguredProvider,
 }
 
-/// Builds the transport for one model request. With an Audex generation admission, the
-/// client is one-use and cannot follow redirects; otherwise this is the ordinary transport.
-fn build_generation_transport(
-    setup: &CurrentClientSetup,
-    endpoint: &str,
-    generation: Option<codex_api::GenerationRequest>,
-) -> Result<ReqwestTransport> {
-    let Some(generation) = generation else {
-        return setup.http_transport(endpoint);
-    };
-    let client = codex_login::default_client::create_client_for_generation(
-        &setup.http_client_factory,
-        &setup.api_provider.url_for_path(endpoint),
-        ClientRouteClass::Api,
-        generation,
-    )
-    .map_err(std::io::Error::from)?;
-    Ok(ReqwestTransport::from_http_client(client))
-}
-
 #[derive(Clone, Copy)]
 struct RequestRouteTelemetry {
     endpoint: &'static str,
@@ -334,7 +312,6 @@ pub struct ModelClient {
     restored_history: bool,
     request_contributors: Vec<Arc<dyn codex_extension_api::ModelRequestContributor>>,
     executed_tool_calls: Option<ExecutedToolCalls>,
-    generation_admission: Option<codex_api::GenerationAdmissionControl>,
     // Resolved once when the session is created, like other session feature flags.
     api_key_cyber_access_programs: cyber_access_program::ApiKeyCyberAccessPrograms,
     required_cyber_access_programs: Option<Arc<cyber_access_program::RequiredCyberAccessPrograms>>,
@@ -683,19 +660,10 @@ impl ModelClient {
             restored_history: false,
             request_contributors,
             executed_tool_calls: None,
-            generation_admission: None,
             api_key_cyber_access_programs:
                 cyber_access_program::ApiKeyCyberAccessPrograms::UnsupportedProvider,
             required_cyber_access_programs: None,
         }
-    }
-
-    pub(crate) fn with_generation_admission(
-        mut self,
-        admission: Option<codex_api::GenerationAdmissionControl>,
-    ) -> Self {
-        self.generation_admission = admission;
-        self
     }
 
     pub(crate) fn with_executed_tool_calls(mut self, recorder: ExecutedToolCalls) -> Self {
@@ -2025,16 +1993,7 @@ impl ResponsesHttpExecutor<'_> {
         sampling: SamplingOptions,
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
-        generation: Option<codex_api::GenerationRequest>,
     ) -> Result<OpenedModelResponse> {
-        // Standalone compaction uses this executor directly. It belongs to the
-        // same authorised execution and retains the ordinary ownership fence.
-        let generation = generation.or_else(|| {
-            self.client
-                .generation_admission
-                .as_ref()
-                .map(|authority| authority.request(uuid::Uuid::now_v7().to_string()))
-        });
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
             .as_ref()
@@ -2060,8 +2019,7 @@ impl ResponsesHttpExecutor<'_> {
                 .client
                 .responses_headers(client_setup.auth.as_ref(), &model_info.slug);
             tracing::Span::current().record("api.path", "/responses");
-            let transport =
-                build_generation_transport(&client_setup, "/responses", generation.clone())?;
+            let transport = client_setup.http_transport("/responses")?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -2160,8 +2118,7 @@ impl ResponsesHttpExecutor<'_> {
                 client_setup.api_provider,
                 client_setup.api_auth,
             )
-            .with_telemetry(Some(request_telemetry), Some(sse_telemetry))
-            .with_generation_admission(generation.clone());
+            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
             let stream_result = client
                 .stream_request_with_observer(request, options, |wire| {
                     inference_trace_attempt.record_started(
@@ -2181,7 +2138,6 @@ impl ResponsesHttpExecutor<'_> {
                         client: Arc::clone(&self.client.state),
                         interceptors,
                         continuation: None,
-                        generation: generation.clone(),
                     });
                 }
                 Err(ApiError::Transport(unauthorized_transport))
@@ -2254,7 +2210,6 @@ impl ModelClientSession {
         warmup: bool,
         request_trace: Option<W3cTraceContext>,
         inference_trace: &InferenceTraceContext,
-        generation: Option<codex_api::GenerationRequest>,
     ) -> Result<WebsocketStreamOutcome> {
         let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
         let provider = Arc::clone(&self.client.state.provider);
@@ -2519,11 +2474,10 @@ impl ModelClientSession {
                 ],
             );
             let stream_result = websocket_connection
-                .stream_request_with_admission(
+                .stream_request_with_observer(
                     ws_request,
                     self.websocket_session.connection_reused(),
                     Some(Arc::clone(&self.turn_state)),
-                    generation.clone(),
                     |wire| {
                         inference_trace_attempt.record_started(
                             wire.clone(),
@@ -2570,7 +2524,6 @@ impl ModelClientSession {
                 client: Arc::clone(&self.client.state),
                 interceptors,
                 continuation: Some(last_response_tx),
-                generation: generation.clone(),
             };
             self.websocket_session.last_response_rx = Some(last_response_rx);
             return Ok(WebsocketStreamOutcome::Stream(Box::new(stream)));
@@ -2635,8 +2588,7 @@ impl ModelClientSession {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<()> {
-        if self.client.generation_admission.is_some() || !self.client.responses_websocket_enabled()
-        {
+        if !self.client.responses_websocket_enabled() {
             return Ok(());
         }
         if self.is_websocket_prewarmed().await {
@@ -2658,7 +2610,6 @@ impl ModelClientSession {
                 /*warmup*/ true,
                 current_span_w3c_trace_context(),
                 &disabled_trace,
-                None,
             )
             .await
         {
@@ -2731,11 +2682,6 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<OpenedModelResponse> {
-        let generation = self
-            .client
-            .generation_admission
-            .as_ref()
-            .map(|authority| authority.request(uuid::Uuid::now_v7().to_string()));
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {
@@ -2751,7 +2697,6 @@ impl ModelClientSession {
                             /*warmup*/ false,
                             request_trace,
                             inference_trace,
-                            generation.clone(),
                         )
                         .await?
                     {
@@ -2773,7 +2718,6 @@ impl ModelClientSession {
                         sampling,
                         responses_metadata,
                         inference_trace,
-                        generation,
                     )
                     .await
             }
@@ -2867,7 +2811,6 @@ pub(crate) struct OpenedModelResponse {
     client: Arc<ModelClientState>,
     interceptors: Vec<Box<dyn codex_extension_api::ModelResponseInterceptor>>,
     continuation: Option<oneshot::Sender<LastResponse>>,
-    generation: Option<codex_api::GenerationRequest>,
 }
 
 impl OpenedModelResponse {
@@ -2906,7 +2849,6 @@ impl OpenedModelResponse {
             self.trace,
             &self.client,
             self.continuation,
-            self.generation,
             delivery,
         );
         stream.interrupt = interrupt;
@@ -2922,7 +2864,6 @@ fn map_response_events<S>(
     inference_trace_attempt: InferenceTraceAttempt,
     client: &ModelClientState,
     mut last_response_tx: Option<oneshot::Sender<LastResponse>>,
-    generation: Option<codex_api::GenerationRequest>,
     mut delivery: ResponseDelivery,
 ) -> ResponseStream
 where
@@ -2962,36 +2903,9 @@ where
                 }
                 event = api_stream.next() => event,
             };
-            let Some(mut event) = event else {
+            let Some(event) = event else {
                 break;
             };
-            if let Some(generation) = &generation {
-                let attribution = match &event {
-                    Ok(ResponseEvent::ServerModel(model)) => generation.observe_model(model).await,
-                    // Completion and local identity rejection finalise attribution.
-                    // Provider failures may have no identity; preserve their original cause.
-                    Ok(ResponseEvent::Completed { .. })
-                    | Err(ApiError::Transport(TransportError::GenerationDenied(_))) => {
-                        generation.finish_generation().await
-                    }
-                    _ => Ok(()),
-                };
-                if let Err(error) = attribution {
-                    event = Err(ApiError::Transport(error));
-                }
-                let receipt = match &event {
-                    Ok(ResponseEvent::Created { response_id }) => Some(response_id.as_deref()),
-                    Ok(ResponseEvent::Completed { response_id, .. }) => {
-                        Some(Some(response_id.as_str()))
-                    }
-                    _ => None,
-                };
-                if let Some(response_id) = receipt
-                    && let Err(error) = generation.confirm(response_id).await
-                {
-                    event = Err(ApiError::Transport(error));
-                }
-            }
             let event = match event {
                 Ok(ResponseEvent::OutputItemDone(mut item)) => {
                     // Assign IDs after interceptors, which may replace provider items.
@@ -3096,7 +3010,6 @@ where
                 }
             };
             let terminal = matches!(&event, Ok(ResponseEvent::Completed { .. }) | Err(_));
-            let failed = event.is_err();
             if !delivery.send_or_hold(event, &tx_event).await {
                 if !terminal {
                     inference_trace_attempt.record_cancelled(
@@ -3105,10 +3018,6 @@ where
                         &items_added,
                     );
                 }
-                return;
-            }
-            // An admitted generation ends at its first failure.
-            if failed && generation.is_some() {
                 return;
             }
         }

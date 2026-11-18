@@ -122,11 +122,6 @@ impl RouteAwareClientPool {
                 let version = request.version();
                 let timeout = request.timeout().copied();
                 let replay = request.try_clone();
-                if let Some(admission) = &self.client_builder.generation_admission {
-                    admission.admit("native_http").await.map_err(|error| {
-                        RouteAwareRequestError::GenerationDenied(error.to_string())
-                    })?;
-                }
                 let result = if follows_redirects_manually {
                     client.execute_without_request_logging(request).await
                 } else {
@@ -274,12 +269,6 @@ impl RouteAwareClientPool {
 
         set_remaining_timeout(&mut retry_request, timeout_deadline)?;
 
-        if let Some(admission) = &self.client_builder.generation_admission {
-            admission
-                .admit("native_http")
-                .await
-                .map_err(|error| RouteAwareRequestError::GenerationDenied(error.to_string()))?;
-        }
         let response = if self.follows_redirects_manually() {
             fallback_client
                 .execute_without_request_logging(retry_request)
@@ -337,13 +326,6 @@ impl RouteAwareClientPool {
         };
         let client = self.windows_proxy_client(current_route, selected_tls_backend, &pipe)?;
         set_remaining_timeout(&mut request, timeout_deadline)?;
-        // Recheck the original execution's cancellation fence after proxy auth.
-        if let Some(admission) = &self.client_builder.generation_admission {
-            admission
-                .admit("native_http")
-                .await
-                .map_err(|error| RouteAwareRequestError::GenerationDenied(error.to_string()))?;
-        }
         // Keep the listener alive through a possible TLS retry.
         let result = client.execute_without_request_logging(request).await;
         match result {

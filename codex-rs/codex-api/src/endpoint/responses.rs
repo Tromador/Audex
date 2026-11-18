@@ -8,7 +8,6 @@ use crate::requests::Compression;
 use crate::requests::headers::build_session_headers;
 use crate::requests::headers::insert_header;
 use crate::requests::headers::subagent_header;
-use crate::sse::responses::spawn_response_stream_with_attribution;
 use crate::sse::spawn_response_stream;
 use crate::telemetry::SseTelemetry;
 use codex_client::EncodedJsonBody;
@@ -27,7 +26,6 @@ use tracing::instrument;
 pub struct ResponsesClient<T: HttpTransport> {
     session: EndpointSession<T>,
     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
-    admission: Option<crate::GenerationRequest>,
 }
 
 #[derive(Default)]
@@ -45,7 +43,6 @@ impl<T: HttpTransport> ResponsesClient<T> {
         Self {
             session: EndpointSession::new(transport, provider, auth),
             sse_telemetry: None,
-            admission: None,
         }
     }
 
@@ -57,16 +54,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         Self {
             session: self.session.with_request_telemetry(request),
             sse_telemetry: sse,
-            admission: self.admission,
         }
-    }
-
-    pub fn with_generation_admission(
-        mut self,
-        admission: Option<crate::GenerationRequest>,
-    ) -> Self {
-        self.admission = admission;
-        self
     }
 
     pub async fn stream_request(
@@ -163,7 +151,6 @@ impl<T: HttpTransport> ResponsesClient<T> {
                 "/responses",
                 extra_headers,
                 Some(body),
-                self.admission.as_ref(),
                 |req| {
                     req.headers.insert(
                         http::header::ACCEPT,
@@ -174,21 +161,11 @@ impl<T: HttpTransport> ResponsesClient<T> {
             )
             .await?;
 
-        Ok(if self.admission.is_some() {
-            spawn_response_stream_with_attribution(
-                stream_response,
-                self.session.provider().stream_idle_timeout,
-                self.sse_telemetry.clone(),
-                turn_state,
-                true,
-            )
-        } else {
-            spawn_response_stream(
-                stream_response,
-                self.session.provider().stream_idle_timeout,
-                self.sse_telemetry.clone(),
-                turn_state,
-            )
-        })
+        Ok(spawn_response_stream(
+            stream_response,
+            self.session.provider().stream_idle_timeout,
+            self.sse_telemetry.clone(),
+            turn_state,
+        ))
     }
 }

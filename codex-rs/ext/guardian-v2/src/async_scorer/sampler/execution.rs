@@ -150,8 +150,7 @@ impl SamplingExecution {
             | LunaSamplerError::QueueFull
             | LunaSamplerError::Api(
                 ApiError::Transport(
-                    TransportError::GenerationDenied(_)
-                    | TransportError::Build(_)
+                    TransportError::Build(_)
                     | TransportError::ResponseTooLarge { .. }
                     | TransportError::Policy(_),
                 )

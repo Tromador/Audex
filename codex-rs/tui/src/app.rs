@@ -212,7 +212,6 @@ mod agents_overview_usage;
 mod agents_overview_view;
 #[path = "app/audit_service.rs"]
 mod audit;
-// Legacy audit activity source is retained for S5; it has no module or UI route.
 pub(crate) use agents_overview::AGENTS_OVERVIEW_VIEW_ID;
 mod activity_groups;
 mod app_server_event_targets;

@@ -38,11 +38,6 @@ pub trait HttpTransport: Send + Sync {
         &self,
         req: Request,
     ) -> impl std::future::Future<Output = Result<Response, TransportError>> + Send;
-    /// The request installed on this transport, if it enforces one-use admission.
-    fn generation_request_id(&self) -> Option<&str> {
-        None
-    }
-
     fn stream(
         &self,
         req: Request,
@@ -142,9 +137,6 @@ impl ReqwestTransport {
             RouteAwareRequestError::Timeout => TransportError::Timeout,
             RouteAwareRequestError::Route(error) => TransportError::Build(error.to_string()),
             RouteAwareRequestError::Build(error) => TransportError::Build(error),
-            RouteAwareRequestError::GenerationDenied(error) => {
-                TransportError::GenerationDenied(error)
-            }
             error @ (RouteAwareRequestError::UnsupportedRedirectScheme(_)
             | RouteAwareRequestError::TooManyRedirects) => {
                 TransportError::Network(error.to_string())
@@ -218,16 +210,6 @@ impl HttpTransport for ReqwestTransport {
             headers,
             body: bytes?,
         })
-    }
-
-    fn generation_request_id(&self) -> Option<&str> {
-        match &self.client {
-            TransportClient::Fixed(client) => match &client.backend {
-                HttpClientBackend::Routed(pool) => pool.generation_request_id(),
-                HttpClientBackend::Direct(_) => None,
-            },
-            TransportClient::RouteAware(pool) => pool.generation_request_id(),
-        }
     }
 
     async fn stream(&self, req: Request) -> Result<StreamResponse, TransportError> {

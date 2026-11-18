@@ -4,9 +4,6 @@ mod daemon_continuation;
 #[path = "daemon_snapshot.rs"]
 mod daemon_snapshot;
 
-#[path = "audex_access.rs"]
-mod audex_access;
-
 #[path = "realtime_history.rs"]
 mod realtime_history;
 
@@ -3007,7 +3004,7 @@ impl ThreadRequestProcessor {
                 .map_err(thread_store_list_error)?;
 
             for result in page.items {
-                if crate::audex::controller::is_reviewer_source(
+                if crate::audex::service::native::is_reviewer_source(
                     result.thread.thread_source.as_ref(),
                 ) {
                     continue;
@@ -3089,7 +3086,7 @@ impl ThreadRequestProcessor {
         let mut data = Vec::new();
         for thread_id in self.thread_manager.list_thread_ids().await {
             if let Ok(thread) = self.thread_manager.get_thread(thread_id).await
-                && !crate::audex::controller::is_reviewer_source(
+                && !crate::audex::service::native::is_reviewer_source(
                     thread.config_snapshot().await.thread_source.as_ref(),
                 )
                 && thread
@@ -3994,12 +3991,12 @@ impl ThreadRequestProcessor {
         prepared_config: &mut Option<PreparedResumeConfig>,
     ) -> Result<ControlFlow<()>, JSONRPCErrorError> {
         if matches!(target, ThreadResumeTarget::DaemonRecovery(_)) {
-            // Do not reconstruct an Audex root through ordinary cold resume: its
-            // capability attachments and workflow recovery belong to Audex.
+            // Reviewer attempts become interrupted after restart; ordinary daemon
+            // recovery must not reconstruct or resume them.
             let stored = self
                 .read_stored_thread_for_resume(&params.thread_id, params.path.as_ref(), false)
                 .await?;
-            if crate::audex::controller::is_reviewer_source(stored.thread_source.as_ref()) {
+            if crate::audex::service::native::is_reviewer_source(stored.thread_source.as_ref()) {
                 return Ok(ControlFlow::Break(()));
             }
         }
@@ -6168,7 +6165,7 @@ impl ThreadRequestProcessor {
             let mut original_paths = None;
             let mut filtered = Vec::with_capacity(page.items.len());
             for it in page.items {
-                if crate::audex::controller::is_reviewer_source(it.thread_source.as_ref()) {
+                if crate::audex::service::native::is_reviewer_source(it.thread_source.as_ref()) {
                     continue;
                 }
                 if let Some(account) = &account

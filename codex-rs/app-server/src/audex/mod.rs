@@ -1,24 +1,5 @@
-mod admission;
 mod backends;
-pub(crate) mod capture;
-pub(crate) mod controller;
-pub(crate) mod conversation_evidence;
 mod dispatch;
-#[cfg(target_os = "linux")]
-pub(crate) mod external;
-mod lifecycle;
-mod report;
-mod result;
-mod retained;
 mod reviewer;
-mod routing;
 pub(crate) mod rpc;
 pub(crate) mod service;
-pub(crate) mod snapshot;
-mod source;
-pub(crate) mod source_mcp;
-mod store;
-mod tools;
-
-#[cfg(any())] // Legacy integration tests retained until S5.
-mod tests;

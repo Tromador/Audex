@@ -2,7 +2,7 @@
 //! PID probes explicitly unlock so concurrent forks cannot retain their transient reservations.
 
 #[path = "pid_identity.rs"]
-pub(crate) mod identity;
+mod identity;
 
 #[cfg(any(unix, windows))]
 use std::borrow::Cow;

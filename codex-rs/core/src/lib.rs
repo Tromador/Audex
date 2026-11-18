@@ -282,9 +282,6 @@ pub use client_common::Prompt;
 pub use client_common::ResponseEvent;
 pub use client_common::ResponseStream;
 pub use code_mode_host::ProcessOwnedGrpcCodeModeSessionProvider;
-pub use codex_api::{
-    AdmissionFuture, GenerationAdmission, GenerationAdmissionControl, GenerationRequest,
-};
 pub use codex_prompts::REVIEW_PROMPT;
 pub use codex_runtime_agent_instance::resolve_installation_id;
 pub use compact::content_items_to_text;

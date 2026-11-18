@@ -35,7 +35,6 @@ use crate::with_chatgpt_cloudflare_cookie_store;
 #[derive(Clone)]
 pub struct HttpClientBuilder {
     http2_prior_knowledge: bool,
-    pub(crate) generation_admission: Option<crate::GenerationRequest>,
     http2_keep_alive: Option<(Duration, Duration)>,
     disable_pool_idle_timeout: bool,
     pub(crate) default_headers: Option<HeaderMap>,
@@ -126,17 +125,6 @@ impl HttpClientBuilder {
     pub fn default_headers(mut self, headers: HeaderMap) -> Self {
         self.default_headers = Some(headers);
         self
-    }
-
-    /// Bind client requests to an execution, checking ownership after routing.
-    pub fn with_generation_admission(mut self, request: crate::GenerationRequest) -> Self {
-        self.generation_admission = Some(request);
-        self.follow_redirects = false;
-        self
-    }
-
-    pub fn has_generation_admission(&self) -> bool {
-        self.generation_admission.is_some()
     }
 
     pub fn without_redirects(mut self) -> Self {
@@ -461,7 +449,6 @@ impl Default for HttpClientBuilder {
     fn default() -> Self {
         Self {
             http2_prior_knowledge: false,
-            generation_admission: None,
             http2_keep_alive: None,
             disable_pool_idle_timeout: false,
             default_headers: None,

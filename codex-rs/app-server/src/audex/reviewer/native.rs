@@ -66,9 +66,6 @@ pub(in crate::audex) async fn prepare(
         host,
         models,
         &ReviewerRequest {
-            run_id: run.id.to_string(),
-            assignment_id: selection.label.clone(),
-            brief: run.brief.clone(),
             provider: host.model_provider_id.clone(),
             model: selection.model.clone(),
             reasoning_effort: effort(selection)?,
@@ -166,7 +163,7 @@ pub(in crate::audex) async fn prepare(
         );
     }
     let permission_summary = format!(
-        "Read-only working directories: {}. Minimal runtime reads. Codex sandbox helper runtime read (exact file): {}. No writable roots or network. Tools: exec_command, write_stdin. Shell environment: core only, default secret exclusions enabled. Approvals: never. Project instructions and extra tools disabled.",
+        "Read-only working directories: {}. Minimal runtime reads. Codex sandbox helper runtime read (exact file): {}. No writable roots or network. Tools: exec_command, write_stdin (through Code Mode exec/wait when required by the model). Shell environment: core only, default secret exclusions enabled. Approvals: never. Project instructions and extra tools disabled.",
         serde_json::to_string(&run.targets.working_directories)?,
         serde_json::to_string(&helper)?,
     );
@@ -183,7 +180,7 @@ pub(in crate::audex) async fn prepare(
         )));
     options.thread_extension_init.insert(ToolPolicy {
         allowed_tools: Some(
-            ["exec_command", "write_stdin"]
+            ["exec_command", "write_stdin", "exec", "wait"]
                 .into_iter()
                 .map(|name| ToolName::namespaced("functions", name))
                 .collect(),

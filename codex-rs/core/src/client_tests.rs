@@ -1691,7 +1691,6 @@ async fn untraced_http_stream_releases_completed_output_before_response_ends() {
         InferenceTraceAttempt::disabled(),
         &test_model_client(SessionSource::Cli).state,
         /*last_response_tx*/ None,
-        None,
         super::ResponseDelivery::default(),
     );
 
@@ -1735,7 +1734,6 @@ async fn incomplete_response_traces_attempted_call_without_streaming_it() -> any
             attempt,
             &test_model_client(SessionSource::Cli).state,
             /*last_response_tx*/ None,
-            None,
             super::ResponseDelivery::default(),
         );
         assert!(matches!(stream.next().await, Some(Err(_))));
@@ -1782,7 +1780,6 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         attempt,
         &test_model_client(SessionSource::Cli).state,
         /*last_response_tx*/ None,
-        None,
         super::ResponseDelivery::default(),
     );
 
@@ -1842,7 +1839,6 @@ async fn response_stream_records_last_model_feedback_ids() {
         InferenceTraceAttempt::disabled(),
         &test_model_client(SessionSource::Cli).state,
         /*last_response_tx*/ None,
-        None,
         super::ResponseDelivery::default(),
     );
 
@@ -2068,7 +2064,6 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         attempt,
         &test_model_client(SessionSource::Cli).state,
         /*last_response_tx*/ None,
-        None,
         super::ResponseDelivery::default(),
     );
 
@@ -2898,7 +2893,6 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
         client: Arc::clone(&test_model_client(SessionSource::Cli).state),
         interceptors: vec![Box::new(ReplaceOutput)],
         continuation: Some(last_response_tx),
-        generation: None,
     }
     .into_stream()?;
     let mut delivered = Vec::new();

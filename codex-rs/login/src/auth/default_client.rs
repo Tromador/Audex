@@ -278,22 +278,6 @@ pub fn create_client_for_route(
     )
 }
 
-/// Builds one non-replayable generation transport using the ordinary routing policy.
-pub fn create_client_for_generation(
-    http_client_factory: &HttpClientFactory,
-    request_url: &str,
-    route_class: ClientRouteClass,
-    admission: codex_http_client::GenerationRequest,
-) -> Result<HttpClient, BuildRouteAwareHttpClientError> {
-    create_client_for_route_with_builder(
-        http_client_factory,
-        request_url,
-        route_class,
-        default_http_client_builder().with_generation_admission(admission),
-        /*legacy_fallback*/ true,
-    )
-}
-
 fn create_client_for_route_with_builder(
     http_client_factory: &HttpClientFactory,
     request_url: &str,
@@ -301,8 +285,7 @@ fn create_client_for_route_with_builder(
     builder: HttpClientBuilder,
     legacy_fallback: bool,
 ) -> Result<HttpClient, BuildRouteAwareHttpClientError> {
-    if builder.has_generation_admission()
-        || http_client_factory.network_policy().is_managed()
+    if http_client_factory.network_policy().is_managed()
         || http_client_factory.protects_sensitive_headers()
         || !legacy_fallback
     {

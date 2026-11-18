@@ -125,7 +125,6 @@ impl<T: HttpTransport> EndpointSession<T> {
         path: &str,
         extra_headers: HeaderMap,
         body: Option<EncodedJsonBody>,
-        admission: Option<&crate::GenerationRequest>,
         configure: C,
     ) -> Result<StreamResponse, ApiError>
     where
@@ -137,9 +136,8 @@ impl<T: HttpTransport> EndpointSession<T> {
         let request = request.into_prepared().map_err(TransportError::Build)?;
         let make_request = || request.clone();
 
-        let policy = self.provider.retry.to_policy();
         let stream = run_with_request_telemetry(
-            policy,
+            self.provider.retry.to_policy(),
             self.request_telemetry.clone(),
             make_request,
             |req| {
@@ -147,13 +145,6 @@ impl<T: HttpTransport> EndpointSession<T> {
                 let transport = &self.transport;
                 async move {
                     let req = auth.apply_auth(req).await.map_err(TransportError::from)?;
-                    if let Some(admission) = admission
-                        && transport.generation_request_id() != Some(admission.request_id.as_str())
-                    {
-                        return Err(TransportError::GenerationDenied(
-                            "transport has no matching generation safeguard".to_owned(),
-                        ));
-                    }
                     transport.stream(req).await
                 }
             },

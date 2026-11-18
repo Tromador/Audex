@@ -352,7 +352,7 @@ impl CapturedSideWork {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
-    /// Operator audit actions use the same typed protocol as the CLI.
+    /// Operator audit actions use the file-backed service protocol.
     AuditCommand {
         thread_id: ThreadId,
         args: String,
@@ -376,10 +376,6 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
         run: codex_app_server_protocol::AuditRun,
         error: Option<String>,
-    },
-    AuditDiagnostics {
-        thread_id: ThreadId,
-        text: String,
     },
     AuditError {
         thread_id: ThreadId,

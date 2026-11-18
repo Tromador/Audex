@@ -1179,9 +1179,6 @@ impl MessageProcessor {
             connection_id,
             request_id: codex_request.id().clone(),
         };
-        self.thread_processor
-            .ensure_audex_client_access(&codex_request)
-            .await?;
         let result: Result<Option<ClientResponsePayload>, JSONRPCErrorError> = match codex_request {
             ClientRequest::Initialize { .. } => {
                 panic!("Initialize should be handled before initialized request dispatch");

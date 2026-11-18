@@ -100,7 +100,6 @@ codex-tools = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-json-to-toml = { workspace = true }
 codex-utils-path-uri = { workspace = true }
-rmcp = { workspace = true, default-features = false, features = ["server", "transport-async-rw"] }
 chrono = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 futures = { workspace = true }
@@ -108,8 +107,6 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 schemars = { workspace = true }
 sha2 = { workspace = true }
-sqlx = { workspace = true }
-sqlx-macros = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
@@ -138,9 +135,7 @@ libc = { workspace = true }
 codex-windows-sandbox = { workspace = true }
 
 [dev-dependencies]
-# Match the CLI/TUI feature set when checking frozen production report bytes.
-serde_json = { workspace = true, features = ["preserve_order"] }
-codex-attachment-store = { workspace = true }
+sqlx = { workspace = true }
 codex-message-board = { workspace = true }
 zip = { workspace = true }
 codex-uds = { workspace = true }

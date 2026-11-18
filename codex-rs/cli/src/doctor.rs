@@ -2499,9 +2499,6 @@ fn websocket_error_detail(err: &ApiError) -> String {
                 TransportError::Connection(_) => "connection failed: [redacted]".to_string(),
                 TransportError::Network(_) => "network error: [redacted]".to_string(),
                 TransportError::Build(_) => "request build error: [redacted]".to_string(),
-                TransportError::GenerationDenied(_) => {
-                    "generation admission denied: [redacted]".to_owned()
-                }
                 TransportError::ResponseTooLarge { max_bytes } => {
                     format!("response body exceeds the {max_bytes} byte limit")
                 }
@@ -3357,7 +3354,6 @@ mod tests {
             }),
             ApiError::Transport(TransportError::Network(message())),
             ApiError::Transport(TransportError::Build(message())),
-            ApiError::Transport(TransportError::GenerationDenied(message())),
             ApiError::Api {
                 status: http::StatusCode::UNAUTHORIZED,
                 message: message(),
@@ -3410,7 +3406,6 @@ mod tests {
                 "handshake transport error: http 403 Forbidden: [redacted]",
                 "handshake transport error: network error: [redacted]",
                 "handshake transport error: request build error: [redacted]",
-                "handshake transport error: generation admission denied: [redacted]",
                 "handshake API error: 401 Unauthorized [redacted]",
                 "handshake stream error: [redacted]",
                 "handshake error: incomplete response: [redacted]",
