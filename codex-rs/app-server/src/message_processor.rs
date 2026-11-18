@@ -149,7 +149,7 @@ fn reject_removed_permission_profile(request: &JSONRPCRequest) -> Result<(), JSO
 }
 
 pub(crate) struct MessageProcessor {
-    audex: Arc<crate::audex::controller::AuditController>,
+    audex: Arc<crate::audex::rpc::AuditRpc>,
     pub(crate) turn_admission: TurnAdmission,
     user_verification: Arc<crate::user_verification::Service>,
     outgoing: Arc<OutgoingMessageSender>,
@@ -588,10 +588,9 @@ impl MessageProcessor {
         );
         let audex_listener = thread_processor.clone();
         let audex_cleanup = thread_processor.clone();
-        let audex = crate::audex::controller::AuditController::service(
+        let audex = crate::audex::rpc::AuditRpc::new(
             Arc::clone(&config),
             Arc::clone(&thread_manager),
-            Arc::clone(&thread_store),
             Arc::new(move |id, thread| {
                 let processor = audex_listener.clone();
                 Box::pin(async move { processor.listen_for_audex(id, thread).await })
@@ -1088,6 +1087,7 @@ impl MessageProcessor {
             | ClientRequest::ThreadDelete { .. }
             | ClientRequest::ThreadArchive { .. } => (Some(self.turn_admission.admit()?), false),
             ClientRequest::AuditStart { .. }
+            | ClientRequest::AuditRetry { .. }
             | ClientRequest::ThreadSample { .. }
             | ClientRequest::ThreadGuardianReview { .. }
             | ClientRequest::ThreadClaude { .. }
@@ -1233,17 +1233,11 @@ impl MessageProcessor {
                 })
                 .await;
             }
-            request @ (ClientRequest::AuditCapabilities { .. }
-            | ClientRequest::AuditPreflight { .. }
-            | ClientRequest::AuditStart { .. }
-            | ClientRequest::AuditEvidence { .. }
+            request @ (ClientRequest::AuditStart { .. }
             | ClientRequest::AuditRead { .. }
             | ClientRequest::AuditList { .. }
             | ClientRequest::AuditCancel { .. }
-            | ClientRequest::AuditAttempts { .. }
-            | ClientRequest::AuditAttemptRead { .. }
-            | ClientRequest::AuditAttemptControl { .. }
-            | ClientRequest::AuditReleaseSlot { .. }) => self.audex.handle(request).await.map(Some),
+            | ClientRequest::AuditRetry { .. }) => self.audex.handle(request).await.map(Some),
             ClientRequest::ServerDiagnostics { .. } => Ok(Some(read_server_diagnostics().into())),
             ClientRequest::ConfigRead { params, .. } => self
                 .config_processor

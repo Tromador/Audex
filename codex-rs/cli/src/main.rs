@@ -54,6 +54,7 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
 mod application;
+#[cfg(any())] // Obsolete audit CLI source retained for S5.
 mod audit;
 mod config_override_args;
 mod daemon_install;
@@ -152,6 +153,7 @@ enum Subcommand {
     #[clap(hide = true)]
     AuditSourceMcp(codex_app_server::AudexSourceMcpArgs),
     /// Audit an immutable source snapshot through the running local daemon.
+    #[cfg(any())]
     Audit(audit::AuditCommand),
     /// Open the agent command center to browse and switch sessions.
     Agents(AgentsCommand),
@@ -1147,6 +1149,7 @@ async fn dispatch_cli(
         Some(Subcommand::AuditSourceMcp(args)) => {
             codex_app_server::run_audex_source_mcp(args).await?;
         }
+        #[cfg(any())]
         Some(Subcommand::Audit(command)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -2475,6 +2478,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::RemoteControl(remote_control)) => Some(remote_control.subcommand_name()),
         Some(Subcommand::Mcp(_)) => Some("mcp"),
         Some(Subcommand::AuditSourceMcp(_)) => Some("audit-source-mcp"),
+        #[cfg(any())]
         Some(Subcommand::Audit(_)) => Some("audit"),
         Some(Subcommand::Plugin(_)) => Some("plugin"),
         Some(Subcommand::MigrateRollouts(_)) => Some("migrate-rollouts"),

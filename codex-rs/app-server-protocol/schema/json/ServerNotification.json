@@ -701,67 +701,112 @@
       ],
       "type": "object"
     },
-    "AuditAttemptProgress": {
+    "AuditProgress": {
       "properties": {
-        "assignmentId": {
-          "type": "string"
+        "complete": {
+          "description": "True only after the supervisor has published summary.md.",
+          "type": "boolean"
         },
-        "outputSequence": {
-          "format": "int64",
-          "type": "integer"
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "revision": {
-          "format": "int64",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "assignmentId",
-        "outputSequence",
-        "revision"
-      ],
-      "type": "object"
-    },
-    "AuditProgressNotification": {
-      "properties": {
-        "attempts": {
-          "default": [],
-          "items": {
-            "$ref": "#/definitions/AuditAttemptProgress"
-          },
-          "type": "array"
-        },
-        "phase": {
-          "$ref": "#/definitions/AuditRunPhase"
-        },
-        "revision": {
-          "format": "int64",
-          "type": "integer"
+        "reviewer": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AuditReviewerStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "runId": {
           "type": "string"
         }
       },
       "required": [
-        "phase",
-        "revision",
+        "complete",
         "runId"
       ],
       "type": "object"
     },
-    "AuditRunPhase": {
-      "enum": [
-        "created",
-        "snapshot_bound",
-        "reviewing",
-        "reporting",
-        "reconciling",
-        "completed",
-        "completed_with_failures",
-        "failed",
-        "cancelled"
+    "AuditReviewer": {
+      "additionalProperties": false,
+      "properties": {
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "route": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "route"
       ],
-      "type": "string"
+      "type": "object"
+    },
+    "AuditReviewerStatus": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "findingCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hasOutput": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewer": {
+          "type": "string"
+        },
+        "selection": {
+          "$ref": "#/definitions/AuditReviewer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "toolCalls": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "trigger": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "hasOutput",
+        "reviewer",
+        "selection",
+        "state",
+        "toolCalls",
+        "trigger"
+      ],
+      "type": "object"
     },
     "AuthMode": {
       "description": "Authentication mode for OpenAI-backed providers.",
@@ -7726,7 +7771,7 @@
           "type": "string"
         },
         "params": {
-          "$ref": "#/definitions/AuditProgressNotification"
+          "$ref": "#/definitions/AuditProgress"
         }
       },
       "required": [

@@ -569,7 +569,7 @@ impl App {
             }
             ServerNotificationThreadTarget::AppScoped => {
                 if let ServerNotification::AuditProgress(progress) = &notification {
-                    self.audits.wake(progress);
+                    self.audit_progress(app_server_client, progress);
                 }
                 tracing::debug!("ignoring app-scoped notification without a TUI app-level target");
                 return;

@@ -148,6 +148,7 @@ mod worktree_browser;
 pub use custom_terminal::Terminal;
 mod assistant_directives;
 mod attachment_files;
+#[path = "audit_service.rs"]
 mod audit;
 mod auto_review_denials;
 mod claude;

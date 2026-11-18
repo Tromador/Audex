@@ -8,6 +8,8 @@ use std::path::Path;
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(super) struct BackendSettings {
     pub version: u32,
+    #[serde(default)]
+    pub presets: std::collections::BTreeMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_conversation_model: Option<String>,
     pub claude_subscription: Option<ClaudeSubscription>,
@@ -63,6 +65,7 @@ impl Default for BackendSettings {
     fn default() -> Self {
         Self {
             version: 1,
+            presets: Default::default(),
             claude_conversation_model: None,
             claude_subscription: None,
             claude_api: None,

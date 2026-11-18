@@ -1,0 +1,111 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AuditReviewer": {
+      "additionalProperties": false,
+      "properties": {
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "route": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "route"
+      ],
+      "type": "object"
+    },
+    "AuditReviewerStatus": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "findingCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hasOutput": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewer": {
+          "type": "string"
+        },
+        "selection": {
+          "$ref": "#/definitions/AuditReviewer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "toolCalls": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "trigger": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "hasOutput",
+        "reviewer",
+        "selection",
+        "state",
+        "toolCalls",
+        "trigger"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "complete": {
+      "description": "True only after the supervisor has published summary.md.",
+      "type": "boolean"
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reviewer": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AuditReviewerStatus"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "runId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "complete",
+    "runId"
+  ],
+  "title": "AuditProgress",
+  "type": "object"
+}

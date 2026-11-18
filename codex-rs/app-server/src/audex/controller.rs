@@ -147,6 +147,7 @@ pub(crate) struct AuditController {
 }
 
 impl AuditController {
+    #[cfg(any())] // Retired RPC entry point; source retained until S5.
     pub(crate) fn service(
         config: Arc<Config>,
         threads: Arc<codex_core::ThreadManager>,
@@ -277,6 +278,7 @@ impl AuditController {
     }
 
     /// The same typed handler is used by MessageProcessor and deterministic tests.
+    #[cfg(any())] // Retired RPC entry point; source retained until S5.
     pub(crate) async fn handle(
         &self,
         request: ClientRequest,
@@ -345,6 +347,7 @@ impl AuditController {
         clippy::await_holding_invalid_type,
         reason = "serialize local durable start and cancellation transitions against dispatch admission"
     )]
+    #[cfg(any())] // Retired RPC entry point; source retained until S5.
     async fn handle_inner(
         &self,
         request: ClientRequest,
@@ -1757,5 +1760,5 @@ fn phase(value: RunPhase) -> AuditRunPhase {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())] // Legacy RPC tests retained until S5.
 mod tests;

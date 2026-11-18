@@ -1,0 +1,134 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AuditReviewer": {
+      "additionalProperties": false,
+      "properties": {
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "route": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "route"
+      ],
+      "type": "object"
+    },
+    "AuditReviewerStatus": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "findingCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hasOutput": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewer": {
+          "type": "string"
+        },
+        "selection": {
+          "$ref": "#/definitions/AuditReviewer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "toolCalls": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "trigger": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "hasOutput",
+        "reviewer",
+        "selection",
+        "state",
+        "toolCalls",
+        "trigger"
+      ],
+      "type": "object"
+    },
+    "AuditRun": {
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "reviewers": {
+          "description": "All retained attempts, in reviewer then attempt order.",
+          "items": {
+            "$ref": "#/definitions/AuditReviewerStatus"
+          },
+          "type": "array"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "sourceNotice": {
+          "type": "string"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "targets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "complete",
+        "createdAt",
+        "reviewers",
+        "runId",
+        "sourceNotice",
+        "targets"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "run": {
+      "$ref": "#/definitions/AuditRun"
+    }
+  },
+  "required": [
+    "run"
+  ],
+  "title": "AuditRunResponse",
+  "type": "object"
+}

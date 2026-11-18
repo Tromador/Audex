@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AuditInput": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "paths": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "paths"
+              ],
+              "title": "PathsAuditInputType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "paths",
+            "type"
+          ],
+          "title": "PathsAuditInput",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "snippet"
+              ],
+              "title": "SnippetAuditInputType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "text",
+            "type"
+          ],
+          "title": "SnippetAuditInput",
+          "type": "object"
+        }
+      ]
+    },
+    "AuditReviewer": {
+      "additionalProperties": false,
+      "properties": {
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "route": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "route"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "brief": {
+      "type": "string"
+    },
+    "cwd": {
+      "description": "Base directory for the operator's relative paths.",
+      "type": "string"
+    },
+    "guidance": {
+      "description": "Operator-named UTF-8 guidance file, read once at start.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "input": {
+      "$ref": "#/definitions/AuditInput"
+    },
+    "reviewers": {
+      "items": {
+        "$ref": "#/definitions/AuditReviewer"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "brief",
+    "cwd",
+    "input",
+    "reviewers"
+  ],
+  "title": "AuditStartRequest",
+  "type": "object"
+}

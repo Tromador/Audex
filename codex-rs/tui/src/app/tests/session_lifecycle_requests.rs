@@ -2646,7 +2646,6 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths_sc
             "set_thread_archived",
             "audit_start",
             "audit_read",
-            "audit_source",
             "audit_list",
             "audit_cancel",
         ])

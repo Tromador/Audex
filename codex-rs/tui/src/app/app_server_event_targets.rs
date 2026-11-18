@@ -302,14 +302,13 @@ mod tests {
 
     #[test]
     fn audit_progress_is_app_scoped_even_when_run_id_looks_like_a_thread_id() {
-        let notification = ServerNotification::AuditProgress(
-            codex_app_server_protocol::AuditProgressNotification {
+        let notification =
+            ServerNotification::AuditProgress(codex_app_server_protocol::AuditProgress {
                 run_id: ThreadId::new().to_string(),
-                revision: 1,
-                phase: codex_app_server_protocol::AuditRunPhase::Reviewing,
-                attempts: Vec::new(),
-            },
-        );
+                reviewer: None,
+                complete: false,
+                error: None,
+            });
 
         assert_eq!(
             server_notification_thread_target(&notification),

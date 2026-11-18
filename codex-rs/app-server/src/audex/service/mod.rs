@@ -1,9 +1,10 @@
-//! File-backed audit orchestration. Deliberately not connected to RPC or the TUI.
+//! File-backed audit orchestration shared by the operator RPC and TUI.
 #[cfg(target_os = "linux")]
 pub(crate) mod claude;
 pub(crate) mod native;
-mod record;
-mod result;
+pub(crate) mod read;
+pub(super) mod record;
+pub(super) mod result;
 mod summary;
 mod targets;
 

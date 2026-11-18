@@ -20,6 +20,7 @@
 //! runtime remain bounded; the local consumer event queue is unbounded so
 //! unread notifications cannot prevent request responses from being delivered.
 
+#[path = "audit_service.rs"]
 pub mod audit;
 mod cloud;
 pub mod cloud_backend;

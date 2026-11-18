@@ -1,5 +1,5 @@
 //! Parse leading route options only; the message remains literal conversation text.
-pub(crate) const USAGE: &str = "Usage: /claude [--model MODEL] [--audit RUN_ID] <message> (default model: configured Claude model, initially claude-haiku-5-5; audit selection continues in this thread)";
+pub(crate) const USAGE: &str = "Usage: /claude [--model MODEL] [--audit RUN_ID] <message> (default model: configured Claude model, initially claude-haiku-5-5; --audit RUN_ID applies only to the turn that explicitly names it)";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Request {
@@ -74,6 +74,21 @@ mod tests {
             assert!(parse(args).is_err(), "{args}");
         }
     }
+    #[test]
+    fn s4_f6_usage_describes_explicit_turn_scope_and_ordinary_parse_has_no_audit() {
+        assert_eq!(
+            parse("--audit run-a inspect finding")
+                .unwrap()
+                .audit
+                .as_deref(),
+            Some("run-a")
+        );
+        assert_eq!(parse("continue the discussion").unwrap().audit, None);
+        let usage = parse("").unwrap_err();
+        assert!(usage.contains("applies only to the turn that explicitly names it"));
+        assert!(!usage.contains("continues in this thread"));
+    }
+
     #[test]
     fn explicit_audit_and_model_options_in_either_order() {
         for args in [

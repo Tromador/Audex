@@ -12,6 +12,7 @@ mod result;
 mod retained;
 mod reviewer;
 mod routing;
+pub(crate) mod rpc;
 pub(crate) mod service;
 pub(crate) mod snapshot;
 mod source;
@@ -19,5 +20,5 @@ pub(crate) mod source_mcp;
 mod store;
 mod tools;
 
-#[cfg(test)]
+#[cfg(any())] // Legacy integration tests retained until S5.
 mod tests;

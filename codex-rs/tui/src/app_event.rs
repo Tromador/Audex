@@ -358,67 +358,23 @@ pub(crate) enum AppEvent {
         args: String,
     },
     AuditPrompt,
-    AuditAttemptsLoaded {
-        thread_id: ThreadId,
-        run_id: String,
-        attempts: Vec<codex_app_server_protocol::AuditAttemptView>,
-    },
-    AuditAttemptSelected {
-        thread_id: ThreadId,
-        attempt: codex_app_server_protocol::AuditAttemptView,
-        watch: bool,
-    },
-    AuditActivityOpen {
-        thread_id: ThreadId,
-        attempt: codex_app_server_protocol::AuditAttemptView,
-    },
-    AuditActivityPage {
-        viewer_id: uuid::Uuid,
-        reader_epoch: u64,
-        page: Box<Result<codex_app_server_protocol::AuditAttemptReadResponse, String>>,
-        consumed: tokio::sync::oneshot::Sender<()>,
-    },
-    AuditActivityControlFinished {
-        viewer_id: uuid::Uuid,
-        thread_id: ThreadId,
-        result: Result<String, String>,
-    },
-    AuditAttemptObserved {
-        thread_id: ThreadId,
-        attempt: codex_app_server_protocol::AuditAttemptView,
-        error: Option<String>,
-    },
-    AuditAttemptConfirm {
-        thread_id: ThreadId,
-        confirmation: crate::audit::AttemptControlConfirmation,
-        decision: tokio::sync::oneshot::Sender<bool>,
-    },
-    AuditAbortConfirm {
-        thread_id: ThreadId,
-        run_id: String,
-        decision: tokio::sync::oneshot::Sender<bool>,
-    },
-    AuditReleaseConfirm {
-        thread_id: ThreadId,
-        run: codex_app_server_protocol::AuditRunView,
-        decision: tokio::sync::oneshot::Sender<bool>,
-    },
     AuditConfirm {
         thread_id: ThreadId,
-        params: codex_app_server_protocol::AuditStartParams,
+        params: codex_app_server_protocol::AuditStartRequest,
         decision: tokio::sync::oneshot::Sender<bool>,
     },
     AuditListLoaded {
         thread_id: ThreadId,
-        page: codex_app_server_protocol::AuditListResponse,
+        page: codex_app_server_protocol::AuditListPage,
     },
     AuditOpened {
         thread_id: ThreadId,
-        run: codex_app_server_protocol::AuditRunView,
+        run: codex_app_server_protocol::AuditRun,
+        compare: bool,
     },
     AuditUpdated {
         thread_id: ThreadId,
-        run: codex_app_server_protocol::AuditRunView,
+        run: codex_app_server_protocol::AuditRun,
         error: Option<String>,
     },
     AuditDiagnostics {

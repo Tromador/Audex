@@ -210,61 +210,13 @@
             },
             "method": {
               "enum": [
-                "audit/capabilities"
-              ],
-              "title": "Audit/capabilitiesRequestMethod",
-              "type": "string"
-            },
-            "params": {
-              "$ref": "#/definitions/v2/AuditCapabilitiesParams"
-            }
-          },
-          "required": [
-            "id",
-            "method",
-            "params"
-          ],
-          "title": "Audit/capabilitiesRequest",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "id": {
-              "$ref": "#/definitions/v2/RequestId"
-            },
-            "method": {
-              "enum": [
-                "audit/preflight"
-              ],
-              "title": "Audit/preflightRequestMethod",
-              "type": "string"
-            },
-            "params": {
-              "$ref": "#/definitions/v2/AuditPreflightParams"
-            }
-          },
-          "required": [
-            "id",
-            "method",
-            "params"
-          ],
-          "title": "Audit/preflightRequest",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "id": {
-              "$ref": "#/definitions/v2/RequestId"
-            },
-            "method": {
-              "enum": [
                 "audit/start"
               ],
               "title": "Audit/startRequestMethod",
               "type": "string"
             },
             "params": {
-              "$ref": "#/definitions/v2/AuditStartParams"
+              "$ref": "#/definitions/v2/AuditStartRequest"
             }
           },
           "required": [
@@ -282,61 +234,13 @@
             },
             "method": {
               "enum": [
-                "audit/evidence"
-              ],
-              "title": "Audit/evidenceRequestMethod",
-              "type": "string"
-            },
-            "params": {
-              "$ref": "#/definitions/v2/AuditEvidenceParams"
-            }
-          },
-          "required": [
-            "id",
-            "method",
-            "params"
-          ],
-          "title": "Audit/evidenceRequest",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "id": {
-              "$ref": "#/definitions/v2/RequestId"
-            },
-            "method": {
-              "enum": [
-                "audit/read"
-              ],
-              "title": "Audit/readRequestMethod",
-              "type": "string"
-            },
-            "params": {
-              "$ref": "#/definitions/v2/AuditReadParams"
-            }
-          },
-          "required": [
-            "id",
-            "method",
-            "params"
-          ],
-          "title": "Audit/readRequest",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "id": {
-              "$ref": "#/definitions/v2/RequestId"
-            },
-            "method": {
-              "enum": [
                 "audit/list"
               ],
               "title": "Audit/listRequestMethod",
               "type": "string"
             },
             "params": {
-              "$ref": "#/definitions/v2/AuditListParams"
+              "$ref": "#/definitions/v2/AuditListRequest"
             }
           },
           "required": [
@@ -354,13 +258,37 @@
             },
             "method": {
               "enum": [
+                "audit/read"
+              ],
+              "title": "Audit/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AuditReadRequest"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Audit/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "audit/cancel"
               ],
               "title": "Audit/cancelRequestMethod",
               "type": "string"
             },
             "params": {
-              "$ref": "#/definitions/v2/AuditCancelParams"
+              "$ref": "#/definitions/v2/AuditCancelRequest"
             }
           },
           "required": [
@@ -378,13 +306,13 @@
             },
             "method": {
               "enum": [
-                "audit/attempts"
+                "audit/retry"
               ],
-              "title": "Audit/attemptsRequestMethod",
+              "title": "Audit/retryRequestMethod",
               "type": "string"
             },
             "params": {
-              "$ref": "#/definitions/v2/AuditAttemptsParams"
+              "$ref": "#/definitions/v2/AuditRetryRequest"
             }
           },
           "required": [
@@ -392,79 +320,7 @@
             "method",
             "params"
           ],
-          "title": "Audit/attemptsRequest",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "id": {
-              "$ref": "#/definitions/v2/RequestId"
-            },
-            "method": {
-              "enum": [
-                "audit/attempt/read"
-              ],
-              "title": "Audit/attempt/readRequestMethod",
-              "type": "string"
-            },
-            "params": {
-              "$ref": "#/definitions/v2/AuditAttemptReadParams"
-            }
-          },
-          "required": [
-            "id",
-            "method",
-            "params"
-          ],
-          "title": "Audit/attempt/readRequest",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "id": {
-              "$ref": "#/definitions/v2/RequestId"
-            },
-            "method": {
-              "enum": [
-                "audit/attempt/control"
-              ],
-              "title": "Audit/attempt/controlRequestMethod",
-              "type": "string"
-            },
-            "params": {
-              "$ref": "#/definitions/v2/AuditAttemptControlParams"
-            }
-          },
-          "required": [
-            "id",
-            "method",
-            "params"
-          ],
-          "title": "Audit/attempt/controlRequest",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "id": {
-              "$ref": "#/definitions/v2/RequestId"
-            },
-            "method": {
-              "enum": [
-                "audit/release-slot"
-              ],
-              "title": "Audit/releaseSlotRequestMethod",
-              "type": "string"
-            },
-            "params": {
-              "$ref": "#/definitions/v2/AuditReleaseSlotParams"
-            }
-          },
-          "required": [
-            "id",
-            "method",
-            "params"
-          ],
-          "title": "Audit/releaseSlotRequest",
+          "title": "Audit/retryRequest",
           "type": "object"
         },
         {
@@ -5076,7 +4932,7 @@
               "type": "string"
             },
             "params": {
-              "$ref": "#/definitions/v2/AuditProgressNotification"
+              "$ref": "#/definitions/v2/AuditProgress"
             }
           },
           "required": [
@@ -8888,426 +8744,16 @@
         ],
         "type": "object"
       },
-      "AuditActivityEntry": {
-        "properties": {
-          "itemId": {
-            "type": "string"
-          },
-          "kind": {
-            "description": "Assistant text, source-tool activity and status remain distinct.",
-            "type": "string"
-          },
-          "payload": {
-            "description": "Exact retained public material. Activity is unvalidated, including JSON.",
-            "type": "string"
-          },
-          "payloadDigest": {
-            "type": "string"
-          },
-          "sequence": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "sessionId": {
-            "type": "string"
-          },
-          "turnId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "itemId",
-          "kind",
-          "payload",
-          "payloadDigest",
-          "sequence",
-          "sessionId",
-          "turnId"
-        ],
-        "type": "object"
-      },
-      "AuditAttemptAction": {
-        "enum": [
-          "cancel",
-          "ignore",
-          "retry"
-        ],
-        "type": "string"
-      },
-      "AuditAttemptControlParams": {
+      "AuditCancelRequest": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "additionalProperties": false,
         "properties": {
-          "acknowledgePossibleOverlap": {
-            "default": false,
-            "type": "boolean"
-          },
-          "action": {
-            "$ref": "#/definitions/v2/AuditAttemptAction"
-          },
-          "actionKey": {
-            "description": "Reuse the same key and payload after a lost acknowledgement.",
-            "type": "string"
-          },
-          "assignmentId": {
-            "type": "string"
-          },
-          "authoriseRetry": {
-            "default": false,
-            "type": "boolean"
-          },
-          "reason": {
-            "type": "string"
-          },
-          "runId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "action",
-          "actionKey",
-          "assignmentId",
-          "reason",
-          "runId"
-        ],
-        "title": "AuditAttemptControlParams",
-        "type": "object"
-      },
-      "AuditAttemptControlResponse": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "properties": {
-          "actionKey": {
-            "type": "string"
-          },
-          "assignmentId": {
-            "type": "string"
-          },
-          "completedWon": {
-            "type": "boolean"
-          },
-          "cutoff": {
-            "format": "int64",
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "disposition": {
-            "type": "string"
-          },
-          "possibleOverlap": {
-            "type": "boolean"
-          },
-          "replacementAssignmentId": {
+          "reviewer": {
             "type": [
               "string",
               "null"
             ]
           },
-          "replacementOperationId": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "actionKey",
-          "assignmentId",
-          "completedWon",
-          "disposition",
-          "possibleOverlap"
-        ],
-        "title": "AuditAttemptControlResponse",
-        "type": "object"
-      },
-      "AuditAttemptProgress": {
-        "properties": {
-          "assignmentId": {
-            "type": "string"
-          },
-          "outputSequence": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "revision": {
-            "format": "int64",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "assignmentId",
-          "outputSequence",
-          "revision"
-        ],
-        "type": "object"
-      },
-      "AuditAttemptReadParams": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "properties": {
-          "afterSequence": {
-            "format": "int64",
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "assignmentId": {
-            "type": "string"
-          },
-          "limit": {
-            "format": "uint32",
-            "minimum": 0.0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "runId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "assignmentId",
-          "runId"
-        ],
-        "title": "AuditAttemptReadParams",
-        "type": "object"
-      },
-      "AuditAttemptReadResponse": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "properties": {
-          "attempt": {
-            "$ref": "#/definitions/v2/AuditAttemptView"
-          },
-          "entries": {
-            "items": {
-              "$ref": "#/definitions/v2/AuditActivityEntry"
-            },
-            "type": "array"
-          },
-          "nextSequence": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "rawResult": {
-            "description": "The original terminal response, if retained; invalid JSON stays invalid.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "recoveredOutput": {
-            "description": "Visible text recovered from the original history without terminal confirmation.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "attempt",
-          "entries",
-          "nextSequence"
-        ],
-        "title": "AuditAttemptReadResponse",
-        "type": "object"
-      },
-      "AuditAttemptView": {
-        "properties": {
-          "assignmentId": {
-            "type": "string"
-          },
-          "assignmentState": {
-            "type": "string"
-          },
-          "attemptOrdinal": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "authenticationRoute": {
-            "description": "Uses the retained native route; this does not claim an API/subscription billing amount.",
-            "type": "string"
-          },
-          "captureFailure": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "captureGap": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "captureTruncated": {
-            "type": "boolean"
-          },
-          "completed": {
-            "description": "An authoritative completed opinion, independent of structured extraction. Never inferred from activity, process exit alone or reviewer identity claims.",
-            "type": "boolean"
-          },
-          "current": {
-            "type": "boolean"
-          },
-          "disposition": {
-            "description": "Contribution disposition is independent of execution certainty.",
-            "type": "string"
-          },
-          "executionAdapter": {
-            "$ref": "#/definitions/v2/AuditExecutionAdapter"
-          },
-          "expectedServedModel": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "extraction": {
-            "anyOf": [
-              {
-                "$ref": "#/definitions/v2/AuditResultExtraction"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Absent for historical results predating the shared extraction contract."
-          },
-          "findingCount": {
-            "default": null,
-            "description": "Retained structured finding count; absent until the attempt completed.",
-            "format": "uint32",
-            "minimum": 0.0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "localExecution": {
-            "anyOf": [
-              {
-                "$ref": "#/definitions/v2/AuditLocalExecution"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Live local cleanup receipts, independent of the frozen contribution and remote billing."
-          },
-          "model": {
-            "description": "Requested selection, retained for compatibility.",
-            "type": "string"
-          },
-          "modelEvidence": {
-            "description": "Retained per-generation evidence, including failures; reads never refresh configuration.",
-            "items": {
-              "$ref": "#/definitions/v2/AuditGenerationIdentity"
-            },
-            "type": "array"
-          },
-          "operationId": {
-            "type": "string"
-          },
-          "operationState": {
-            "type": "string"
-          },
-          "outputCutoff": {
-            "format": "int64",
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "outputSequence": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "ownerGeneration": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "possibleOverlap": {
-            "type": "boolean"
-          },
-          "provider": {
-            "type": "string"
-          },
-          "reasoningEffort": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "recoveryStatus": {
-            "description": "Recovery decision for this attempt; ordinary client retries are separate.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "requestedModel": {
-            "type": "string"
-          },
-          "resolvedModel": {
-            "type": "string"
-          },
-          "retryEligible": {
-            "type": "boolean"
-          },
-          "reviewerId": {
-            "type": "string"
-          },
-          "reviewerOrdinal": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "revision": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "runId": {
-            "type": "string"
-          },
-          "snapshotId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "assignmentId",
-          "assignmentState",
-          "attemptOrdinal",
-          "authenticationRoute",
-          "captureTruncated",
-          "completed",
-          "current",
-          "disposition",
-          "executionAdapter",
-          "model",
-          "modelEvidence",
-          "operationId",
-          "operationState",
-          "outputSequence",
-          "ownerGeneration",
-          "possibleOverlap",
-          "provider",
-          "requestedModel",
-          "resolvedModel",
-          "retryEligible",
-          "reviewerId",
-          "reviewerOrdinal",
-          "revision",
-          "runId",
-          "snapshotId"
-        ],
-        "type": "object"
-      },
-      "AuditAttemptsParams": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "properties": {
           "runId": {
             "type": "string"
           }
@@ -9315,1352 +8761,426 @@
         "required": [
           "runId"
         ],
-        "title": "AuditAttemptsParams",
+        "title": "AuditCancelRequest",
         "type": "object"
       },
-      "AuditAttemptsResponse": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "properties": {
-          "attempts": {
-            "items": {
-              "$ref": "#/definitions/v2/AuditAttemptView"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "attempts"
-        ],
-        "title": "AuditAttemptsResponse",
-        "type": "object"
-      },
-      "AuditAuthenticationRoute": {
-        "description": "Authentication selection is independent of provider and model. Only the daemon-configured native and qualified subscription routes are available for commissioning.",
-        "enum": [
-          "daemon_configured_native",
-          "claude_subscription",
-          "claude_api",
-          "ollama_local"
-        ],
-        "type": "string"
-      },
-      "AuditCancelParams": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "properties": {
-          "runId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "runId"
-        ],
-        "title": "AuditCancelParams",
-        "type": "object"
-      },
-      "AuditCancelResponse": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "properties": {
-          "run": {
-            "$ref": "#/definitions/v2/AuditRunView"
-          }
-        },
-        "required": [
-          "run"
-        ],
-        "title": "AuditCancelResponse",
-        "type": "object"
-      },
-      "AuditCapabilitiesParams": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "title": "AuditCapabilitiesParams",
-        "type": "object"
-      },
-      "AuditCapabilitiesResponse": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "properties": {
-          "protocolVersion": {
-            "format": "uint32",
-            "minimum": 0.0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "protocolVersion"
-        ],
-        "title": "AuditCapabilitiesResponse",
-        "type": "object"
-      },
-      "AuditClaudeBinding": {
-        "additionalProperties": false,
-        "description": "Non-secret local bindings; account eligibility is checked by the owned client before prompting.",
-        "properties": {
-          "clientVersion": {
-            "type": "string"
-          },
-          "executable": {
-            "type": "string"
-          },
-          "executableDigest": {
-            "type": "string"
-          },
-          "policyDigest": {
-            "type": "string"
-          },
-          "profile": {
-            "type": "string"
-          },
-          "runtimeRoot": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "clientVersion",
-          "executable",
-          "executableDigest",
-          "policyDigest",
-          "profile",
-          "runtimeRoot"
-        ],
-        "type": "object"
-      },
-      "AuditCollectionView": {
-        "properties": {
-          "completedCount": {
-            "format": "uint32",
-            "minimum": 0.0,
-            "type": "integer"
-          },
-          "excludedCount": {
-            "format": "uint32",
-            "minimum": 0.0,
-            "type": "integer"
-          },
-          "outstandingCount": {
-            "format": "uint32",
-            "minimum": 0.0,
-            "type": "integer"
-          },
-          "ready": {
-            "type": "boolean"
-          },
-          "reviewerCount": {
-            "format": "uint32",
-            "minimum": 0.0,
-            "type": "integer"
-          },
-          "scheduling": {
-            "$ref": "#/definitions/v2/AuditScheduling"
-          }
-        },
-        "required": [
-          "completedCount",
-          "excludedCount",
-          "outstandingCount",
-          "ready",
-          "reviewerCount",
-          "scheduling"
-        ],
-        "type": "object"
-      },
-      "AuditEvidenceParams": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "description": "Read-only conversation access. Offsets are zero based; finding numbers are one based.",
-        "properties": {
-          "query": {
-            "$ref": "#/definitions/v2/AuditEvidenceQuery"
-          },
-          "runId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "query",
-          "runId"
-        ],
-        "title": "AuditEvidenceParams",
-        "type": "object"
-      },
-      "AuditEvidenceQuery": {
+      "AuditInput": {
         "oneOf": [
           {
             "additionalProperties": false,
             "properties": {
-              "limit": {
-                "description": "Caller-selected page length; omission returns all remaining reviewers.",
-                "format": "uint",
-                "minimum": 0.0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "offset": {
-                "default": 0,
-                "format": "uint",
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              "view": {
-                "enum": [
-                  "reviewers"
-                ],
-                "type": "string"
-              }
-            },
-            "required": [
-              "view"
-            ],
-            "title": "ViewAuditEvidenceQuery",
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "limit": {
-                "description": "Caller-selected page length; omission returns all remaining findings.",
-                "format": "uint",
-                "minimum": 0.0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "offset": {
-                "default": 0,
-                "format": "uint",
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              "reviewer": {
-                "description": "Omission returns complete findings across all retained reviewers.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "view": {
-                "enum": [
-                  "findings"
-                ],
-                "type": "string"
-              }
-            },
-            "required": [
-              "view"
-            ],
-            "title": "AuditEvidenceQuery1",
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "maxBytes": {
-                "description": "Optional JSON byte range; omission returns the complete remainder.",
-                "format": "uint",
-                "minimum": 0.0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "number": {
-                "format": "uint",
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              "offset": {
-                "default": 0,
-                "format": "uint",
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              "reviewer": {
-                "type": "string"
-              },
-              "view": {
-                "enum": [
-                  "finding"
-                ],
-                "type": "string"
-              }
-            },
-            "required": [
-              "number",
-              "reviewer",
-              "view"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "maxBytes": {
-                "description": "Optional byte range; omission reads through EOF. No Audex size ceiling.",
-                "format": "uint",
-                "minimum": 0.0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "offset": {
-                "default": 0,
-                "format": "uint64",
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              "path": {
-                "type": "string"
-              },
-              "snapshot": {
-                "type": "string"
-              },
-              "view": {
-                "enum": [
-                  "source"
-                ],
-                "type": "string"
-              }
-            },
-            "required": [
-              "path",
-              "snapshot",
-              "view"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "maxBytes": {
-                "description": "Optional UTF-8 byte page of the complete immutable report.",
-                "format": "uint",
-                "minimum": 0.0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "offset": {
-                "default": 0,
-                "format": "uint",
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              "view": {
-                "enum": [
-                  "diagnostics"
-                ],
-                "type": "string"
-              }
-            },
-            "required": [
-              "view"
-            ],
-            "title": "DiagnosticsAuditEvidenceQuery",
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "maxBytes": {
-                "description": "Optional lossless UTF-8 byte page of the original captured document.",
-                "format": "uint",
-                "minimum": 0.0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
-              "offset": {
-                "default": 0,
-                "format": "uint",
-                "minimum": 0.0,
-                "type": "integer"
-              },
-              "path": {
-                "description": "Omit to list captured documents; otherwise use a listed logical path.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "snapshot": {
-                "type": "string"
-              },
-              "view": {
-                "enum": [
-                  "guidance"
-                ],
-                "type": "string"
-              }
-            },
-            "required": [
-              "snapshot",
-              "view"
-            ],
-            "title": "GuidanceAuditEvidenceQuery",
-            "type": "object"
-          }
-        ]
-      },
-      "AuditEvidenceResponse": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "properties": {
-          "data": true
-        },
-        "required": [
-          "data"
-        ],
-        "title": "AuditEvidenceResponse",
-        "type": "object"
-      },
-      "AuditExecutionAdapter": {
-        "description": "Execution mechanism is distinct from the configured provider and authentication route.",
-        "enum": [
-          "native",
-          "claude_client"
-        ],
-        "type": "string"
-      },
-      "AuditExtractionStatus": {
-        "enum": [
-          "validated_structured",
-          "deterministically_normalised",
-          "unstructured_opinion"
-        ],
-        "type": "string"
-      },
-      "AuditGenerationIdentity": {
-        "properties": {
-          "evidenceScope": {
-            "description": "Connection observations cannot establish per-generation attribution.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "expectedModel": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "observedModel": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "requestId": {
-            "type": "string"
-          },
-          "state": {
-            "type": "string"
-          },
-          "transport": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "requestId",
-          "state",
-          "transport"
-        ],
-        "type": "object"
-      },
-      "AuditListParams": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "properties": {
-          "after": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "limit": {
-            "format": "uint32",
-            "minimum": 0.0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          }
-        },
-        "title": "AuditListParams",
-        "type": "object"
-      },
-      "AuditListResponse": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "properties": {
-          "nextCursor": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "protocolVersion": {
-            "description": "Required even for an empty list, so clients can check before submitting work.",
-            "format": "uint32",
-            "minimum": 0.0,
-            "type": "integer"
-          },
-          "runs": {
-            "description": "Newest-first metadata summaries. Results and reports are absent; audit/read retrieves those artefacts with strict integrity verification.",
-            "items": {
-              "$ref": "#/definitions/v2/AuditRunView"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "protocolVersion",
-          "runs"
-        ],
-        "title": "AuditListResponse",
-        "type": "object"
-      },
-      "AuditLocalExecution": {
-        "properties": {
-          "cleanupFinishedAtMs": {
-            "format": "int64",
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "status": {
-            "type": "string"
-          },
-          "stopConfirmedAtMs": {
-            "format": "int64",
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "stopRequestedAtMs": {
-            "format": "int64",
-            "type": [
-              "integer",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "status"
-        ],
-        "type": "object"
-      },
-      "AuditOperationState": {
-        "description": "Durable operation state; `unknown` is distinct from a failed review.",
-        "enum": [
-          "planned",
-          "dispatching",
-          "accepted",
-          "observed_terminal",
-          "committed",
-          "failed",
-          "unknown"
-        ],
-        "type": "string"
-      },
-      "AuditPreflightParams": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "description": "Construction and local inspection only: no persistence, client launch or inference.",
-        "properties": {
-          "request": {
-            "additionalProperties": false,
-            "properties": {
-              "agentsEvidence": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "audexGuidance": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "brief": {
-                "type": "string"
-              },
-              "expectedServedModel": {
-                "description": "Explicitly qualified served-model alias for the singular selection.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "model": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "preflight": {
-                "anyOf": [
-                  {
-                    "additionalProperties": false,
-                    "properties": {
-                      "briefDigest": {
-                        "type": "string"
-                      },
-                      "contextDigest": {
-                        "type": "string"
-                      },
-                      "existingRunId": {
-                        "description": "Identical request already commissioned; Start only retrieves that approval.",
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "identity": {
-                        "type": "string"
-                      },
-                      "manifestDigest": {
-                        "type": "string"
-                      },
-                      "protocolVersion": {
-                        "format": "uint32",
-                        "minimum": 0.0,
-                        "type": "integer"
-                      },
-                      "reviewers": {
-                        "items": {
-                          "$ref": "#/definitions/v2/AuditReviewerBinding"
-                        },
-                        "type": "array"
-                      },
-                      "snapshotId": {
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "briefDigest",
-                      "contextDigest",
-                      "identity",
-                      "manifestDigest",
-                      "protocolVersion",
-                      "reviewers",
-                      "snapshotId"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Read-only disclosure approved by the operator; required for subscription rosters."
-              },
-              "provider": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "reasoningEffort": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "requestKey": {
-                "type": "string"
-              },
-              "reviewers": {
-                "description": "Ordered reviewer roster. Mutually exclusive with the singular native selection.",
+              "paths": {
                 "items": {
-                  "$ref": "#/definitions/v2/AuditReviewerSelection"
+                  "type": "string"
                 },
-                "type": [
-                  "array",
-                  "null"
-                ]
+                "type": "array"
               },
-              "scheduling": {
-                "allOf": [
-                  {
-                    "$ref": "#/definitions/v2/AuditScheduling"
-                  }
+              "type": {
+                "enum": [
+                  "paths"
                 ],
-                "default": "automatic"
-              },
-              "source": {
-                "$ref": "#/definitions/v2/AuditSource"
+                "title": "PathsAuditInputType",
+                "type": "string"
               }
             },
             "required": [
-              "brief",
-              "requestKey",
-              "source"
+              "paths",
+              "type"
             ],
+            "title": "PathsAuditInput",
             "type": "object"
-          }
-        },
-        "required": [
-          "request"
-        ],
-        "title": "AuditPreflightParams",
-        "type": "object"
-      },
-      "AuditPreflightResponse": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "properties": {
-          "briefDigest": {
-            "type": "string"
           },
-          "contextDigest": {
-            "type": "string"
-          },
-          "existingRunId": {
-            "description": "Identical request already commissioned; Start only retrieves that approval.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "identity": {
-            "type": "string"
-          },
-          "manifestDigest": {
-            "type": "string"
-          },
-          "protocolVersion": {
-            "format": "uint32",
-            "minimum": 0.0,
-            "type": "integer"
-          },
-          "reviewers": {
-            "items": {
-              "$ref": "#/definitions/v2/AuditReviewerBinding"
-            },
-            "type": "array"
-          },
-          "snapshotId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "briefDigest",
-          "contextDigest",
-          "identity",
-          "manifestDigest",
-          "protocolVersion",
-          "reviewers",
-          "snapshotId"
-        ],
-        "title": "AuditPreflightResponse",
-        "type": "object"
-      },
-      "AuditProgressNotification": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "properties": {
-          "attempts": {
-            "default": [],
-            "items": {
-              "$ref": "#/definitions/v2/AuditAttemptProgress"
-            },
-            "type": "array"
-          },
-          "phase": {
-            "$ref": "#/definitions/v2/AuditRunPhase"
-          },
-          "revision": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "runId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "phase",
-          "revision",
-          "runId"
-        ],
-        "title": "AuditProgressNotification",
-        "type": "object"
-      },
-      "AuditReadParams": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "properties": {
-          "runId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "runId"
-        ],
-        "title": "AuditReadParams",
-        "type": "object"
-      },
-      "AuditReadResponse": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "properties": {
-          "run": {
-            "$ref": "#/definitions/v2/AuditRunView"
-          }
-        },
-        "required": [
-          "run"
-        ],
-        "title": "AuditReadResponse",
-        "type": "object"
-      },
-      "AuditReleaseSlotParams": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "properties": {
-          "acknowledgePossibleConcurrentExecutionAndCharges": {
-            "type": "boolean"
-          },
-          "expectedRevision": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "reason": {
-            "type": "string"
-          },
-          "runId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "acknowledgePossibleConcurrentExecutionAndCharges",
-          "expectedRevision",
-          "reason",
-          "runId"
-        ],
-        "title": "AuditReleaseSlotParams",
-        "type": "object"
-      },
-      "AuditReleaseSlotResponse": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "properties": {
-          "run": {
-            "$ref": "#/definitions/v2/AuditRunView"
-          }
-        },
-        "required": [
-          "run"
-        ],
-        "title": "AuditReleaseSlotResponse",
-        "type": "object"
-      },
-      "AuditResultExtraction": {
-        "additionalProperties": false,
-        "description": "Versioned deterministic extraction facts; completion provenance stays on the attempt.",
-        "properties": {
-          "parseDigest": {
-            "type": "string"
-          },
-          "rawDigest": {
-            "type": "string"
-          },
-          "status": {
-            "$ref": "#/definitions/v2/AuditExtractionStatus"
-          },
-          "transformations": {
-            "items": {
-              "$ref": "#/definitions/v2/AuditResultTransformation"
-            },
-            "type": "array"
-          },
-          "validationError": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "version": {
-            "format": "uint32",
-            "minimum": 0.0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "parseDigest",
-          "rawDigest",
-          "status",
-          "transformations",
-          "version"
-        ],
-        "type": "object"
-      },
-      "AuditResultTransformation": {
-        "enum": [
-          "utf8_bom",
-          "markdown_json_fence"
-        ],
-        "type": "string"
-      },
-      "AuditReviewerBinding": {
-        "additionalProperties": false,
-        "properties": {
-          "backendConfigurationIdentity": {
-            "type": "string"
-          },
-          "client": {
-            "anyOf": [
-              {
-                "$ref": "#/definitions/v2/AuditClaudeBinding"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "expectedServedModel": {
-            "type": "string"
-          },
-          "modelMetadataDigest": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "nativeConfigurationIdentity": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "reasoningEffort": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "resolvedModel": {
-            "type": "string"
-          },
-          "selection": {
-            "$ref": "#/definitions/v2/AuditReviewerSelection"
-          }
-        },
-        "required": [
-          "backendConfigurationIdentity",
-          "expectedServedModel",
-          "resolvedModel",
-          "selection"
-        ],
-        "type": "object"
-      },
-      "AuditReviewerSelection": {
-        "additionalProperties": false,
-        "properties": {
-          "authenticationRoute": {
-            "allOf": [
-              {
-                "$ref": "#/definitions/v2/AuditAuthenticationRoute"
-              }
-            ],
-            "default": "daemon_configured_native"
-          },
-          "executionAdapter": {
-            "allOf": [
-              {
-                "$ref": "#/definitions/v2/AuditExecutionAdapter"
-              }
-            ],
-            "default": "native"
-          },
-          "expectedServedModel": {
-            "description": "Expected authoritative identity; omission requires exact resolved-model matching.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "model": {
-            "type": "string"
-          },
-          "provider": {
-            "type": "string"
-          },
-          "reasoningEffort": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "model",
-          "provider"
-        ],
-        "type": "object"
-      },
-      "AuditRunPhase": {
-        "enum": [
-          "created",
-          "snapshot_bound",
-          "reviewing",
-          "reporting",
-          "reconciling",
-          "completed",
-          "completed_with_failures",
-          "failed",
-          "cancelled"
-        ],
-        "type": "string"
-      },
-      "AuditRunView": {
-        "properties": {
-          "assignmentId": {
-            "type": "string"
-          },
-          "cancellationRequested": {
-            "type": "boolean"
-          },
-          "capacityReleased": {
-            "description": "The operator explicitly released capacity. This is not terminal evidence.",
-            "type": "boolean"
-          },
-          "collection": {
-            "allOf": [
-              {
-                "$ref": "#/definitions/v2/AuditCollectionView"
-              }
-            ],
-            "default": {
-              "completedCount": 0,
-              "excludedCount": 0,
-              "outstandingCount": 0,
-              "ready": false,
-              "reviewerCount": 0,
-              "scheduling": "automatic"
-            }
-          },
-          "findingsSummary": {
-            "description": "Findings-first presentation derived from the frozen collection. The report remains the exact historical diagnostic artefact for existing consumers.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "observationPending": {
-            "description": "A retained observation issue remains unresolved. This is non-terminal: the daemon continues observing the original operation, without resampling.",
-            "type": "boolean"
-          },
-          "operationState": {
-            "$ref": "#/definitions/v2/AuditOperationState"
-          },
-          "outcome": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "phase": {
-            "$ref": "#/definitions/v2/AuditRunPhase"
-          },
-          "rawResult": {
-            "description": "Exact retained response, including invalid JSON, when a bounded result was received.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "report": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "reviewers": {
-            "default": [],
-            "description": "Current attempts in logical reviewer order; history uses audit/attempts.",
-            "items": {
-              "$ref": "#/definitions/v2/AuditAttemptView"
-            },
-            "type": "array"
-          },
-          "revision": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "runId": {
-            "type": "string"
-          },
-          "snapshotId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "assignmentId",
-          "cancellationRequested",
-          "capacityReleased",
-          "observationPending",
-          "operationState",
-          "phase",
-          "revision",
-          "runId",
-          "snapshotId"
-        ],
-        "type": "object"
-      },
-      "AuditScheduling": {
-        "enum": [
-          "automatic",
-          "sequential"
-        ],
-        "type": "string"
-      },
-      "AuditSource": {
-        "oneOf": [
           {
             "additionalProperties": false,
             "properties": {
-              "content": {
+              "name": {
                 "type": "string"
               },
-              "name": {
+              "text": {
                 "type": "string"
               },
               "type": {
                 "enum": [
                   "snippet"
                 ],
-                "title": "SnippetAuditSourceType",
-                "type": "string"
-              }
-            },
-            "required": [
-              "content",
-              "name",
-              "type"
-            ],
-            "title": "SnippetAuditSource",
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "name": {
-                "type": "string"
-              },
-              "path": {
-                "type": "string"
-              },
-              "type": {
-                "enum": [
-                  "file"
-                ],
-                "title": "FileAuditSourceType",
+                "title": "SnippetAuditInputType",
                 "type": "string"
               }
             },
             "required": [
               "name",
-              "path",
+              "text",
               "type"
             ],
-            "title": "FileAuditSource",
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "description": "Explicit files, each with a unique snapshot-relative name.",
-            "properties": {
-              "files": {
-                "items": {
-                  "$ref": "#/definitions/v2/AuditSourceFile"
-                },
-                "type": "array"
-              },
-              "type": {
-                "enum": [
-                  "fileList"
-                ],
-                "title": "FileListAuditSourceType",
-                "type": "string"
-              }
-            },
-            "required": [
-              "files",
-              "type"
-            ],
-            "title": "FileListAuditSource",
+            "title": "SnippetAuditInput",
             "type": "object"
           }
         ]
       },
-      "AuditSourceFile": {
+      "AuditListPage": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "nextOffset": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "presets": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "description": "Named selections from reviewer-backends.json; \"default\" is the default preset.",
+            "type": "object"
+          },
+          "runs": {
+            "items": {
+              "$ref": "#/definitions/v2/AuditRun"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "presets",
+          "runs"
+        ],
+        "title": "AuditListPage",
+        "type": "object"
+      },
+      "AuditListRequest": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
         "additionalProperties": false,
         "properties": {
-          "name": {
-            "description": "Portable relative path in the sealed snapshot, used by citations.",
-            "type": "string"
+          "limit": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
-          "path": {
-            "description": "Absolute input path at the server boundary.",
+          "offset": {
+            "default": 0,
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "title": "AuditListRequest",
+        "type": "object"
+      },
+      "AuditProgress": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "complete": {
+            "description": "True only after the supervisor has published summary.md.",
+            "type": "boolean"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reviewer": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AuditReviewerStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runId": {
             "type": "string"
           }
         },
         "required": [
-          "name",
-          "path"
+          "complete",
+          "runId"
         ],
+        "title": "AuditProgress",
         "type": "object"
       },
-      "AuditStartParams": {
+      "AuditReadRequest": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "additionalProperties": false,
         "properties": {
-          "agentsEvidence": {
+          "attempt": {
+            "description": "Omit to read the latest attempt; previous attempts remain available.",
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Entries for collection views; Unicode characters for literal output.",
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "number": {
+            "description": "One-based finding number for view=finding.",
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": 0,
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "reviewer": {
+            "description": "One-based reviewer number or the retained reviewer label.",
             "type": [
               "string",
               "null"
             ]
           },
-          "audexGuidance": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "brief": {
+          "runId": {
             "type": "string"
           },
-          "expectedServedModel": {
-            "description": "Explicitly qualified served-model alias for the singular selection.",
+          "view": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AuditReadView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "AuditReadRequest",
+        "type": "object"
+      },
+      "AuditReadResult": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "data": true,
+          "run": {
+            "$ref": "#/definitions/v2/AuditRun"
+          }
+        },
+        "required": [
+          "run"
+        ],
+        "title": "AuditReadResult",
+        "type": "object"
+      },
+      "AuditReadView": {
+        "enum": [
+          "reviewers",
+          "findings",
+          "finding",
+          "output",
+          "diagnostics"
+        ],
+        "type": "string"
+      },
+      "AuditRetryRequest": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "reviewer": {
+            "type": "string"
+          },
+          "runId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reviewer",
+          "runId"
+        ],
+        "title": "AuditRetryRequest",
+        "type": "object"
+      },
+      "AuditReviewer": {
+        "additionalProperties": false,
+        "properties": {
+          "effort": {
             "type": [
               "string",
               "null"
             ]
           },
           "model": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "preflight": {
-            "anyOf": [
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "briefDigest": {
-                    "type": "string"
-                  },
-                  "contextDigest": {
-                    "type": "string"
-                  },
-                  "existingRunId": {
-                    "description": "Identical request already commissioned; Start only retrieves that approval.",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "identity": {
-                    "type": "string"
-                  },
-                  "manifestDigest": {
-                    "type": "string"
-                  },
-                  "protocolVersion": {
-                    "format": "uint32",
-                    "minimum": 0.0,
-                    "type": "integer"
-                  },
-                  "reviewers": {
-                    "items": {
-                      "$ref": "#/definitions/v2/AuditReviewerBinding"
-                    },
-                    "type": "array"
-                  },
-                  "snapshotId": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "briefDigest",
-                  "contextDigest",
-                  "identity",
-                  "manifestDigest",
-                  "protocolVersion",
-                  "reviewers",
-                  "snapshotId"
-                ],
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "Read-only disclosure approved by the operator; required for subscription rosters."
-          },
-          "provider": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "reasoningEffort": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "requestKey": {
             "type": "string"
           },
-          "reviewers": {
-            "description": "Ordered reviewer roster. Mutually exclusive with the singular native selection.",
-            "items": {
-              "$ref": "#/definitions/v2/AuditReviewerSelection"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "scheduling": {
-            "allOf": [
-              {
-                "$ref": "#/definitions/v2/AuditScheduling"
-              }
-            ],
-            "default": "automatic"
-          },
-          "source": {
-            "$ref": "#/definitions/v2/AuditSource"
+          "route": {
+            "type": "string"
           }
         },
         "required": [
-          "brief",
-          "requestKey",
-          "source"
+          "model",
+          "route"
         ],
-        "title": "AuditStartParams",
         "type": "object"
       },
-      "AuditStartResponse": {
+      "AuditReviewerStatus": {
+        "properties": {
+          "attempt": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "findingCount": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "hasOutput": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reviewer": {
+            "type": "string"
+          },
+          "selection": {
+            "$ref": "#/definitions/v2/AuditReviewer"
+          },
+          "state": {
+            "type": "string"
+          },
+          "toolCalls": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "trigger": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt",
+          "hasOutput",
+          "reviewer",
+          "selection",
+          "state",
+          "toolCalls",
+          "trigger"
+        ],
+        "type": "object"
+      },
+      "AuditRun": {
+        "properties": {
+          "complete": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "reviewers": {
+            "description": "All retained attempts, in reviewer then attempt order.",
+            "items": {
+              "$ref": "#/definitions/v2/AuditReviewerStatus"
+            },
+            "type": "array"
+          },
+          "runId": {
+            "type": "string"
+          },
+          "sourceNotice": {
+            "type": "string"
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "targets": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "complete",
+          "createdAt",
+          "reviewers",
+          "runId",
+          "sourceNotice",
+          "targets"
+        ],
+        "type": "object"
+      },
+      "AuditRunResponse": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
           "run": {
-            "$ref": "#/definitions/v2/AuditRunView"
+            "$ref": "#/definitions/v2/AuditRun"
           }
         },
         "required": [
           "run"
         ],
-        "title": "AuditStartResponse",
+        "title": "AuditRunResponse",
+        "type": "object"
+      },
+      "AuditStartRequest": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "properties": {
+          "brief": {
+            "type": "string"
+          },
+          "cwd": {
+            "description": "Base directory for the operator's relative paths.",
+            "type": "string"
+          },
+          "guidance": {
+            "description": "Operator-named UTF-8 guidance file, read once at start.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input": {
+            "$ref": "#/definitions/v2/AuditInput"
+          },
+          "reviewers": {
+            "items": {
+              "$ref": "#/definitions/v2/AuditReviewer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "brief",
+          "cwd",
+          "input",
+          "reviewers"
+        ],
+        "title": "AuditStartRequest",
         "type": "object"
       },
       "AuthMode": {

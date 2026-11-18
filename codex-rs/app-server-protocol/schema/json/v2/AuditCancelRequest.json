@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "reviewer": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "runId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "runId"
+  ],
+  "title": "AuditCancelRequest",
+  "type": "object"
+}

@@ -1,6 +1,5 @@
 //! Explicit subscription conversation admission. Never enters audit execution.
 use super::*;
-use crate::audex::conversation_evidence::{ConversationEvidence, EvidenceIdentity};
 use codex_app_server_protocol::{ThreadClaudeParams, ThreadClaudeResponse, ThreadItemPayload};
 use codex_protocol::protocol::ExternalConversationExecution;
 use codex_protocol::turn_input::TurnInputSubmission;
@@ -38,22 +37,22 @@ impl TurnRequestProcessor {
             let root = self.config.codex_home.join("audex");
             let model = conversation::selected_model(&root, params.model)
                 .map_err(|e| invalid_request(e.to_string()))?;
-            let evidence = if let Some(run) = params.audit.as_deref() {
-                let opened = ConversationEvidence::open(&root, run)
-                    .await
-                    .map_err(|e| invalid_request(format!("Retained audit: {e}")))?;
-                Some(opened.identity)
-            } else {
-                None
-            };
-            // As with turn/start, thread start/resume owns the subscription.
-            // Rejected input must not subscribe another connection as a side effect.
+            let evidence = params
+                .audit
+                .as_deref()
+                .map(|run| {
+                    let id = uuid::Uuid::parse_str(run)?;
+                    let directory = root.join("runs").join(id.to_string());
+                    crate::audex::service::read::record(&directory)?;
+                    Ok::<_, anyhow::Error>(directory)
+                })
+                .transpose()
+                .map_err(|e| invalid_request(format!("Retained audit: {e}")))?;
             let display = match &evidence {
-                Some(identity) => format!(
-                    "/claude --model {model} --audit {} {}\n[Audex evidence identity: {}]",
-                    identity.run_id,
-                    params.message,
-                    serde_json::to_string(identity).expect("identity JSON")
+                Some(_) => format!(
+                    "/claude --model {model} --audit {} {}\nSource is live and may have changed since the review.",
+                    params.audit.as_deref().unwrap_or_default(),
+                    params.message
                 ),
                 None => format!("/claude --model {model} {}", params.message),
             };
@@ -105,30 +104,26 @@ impl TurnRequestProcessor {
                         build_legacy_api_turns_from_rollout_items(&history.items)
                     };
                     turns.retain(|turn| turn.id != execution_turn);
-                    let evidence = match evidence {
-                        Some(identity) => Some(identity),
-                        None => match inherited_evidence(&turns) {
-                            Some(identity) => {
-                                let opened =
-                                    ConversationEvidence::open(&root, &identity.run_id).await?;
-                                anyhow::ensure!(
-                                    opened.identity == identity,
-                                    "Retained audit identity changed; select the audit explicitly"
-                                );
-                                Some(identity)
-                            }
-                            None => None,
-                        },
-                    };
                     let discussion = visible_discussion(turns, &execution_turn);
-                    conversation::run(
-                        &root,
-                        &execution_model,
-                        discussion,
-                        &params.message,
-                        evidence,
-                    )
-                    .await
+                    if let Some(directory) = evidence {
+                        crate::audex::rpc::claude_conversation(
+                            &root,
+                            &directory,
+                            &execution_model,
+                            discussion,
+                            &params.message,
+                        )
+                        .await
+                    } else {
+                        conversation::run(
+                            &root,
+                            &execution_model,
+                            discussion,
+                            &params.message,
+                            None,
+                        )
+                        .await
+                    }
                 };
                 tokio::select! {
                     biased;
@@ -143,6 +138,7 @@ impl TurnRequestProcessor {
 
 // Selection lives in the existing operator turn, including its immutable identity.
 // Assistant claims, tool output and ordinary discussion cannot change it.
+#[cfg(any())] // Obsolete snapshot selection retained for S5.
 fn inherited_evidence(turns: &[codex_app_server_protocol::Turn]) -> Option<EvidenceIdentity> {
     turns
         .iter()
@@ -209,6 +205,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[cfg(any())] // Obsolete snapshot selection retained for S5.
     #[test]
     fn selection_comes_only_from_operator_route_identity() {
         let identity = EvidenceIdentity {

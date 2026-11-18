@@ -419,7 +419,7 @@ impl App {
         session.worktree_source_config_builder = app_server.worktree_source_config_builder.clone();
         session.inherit_task_tool_capabilities(app_server);
         *app_server = session;
-        self.reconnect_audit_activity(app_server);
+        self.reconnect_audits(app_server);
         #[cfg(any(target_os = "windows", test))]
         let interrupted_windows_setup = self.windows_sandbox.pending_setup.take().is_some();
         #[cfg(any(target_os = "windows", test))]

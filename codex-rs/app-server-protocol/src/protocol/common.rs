@@ -520,60 +520,32 @@ enum GatewayOAuthLoginParamsTypeScript {
 }
 
 client_request_definitions! {
-    AuditCapabilities => "audit/capabilities" {
-        params: v2::AuditCapabilitiesParams,
-        serialization: None,
-        response: v2::AuditCapabilitiesResponse,
-    },
-    AuditPreflight => "audit/preflight" {
-        params: v2::AuditPreflightParams,
-        serialization: None,
-        response: v2::AuditPreflightResponse,
-    },
     AuditStart => "audit/start" {
-        params: v2::AuditStartParams,
+        params: v2::AuditStartRequest,
         serialization: None,
-        response: v2::AuditStartResponse,
-    },
-    AuditEvidence => "audit/evidence" {
-        params: v2::AuditEvidenceParams,
-        serialization: None,
-        response: v2::AuditEvidenceResponse,
-    },
-    AuditRead => "audit/read" {
-        params: v2::AuditReadParams,
-        serialization: None,
-        response: v2::AuditReadResponse,
+        response: v2::AuditRunResponse,
     },
     AuditList => "audit/list" {
-        params: v2::AuditListParams,
+        params: v2::AuditListRequest,
         serialization: None,
-        response: v2::AuditListResponse,
+        response: v2::AuditListPage,
+    },
+    AuditRead => "audit/read" {
+        params: v2::AuditReadRequest,
+        serialization: None,
+        response: v2::AuditReadResult,
     },
     AuditCancel => "audit/cancel" {
-        params: v2::AuditCancelParams,
+        params: v2::AuditCancelRequest,
         serialization: None,
-        response: v2::AuditCancelResponse,
+        manual_payload_conversion: manual,
+        response: v2::AuditRunResponse,
     },
-    AuditAttempts => "audit/attempts" {
-        params: v2::AuditAttemptsParams,
+    AuditRetry => "audit/retry" {
+        params: v2::AuditRetryRequest,
         serialization: None,
-        response: v2::AuditAttemptsResponse,
-    },
-    AuditAttemptRead => "audit/attempt/read" {
-        params: v2::AuditAttemptReadParams,
-        serialization: None,
-        response: v2::AuditAttemptReadResponse,
-    },
-    AuditAttemptControl => "audit/attempt/control" {
-        params: v2::AuditAttemptControlParams,
-        serialization: None,
-        response: v2::AuditAttemptControlResponse,
-    },
-    AuditReleaseSlot => "audit/release-slot" {
-        params: v2::AuditReleaseSlotParams,
-        serialization: None,
-        response: v2::AuditReleaseSlotResponse,
+        manual_payload_conversion: manual,
+        response: v2::AuditRunResponse,
     },
     Initialize => "initialize" {
         params: v1::InitializeParams,
@@ -2114,7 +2086,7 @@ pub struct FuzzyFileSearchSessionCompletedNotification {
 }
 
 server_notification_definitions! {
-    AuditProgress => "audit/progress" (v2::AuditProgressNotification),
+    AuditProgress => "audit/progress" (v2::AuditProgress),
     /// NEW NOTIFICATIONS
     Error => "error" (v2::ErrorNotification),
     ThreadStarted => "thread/started" (v2::ThreadStartedNotification),

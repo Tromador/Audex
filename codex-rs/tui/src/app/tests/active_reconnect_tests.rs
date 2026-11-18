@@ -11,6 +11,7 @@ use tokio::net::TcpListener;
 
 use super::disconnect::serve_reconnect_requests;
 
+#[cfg(any())] // Legacy control interface retained for S5.
 #[path = "active_reconnect_tests/audit_control_receipts.rs"]
 mod audit_control_receipts;
 

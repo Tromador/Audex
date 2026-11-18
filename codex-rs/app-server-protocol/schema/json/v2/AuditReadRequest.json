@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AuditReadView": {
+      "enum": [
+        "reviewers",
+        "findings",
+        "finding",
+        "output",
+        "diagnostics"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "attempt": {
+      "description": "Omit to read the latest attempt; previous attempts remain available.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "limit": {
+      "description": "Entries for collection views; Unicode characters for literal output.",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "number": {
+      "description": "One-based finding number for view=finding.",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "offset": {
+      "default": 0,
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "reviewer": {
+      "description": "One-based reviewer number or the retained reviewer label.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "runId": {
+      "type": "string"
+    },
+    "view": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AuditReadView"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "runId"
+  ],
+  "title": "AuditReadRequest",
+  "type": "object"
+}

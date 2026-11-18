@@ -2015,7 +2015,7 @@ impl App {
             self.chat_widget.maybe_send_next_queued_input();
         }
         if let Some(thread_id) = self.current_displayed_thread_id() {
-            self.queue_ready_audit_comparisons(thread_id);
+            self.show_ready_audits(thread_id);
         }
         self.refresh_status_line();
     }
@@ -2369,5 +2369,36 @@ mod tests {
             ),
             TurnPermissionsOverride::LegacySandbox(effective_permission_profile)
         );
+    }
+}
+
+// Buffered receipts are retained until the obsolete controls are deleted.
+impl App {
+    /// Retain an outcome in the existing originating-thread replay buffer. Only the
+    /// displayed origin receives a live history insertion; another thread receives none.
+    pub(super) async fn enqueue_audit_control_outcome(
+        &mut self,
+        thread_id: ThreadId,
+        result: std::result::Result<String, String>,
+    ) {
+        let event = super::thread_events::ThreadBufferedEvent::AuditControlOutcome(result);
+        self.ensure_thread_channel(thread_id)
+            .store
+            .lock()
+            .await
+            .push_buffered_event(event.clone());
+        if self.current_displayed_thread_id() == Some(thread_id) {
+            self.handle_thread_event_now(event);
+        }
+    }
+
+    pub(super) fn show_audit_control_outcome(
+        &mut self,
+        result: std::result::Result<String, String>,
+    ) {
+        match result {
+            Ok(message) => self.chat_widget.add_info_message(message, None),
+            Err(message) => self.chat_widget.add_error_message(message),
+        }
     }
 }

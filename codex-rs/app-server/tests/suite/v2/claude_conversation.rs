@@ -158,6 +158,7 @@ async fn read(client: &mut TestAppServer, thread: &str) -> anyhow::Result<Thread
         .await
 }
 
+#[cfg(any())] // Snapshot conversation interface retired; source retained for S5.
 #[test_case::test_case(ThreadHistoryMode::Legacy; "legacy")]
 #[test_case::test_case(ThreadHistoryMode::Paginated; "paginated")]
 #[tokio::test]
@@ -489,7 +490,7 @@ async fn claude_conversation_rate_limit_status_keeps_one_complete_answer() -> an
     );
     assert_eq!(f.prompts().len(), 1);
     assert!(mock.received_requests().await.unwrap().is_empty());
-    let audits: AuditListResponse = client
+    let audits: AuditListPage = client
         .request(|id| ClientRequest::AuditList {
             request_id: id,
             params: serde_json::from_value(json!({})).unwrap(),
@@ -602,7 +603,7 @@ async fn claude_conversation_text_blocks_survive_delivery_restart_and_followups(
     assert!(sent.contains("Codex considers both blocks"));
     assert!(!sent.contains("PRIVATE_THINKING_SENTINEL"));
     assert_eq!(mock.received_requests().await.unwrap().len(), 1);
-    let audits: AuditListResponse = client
+    let audits: AuditListPage = client
         .request(|id| ClientRequest::AuditList {
             request_id: id,
             params: serde_json::from_value(json!({})).unwrap(),
@@ -776,7 +777,7 @@ async fn claude_conversation_routes_context_persistence_and_no_audit() -> anyhow
     assert_eq!(history.thread.turns.len(), 4);
     assert_eq!(first.requests().len(), 1);
     assert_eq!(next.requests().len(), 1);
-    let audits: AuditListResponse = client
+    let audits: AuditListPage = client
         .request(|id| ClientRequest::AuditList {
             request_id: id,
             params: serde_json::from_value(json!({})).unwrap(),
