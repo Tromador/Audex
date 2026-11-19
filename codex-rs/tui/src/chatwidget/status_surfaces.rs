@@ -14,6 +14,7 @@ use crate::status::format_credit_micros;
 use crate::status::format_estimated_usd_micros;
 use crate::status::format_tokens_compact;
 use crate::terminal_program_status::ProgramStatus;
+use crate::thread_label::ThreadLabelStyle;
 use codex_app_server_protocol::AskForApproval;
 use codex_config::ConfigLayerSource;
 use codex_config::os_host_name;
@@ -69,25 +70,6 @@ impl StatusSurfaceSelections {
             || self
                 .status_line_items
                 .contains(&StatusLineItem::BranchChanges)
-    }
-
-    fn uses_workspace_headline(&self) -> bool {
-        self.status_line_items
-            .contains(&StatusLineItem::WorkspaceHeadline)
-    }
-
-    fn uses_thread_usage(&self) -> bool {
-        self.status_line_items.iter().any(|item| {
-            matches!(
-                item,
-                StatusLineItem::ThreadCredits | StatusLineItem::EstimatedThreadCost
-            )
-        }) || self.terminal_title_items.iter().any(|item| {
-            matches!(
-                item,
-                TerminalTitleItem::ThreadCredits | TerminalTitleItem::EstimatedThreadCost
-            )
-        })
     }
 }
 
@@ -182,7 +164,7 @@ impl ChatWidget {
             }
         }
 
-        if !selections.uses_workspace_headline() {
+        if !self.uses_workspace_headline(&selections.status_line_items) {
             self.status_line_workspace_headline = None;
             self.status_line_workspace_headline_pending_request_id = None;
             self.status_line_workspace_headline_last_requested_at = None;
@@ -191,7 +173,7 @@ impl ChatWidget {
             self.request_status_line_workspace_headline_if_due(Instant::now());
         }
 
-        if selections.uses_thread_usage() {
+        if self.thread_usage_is_selected() {
             self.ensure_thread_usage_requested();
         } else {
             self.cancel_thread_usage_polling();
@@ -199,6 +181,9 @@ impl ChatWidget {
     }
 
     fn refresh_status_line_from_selections(&mut self, selections: &StatusSurfaceSelections) {
+        if self.refresh_provider_footer() {
+            return;
+        }
         let enabled = !selections.status_line_items.is_empty();
         self.bottom_pane.set_status_line_enabled(enabled);
         if !enabled {
@@ -502,7 +487,7 @@ impl ChatWidget {
             })
     }
 
-    fn status_line_cwd(&self) -> &Path {
+    pub(super) fn status_line_cwd(&self) -> &Path {
         self.current_cwd
             .as_deref()
             .unwrap_or(self.config.cwd.as_path())
@@ -661,6 +646,11 @@ impl ChatWidget {
         });
     }
 
+    fn uses_workspace_headline(&self, status_line_items: &[StatusLineItem]) -> bool {
+        self.provider_needs_snapshot()
+            || status_line_items.contains(&StatusLineItem::WorkspaceHeadline)
+    }
+
     fn request_status_line_workspace_headline_if_due(&mut self, now: Instant) {
         if !self.status_line_workspace_headline_should_fetch(now) {
             return;
@@ -692,10 +682,7 @@ impl ChatWidget {
     pub(super) fn refresh_status_line_if_workspace_headline_due(&mut self) {
         let now = Instant::now();
         if self.status_line_workspace_headline_should_fetch(now)
-            && self
-                .status_line_items_with_invalids()
-                .0
-                .contains(&StatusLineItem::WorkspaceHeadline)
+            && self.uses_workspace_headline(&self.status_line_items_with_invalids().0)
         {
             self.refresh_status_line();
         }
@@ -729,10 +716,7 @@ impl ChatWidget {
         }
 
         if !self.status_line_workspace_messages_disabled
-            && self
-                .status_line_items_with_invalids()
-                .0
-                .contains(&StatusLineItem::WorkspaceHeadline)
+            && self.uses_workspace_headline(&self.status_line_items_with_invalids().0)
         {
             self.frame_requester
                 .schedule_frame_in(crate::workspace_messages::WORKSPACE_HEADLINE_REFRESH_INTERVAL);
@@ -851,13 +835,11 @@ impl ChatWidget {
             ),
             StatusLineItem::RawOutput => self.raw_output_mode().then(|| "raw output".to_string()),
             StatusLineItem::ThreadName => {
-                self.thread_name.as_deref().and_then(normalize_thread_name)
+                self.status_surface_thread_label(/*fallback*/ None, /*max_chars*/ None)
             }
-            StatusLineItem::ThreadTitle => self
-                .thread_name
-                .as_deref()
-                .and_then(normalize_thread_name)
-                .or_else(|| self.thread_id.map(|id| id.to_string())),
+            StatusLineItem::ThreadTitle => {
+                self.status_surface_thread_label(self.thread_id, /*max_chars*/ None)
+            }
             StatusLineItem::WorkspaceHeadline => self.status_line_workspace_headline.clone(),
             StatusLineItem::TaskProgress => self.terminal_title_task_progress(),
         }
@@ -931,14 +913,9 @@ impl ChatWidget {
             )),
             TerminalTitleItem::Spinner => self.terminal_title_spinner_text_at(now),
             TerminalTitleItem::Status => Some(self.run_state_status_text()),
-            TerminalTitleItem::Thread | TerminalTitleItem::ThreadName => {
-                let item = if item == TerminalTitleItem::ThreadName {
-                    StatusLineItem::ThreadName
-                } else {
-                    StatusLineItem::ThreadTitle
-                };
-                self.status_line_value_for_item(item)
-                    .map(|value| Self::truncate_terminal_title_part(value, /*max_chars*/ 48))
+            TerminalTitleItem::Thread => self.status_surface_thread_label(self.thread_id, Some(48)),
+            TerminalTitleItem::ThreadName => {
+                self.status_surface_thread_label(/*fallback*/ None, Some(48))
             }
             TerminalTitleItem::GitBranch => self.status_line_branch.as_ref().map(|branch| {
                 Self::truncate_terminal_title_part(branch.clone(), /*max_chars*/ 32)
@@ -1135,6 +1112,23 @@ impl ChatWidget {
             return None;
         }
         Some(format!("Tasks {completed}/{total}"))
+    }
+
+    fn status_surface_thread_label(
+        &self,
+        fallback: Option<ThreadId>,
+        max_chars: Option<usize>,
+    ) -> Option<String> {
+        let name = self.thread_name.as_deref().and_then(normalize_thread_name);
+        let label = name.or_else(|| fallback.map(|id| id.to_string()))?;
+        let style = ThreadLabelStyle::from_is_cloud(
+            self.thread_params_mode == crate::ThreadParamsMode::Cloud,
+        );
+        let label = style.decorate(label);
+        Some(match max_chars {
+            Some(limit) => Self::truncate_terminal_title_part(label, limit),
+            None => label,
+        })
     }
 
     /// Truncates a title segment by grapheme cluster and appends `...` when needed.

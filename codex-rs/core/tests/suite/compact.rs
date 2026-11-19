@@ -1710,6 +1710,8 @@ async fn foreground_compaction_only_installs_and_bills_after_its_post_hook() -> 
             fs::write(home.join("config.toml"), toml::to_string(&config).unwrap()).unwrap();
         })
         .with_config(move |config| {
+            config.response_process_mode =
+                codex_config::config_toml::ResponseProcessMode::AfterCompleteResponse;
             config.model_provider = provider;
             set_test_compact_prompt(config);
             trust_discovered_hooks(config);
@@ -3656,8 +3658,10 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
     );
 }
 
+/// Only a recoverable compaction error can replay on the same or a different model.
+#[test_case::test_case("server_error", true; "transient")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pre_sampling_compact_falls_back_after_previous_model_stream_retries_are_exhausted() {
+async fn pre_sampling_compact_replays_only_recoverable_errors(code: &str, recoverable: bool) {
     skip_if_no_network!();
 
     let server = MockServer::start().await;
@@ -3674,19 +3678,17 @@ async fn pre_sampling_compact_falls_back_after_previous_model_stream_retries_are
     )
     .await;
 
-    let compaction_failure = sse_failed(
-        "compact-failure",
-        "server_error",
-        "previous-model compaction failed",
-    );
-    let request_log = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_assistant_message("m1", "before switch"),
-                ev_completed_with_tokens("r1", /*total_tokens*/ 120_000),
-            ]),
-            compaction_failure.clone(),
+    let compaction_failure =
+        sse_failed("compact-failure", code, "previous-model compaction failed");
+    let mut responses = vec![
+        sse(vec![
+            ev_assistant_message("m1", "before switch"),
+            ev_completed_with_tokens("r1", /*total_tokens*/ 120_000),
+        ]),
+        compaction_failure.clone(),
+    ];
+    if recoverable {
+        responses.extend([
             compaction_failure.clone(),
             compaction_failure,
             remote_v2_compaction_response(),
@@ -3694,9 +3696,9 @@ async fn pre_sampling_compact_falls_back_after_previous_model_stream_retries_are
                 ev_assistant_message("m3", "after switch"),
                 ev_completed_with_tokens("r3", /*total_tokens*/ 100),
             ]),
-        ],
-    )
-    .await;
+        ]);
+    }
+    let request_log = mount_sse_sequence(&server, responses).await;
 
     let mut model_provider = openai_model_provider(&server);
     model_provider.stream_max_retries = Some(2);
@@ -3730,6 +3732,15 @@ async fn pre_sampling_compact_falls_back_after_previous_model_stream_retries_are
         ))
         .await
         .expect("submit selected-model turn");
+    if !recoverable {
+        wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+        assert_eq!(request_log.requests().len(), 2);
+        return;
+    }
     assert_compaction_uses_turn_lifecycle_id(&test.codex).await;
 
     let actual_models = request_log

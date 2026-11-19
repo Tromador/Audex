@@ -237,8 +237,11 @@ pub enum CodexErrorDetails {
     /// Sandbox error
     #[error("sandbox error: {0}")]
     Sandbox(#[from] SandboxErr),
+    // Keep the published analytics category stable across the Rust variant rename.
+    #[strum_discriminants(serde(rename = "landlock_sandbox_executable_not_provided"))]
+    #[strum_discriminants(strum(serialize = "landlock_sandbox_executable_not_provided"))]
     #[error("codex-linux-sandbox was required but not provided")]
-    LandlockSandboxExecutableNotProvided,
+    LinuxSandboxExecutableNotProvided,
     #[error("unsupported operation: {0}")]
     UnsupportedOperation(String),
     #[error("{0}")]
@@ -248,6 +251,9 @@ pub enum CodexErrorDetails {
     GatewayLoginRequired(String),
     #[error("Fatal error: {0}")]
     Fatal(String),
+    /// The provider attempt ended. Retrying inference cannot settle its bill.
+    #[error("{0}")]
+    UsageAccountingFailed(String),
     // -----------------------------------------------------------------
     // Automatic conversions for common external error types
     // -----------------------------------------------------------------
@@ -404,7 +410,7 @@ impl CodexErr {
         UsageNotIncluded,
         InternalServerError,
         InternalAgentDied,
-        LandlockSandboxExecutableNotProvided,
+        LinuxSandboxExecutableNotProvided,
     );
 
     codex_err_tuple_constructors!(
@@ -420,6 +426,7 @@ impl CodexErr {
         UnsupportedOperation(message: String),
         RefreshTokenFailed(error: RefreshTokenFailedError),
         Fatal(message: String),
+        UsageAccountingFailed(message: String),
         Io(error: io::Error),
         Json(error: serde_json::Error),
         #[cfg(target_os = "linux")]
@@ -484,6 +491,7 @@ impl CodexErr {
             | CodexErrorDetails::Interrupted
             | CodexErrorDetails::EnvVar(_)
             | CodexErrorDetails::Fatal(_)
+            | CodexErrorDetails::UsageAccountingFailed(_)
             | CodexErrorDetails::UsageNotIncluded
             | CodexErrorDetails::QuotaExceeded
             | CodexErrorDetails::InvalidImageRequest()
@@ -499,7 +507,7 @@ impl CodexErr {
             | CodexErrorDetails::GatewayLoginRequired(_)
             | CodexErrorDetails::UnsupportedOperation(_)
             | CodexErrorDetails::Sandbox(_)
-            | CodexErrorDetails::LandlockSandboxExecutableNotProvided
+            | CodexErrorDetails::LinuxSandboxExecutableNotProvided
             | CodexErrorDetails::ContextWindowExceeded
             | CodexErrorDetails::ThreadNotFound(_)
             | CodexErrorDetails::AgentLimitReached { .. }

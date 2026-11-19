@@ -40,10 +40,6 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AdditionalContextEntry;
 use codex_protocol::protocol::AdditionalContextKind;
-use codex_protocol::protocol::CodexErrorInfo;
-use codex_protocol::protocol::ErrorEvent;
-use codex_protocol::protocol::Event;
-use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::NonSteerableTurnKind;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -51,16 +47,15 @@ use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::turn_input::AnnotatedResponseItem;
 use codex_protocol::turn_input::NotSubmittedReason;
 use codex_protocol::turn_input::ResponsesApiClientMetadataUpdate;
-use codex_protocol::turn_input::TurnInput as SubmittedTurnInput;
+type SubmittedTurnInput = codex_protocol::turn_input::TurnInput<ResolvedUserInput>;
 use codex_protocol::turn_input::TurnInputMode;
-use codex_protocol::turn_input::TurnInputRequest;
+type TurnInputRequest = codex_protocol::turn_input::TurnInputRequest<ResolvedUserInput>;
 use codex_protocol::turn_input::TurnInputSubmission;
 use codex_protocol::turn_input::TurnStartOptions;
-use codex_protocol::user_input::UserInput;
+use codex_user_input::ResolvedUserInput;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use uuid::Uuid;
 
 #[path = "turn_input_agent.rs"]
 mod agent;
@@ -160,6 +155,7 @@ impl PreparedTurnInputSettings {
             initiating_agent_path,
             root_turn_id,
             cyber_access_program,
+            inherited_client_metadata,
         } = self.start_options;
         let helper_admission =
             if kind == TurnStartKind::User && turn_trigger.as_deref() != Some("queue") {
@@ -203,6 +199,12 @@ impl PreparedTurnInputSettings {
         let Some((turn_context, settings_snapshot)) = turn_context else {
             return Ok(None);
         };
+        turn_context
+            .turn_metadata_state
+            .update_responsesapi_client_metadata(ResponsesApiClientMetadataUpdate {
+                replacement: Some(inherited_client_metadata),
+                ..Default::default()
+            });
         if let Some(turn_trigger) = turn_trigger {
             turn_context
                 .turn_metadata_state
@@ -522,7 +524,7 @@ async fn start_or_steer(
             };
             turn_context
                 .turn_metadata_state
-                .update_responsesapi_client_metadata(responsesapi_client_metadata);
+                .apply_start_responsesapi_client_metadata(responsesapi_client_metadata);
             session
                 .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
                 .await;
@@ -630,6 +632,11 @@ async fn start_if_idle(
                 reason: NotSubmittedReason::NotIdle,
             });
         }
+        // Idle observers can retry a failed turn. Check before reserving so a permanent
+        // stop cannot create a loop of new turns that never reach the provider.
+        if kind != TurnStartKind::User {
+            session.check_rollout_budget()?;
+        }
         let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
         Arc::clone(&active_turn.turn_state)
     };
@@ -676,7 +683,7 @@ async fn start_if_idle(
     };
     turn_context
         .turn_metadata_state
-        .update_responsesapi_client_metadata(responsesapi_client_metadata);
+        .apply_start_responsesapi_client_metadata(responsesapi_client_metadata);
     session
         .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
         .await;
@@ -868,6 +875,12 @@ impl Session {
         {
             return None;
         }
+        // Triggered mail and durable sleep bypass start_if_idle. Leave their mail
+        // pending rather than consuming it to start a turn that the work gate will refuse.
+        if let Err(error) = self.check_rollout_budget() {
+            tracing::debug!(%error, "rollout budget stopped a pending-work wake");
+            return None;
+        }
         let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
         let previous_options = if has_trigger_turn {
             Default::default()
@@ -933,58 +946,6 @@ impl Session {
             && TurnStartKind::Automatic.permits_mode(config.step_settings.collaboration_mode.mode)
     }
 
-    pub(crate) async fn route_realtime_text_input(
-        self: &Arc<Self>,
-        text: String,
-    ) -> Result<(), &'static str> {
-        let submission_id = Uuid::now_v7().to_string();
-        let submission = handle(
-            self,
-            TurnInputRequest::user_input(vec![UserInput::Text {
-                text,
-                text_elements: Vec::new(),
-            }])
-            .on_start(TurnStartOptions {
-                turn_trigger: Some("realtime".to_string()),
-                ..Default::default()
-            }),
-            TurnInputMode::StartOrSteer,
-            submission_id.clone(),
-        )
-        .await;
-        match submission {
-            Ok(TurnInputSubmission::Accepted) => {
-                unreachable!("realtime user input returns a turn outcome")
-            }
-            Ok(TurnInputSubmission::Started { .. } | TurnInputSubmission::Steered { .. }) => {}
-            Ok(TurnInputSubmission::NotSubmitted {
-                reason: NotSubmittedReason::ServerDraining,
-            }) => {
-                return Err("Server is draining; retry the turn after reconnecting");
-            }
-            Ok(TurnInputSubmission::NotSubmitted { reason }) => {
-                self.send_event_raw(Event {
-                    id: submission_id,
-                    msg: EventMsg::Error(ErrorEvent {
-                        misalignment: None,
-                        message: format!("failed to submit turn input: {reason:?}"),
-                        codex_error_info: Some(CodexErrorInfo::BadRequest),
-                        rejected_audio_file_ids: Vec::new(),
-                    }),
-                })
-                .await;
-            }
-            Err(error) => {
-                self.send_event_raw(Event {
-                    id: submission_id,
-                    msg: EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
-                })
-                .await;
-            }
-        }
-        Ok(())
-    }
-
     async fn clear_reserved_idle_turn(&self, turn_state: &Arc<tokio::sync::Mutex<TurnState>>) {
         let mut active_turn_guard = self.active_turn.lock().await;
         if let Some(active_turn) = active_turn_guard.as_ref()
@@ -1016,7 +977,26 @@ impl Session {
         responsesapi_client_metadata: ResponsesApiClientMetadataUpdate,
         input_metadata: UserInputMetadata,
     ) -> Result<(String, String), NotSubmittedReason> {
-        let mut active = self.active_turn.lock().await;
+        let mut active = loop {
+            let active = self.active_turn.lock().await;
+            let Some(interrupt) = active
+                .as_ref()
+                .and_then(|turn| turn.sampling_interrupt.as_ref())
+                .filter(|interrupt| interrupt.is_requested())
+            else {
+                break active;
+            };
+            if expected_turn_id.is_some() {
+                return Err(NotSubmittedReason::NoActiveTurn);
+            }
+            // Start-or-steer can open a new turn once the old terminal event is published.
+            let finished = interrupt.finished.clone();
+            drop(active);
+            tokio::select! {
+                () = finished.cancelled() => {}
+                () = self.services.local_agent_runtime.shutdown.cancelled() => return Err(NotSubmittedReason::ServerDraining),
+            }
+        };
         let Some(active_turn) = active.as_mut() else {
             return Err(NotSubmittedReason::NoActiveTurn);
         };

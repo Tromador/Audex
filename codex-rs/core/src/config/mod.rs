@@ -33,6 +33,7 @@ use codex_config::config_toml::DEFAULT_PROJECT_DOC_MAX_BYTES;
 use codex_config::config_toml::ProjectConfig;
 use codex_config::config_toml::RealtimeAudioConfig;
 use codex_config::config_toml::RealtimeConfig;
+use codex_config::config_toml::ResponseProcessMode;
 use codex_config::config_toml::ThreadStoreToml;
 use codex_config::config_toml::validate_model_providers;
 use codex_config::loader::load_config_layers_state;
@@ -90,6 +91,7 @@ use codex_http_client::OutboundProxyPolicy;
 use codex_login::AuthManagerConfig;
 use codex_login::AuthRouteConfig;
 use codex_mcp::DEFAULT_OPTIONAL_MCP_STARTUP_GRACE;
+use codex_mcp::McpClientConfig;
 use codex_mcp::McpConfig;
 use codex_mcp::McpPluginAttribution;
 use codex_mcp::McpProtocolMode;
@@ -140,6 +142,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_rmcp_client::McpOAuthRefreshMode;
+use codex_rollout_trace::TraceCaptureLimits;
 use codex_sandboxing::SandboxType;
 pub use codex_thread_store::ExtraConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -1038,6 +1041,9 @@ pub struct Config {
     /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
     pub history: History,
 
+    /// Limits shared by all threads recording into one native rollout trace.
+    pub rollout_trace_limits: TraceCaptureLimits,
+
     /// When true, session is not persisted on disk. Default to `false`
     pub ephemeral: bool,
 
@@ -1166,6 +1172,9 @@ pub struct Config {
 
     /// Policy for collecting and validating tool runtimes.
     pub tool_registry: ToolRegistryConfig,
+
+    /// When to process model output, including text and tool calls.
+    pub response_process_mode: ResponseProcessMode,
 
     /// Configuration for the experimental code-mode tool surface.
     pub code_mode: CodeModeConfig,
@@ -1397,10 +1406,19 @@ impl Default for TokenBudgetConfig {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RolloutBudgetConfig {
     pub enforce_limit: bool,
-    pub limit_tokens: i64,
+    /// Positive, finite allowance, including fractional opaque units.
+    pub limit_budget: f64,
+    pub reminder_at_context_start: bool,
     pub reminder_at_remaining_tokens: Vec<i64>,
     pub sampling_token_weight: f64,
     pub prefill_token_weight: f64,
+}
+
+/// An integer threshold is reached when the actual fractional balance is at
+/// or below it. Round the balance up, not the threshold to `f64`: an `i64`
+/// threshold above 2^53 is still exact, and every threshold fits in `i128`.
+pub(crate) fn rollout_budget_threshold_reached(remaining_units: f64, threshold: i64) -> bool {
+    remaining_units.ceil() as i128 <= i128::from(threshold)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1439,6 +1457,7 @@ pub struct MultiAgentV2Config {
     pub hide_spawn_agent_metadata: bool,
     pub expose_spawn_agent_model_overrides: bool,
     pub wait_agent_enabled: bool,
+    pub interrupt_at_item_boundary: bool,
     pub disable_native_tools: bool,
     pub disable_direct_message: bool,
     pub message_board_in_memory: bool,
@@ -1463,6 +1482,7 @@ impl MultiAgentV2Config {
             hide_spawn_agent_metadata: true,
             expose_spawn_agent_model_overrides: true,
             wait_agent_enabled: true,
+            interrupt_at_item_boundary: false,
             disable_native_tools: false,
             disable_direct_message: false,
             message_board_in_memory: false,
@@ -2022,9 +2042,23 @@ impl Config {
         }
 
         McpConfig {
-            chatgpt_base_url: self.chatgpt_base_url.clone(),
+            client: McpClientConfig {
+                chatgpt_base_url: self.chatgpt_base_url.clone(),
+                requires_read_only_mcp_tools: false,
+                protocol_mode: self.mcp_protocol_mode(),
+                discover_local_stdio: self.features.enabled(Feature::McpConnectionSharing),
+                mcp_tool_list_changed: self.features.enabled(Feature::McpToolListChanged),
+                client_elicitation_capability: if self.features.enabled(Feature::AuthElicitation) {
+                    ElicitationCapability::new()
+                        .with_form(FormElicitationCapability::new())
+                        .with_url(UrlElicitationCapability::new())
+                } else {
+                    // https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation#capabilities
+                    // indicates this should be an empty object.
+                    ElicitationCapability::default()
+                },
+            },
             apps_mcp_product_sku: self.apps_mcp_product_sku.clone(),
-            requires_read_only_mcp_tools: false,
             codex_home: self.codex_home.to_path_buf(),
             mcp_enterprise_managed_auth: self.mcp_enterprise_managed_auth.clone(),
             ema_state: Default::default(),
@@ -2032,7 +2066,6 @@ impl Config {
             xaa_enabled: self.features.enabled(Feature::UseXaa)
                 && self.mcp_enterprise_managed_auth.is_some(),
             mcp_oauth_credentials_store_mode: self.mcp_oauth_credentials_store_mode,
-            mcp_tool_list_changed: self.features.enabled(Feature::McpToolListChanged),
             oauth_refresh_mode: if self.features.enabled(Feature::McpOAuthRefreshCoordination) {
                 McpOAuthRefreshMode::Coordinated
             } else {
@@ -2072,21 +2105,10 @@ impl Config {
             } else {
                 Vec::new()
             },
-            protocol_mode: self.mcp_protocol_mode(),
-            discover_local_stdio: self.features.enabled(Feature::McpConnectionSharing),
             host_owned_apps_protocol_mode: if self.features.enabled(Feature::CodexAppsMcp20260728) {
                 McpProtocolMode::V20260728
             } else {
                 McpProtocolMode::Legacy
-            },
-            client_elicitation_capability: if self.features.enabled(Feature::AuthElicitation) {
-                ElicitationCapability::new()
-                    .with_form(FormElicitationCapability::new())
-                    .with_url(UrlElicitationCapability::new())
-            } else {
-                // https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation#capabilities
-                // indicates this should be an empty object.
-                ElicitationCapability::default()
             },
             mcp_server_catalog: catalog.build(),
             connector_snapshot:
@@ -2776,11 +2798,12 @@ pub struct ConfigOverrides {
     pub permission_profile: Option<PermissionProfile>,
     pub default_permissions: Option<String>,
     /// Permission profile ID recovered from persisted thread state. Explicit
-    /// permission overrides take precedence, and stale profile IDs fall back
-    /// to the configured default.
+    /// permission overrides take precedence. An unavailable saved profile
+    /// requires an explicit selection.
     pub persisted_permission_profile_id: Option<String>,
-    /// Unnamed permissions from a thread-owned rollout snapshot. These are
-    /// fallback state: explicit overrides and current requirements take priority.
+    /// Unnamed permissions from a thread-owned rollout snapshot, or canonical
+    /// read-only permissions recovered from older history. Explicit overrides
+    /// and current requirements take priority.
     pub persisted_permission_profile: Option<PermissionProfile>,
     pub model_provider: Option<String>,
     pub service_tier: Option<Option<String>>,
@@ -2948,6 +2971,9 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
     let wait_agent_enabled = base
         .and_then(|config| config.wait_agent_enabled)
         .unwrap_or(default.wait_agent_enabled);
+    let interrupt_at_item_boundary = base
+        .and_then(|config| config.interrupt_at_item_boundary)
+        .unwrap_or(default.interrupt_at_item_boundary);
     let disable_native_tools = base
         .and_then(|config| config.disable_native_tools)
         .unwrap_or(default.disable_native_tools);
@@ -2990,6 +3016,7 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
         hide_spawn_agent_metadata,
         expose_spawn_agent_model_overrides,
         wait_agent_enabled,
+        interrupt_at_item_boundary,
         disable_native_tools,
         disable_direct_message,
         message_board_in_memory,
@@ -3049,31 +3076,42 @@ fn resolve_rollout_budget_config(
     config_toml: &ConfigToml,
     features: &ManagedFeatures,
 ) -> std::io::Result<Option<RolloutBudgetConfig>> {
+    let config = config_toml
+        .features
+        .as_ref()
+        .and_then(|features| features.rollout_budget.as_ref());
+    if let Some(FeatureToml::Config(config)) = config
+        && config.limit_tokens.is_some()
+        && config.limit_budget.is_some()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "features.rollout_budget.limit_tokens and limit_budget cannot both be set",
+        ));
+    }
     if !features.enabled(Feature::RolloutBudget) {
         return Ok(None);
     }
     let missing_limit_error = || {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "features.rollout_budget.limit_tokens is required when rollout_budget is enabled",
+            "features.rollout_budget requires limit_tokens or limit_budget when enabled",
         )
     };
-    let Some(FeatureToml::Config(config)) = config_toml
-        .features
-        .as_ref()
-        .and_then(|features| features.rollout_budget.as_ref())
-    else {
+    let Some(FeatureToml::Config(config)) = config else {
         return Err(missing_limit_error());
     };
-    let Some(limit_tokens) = config.limit_tokens else {
-        return Err(missing_limit_error());
-    };
-    if limit_tokens <= 0 {
+    let limit_budget = config
+        .limit_budget
+        .or_else(|| config.limit_tokens.map(|tokens| tokens as f64))
+        .ok_or_else(missing_limit_error)?;
+    if !limit_budget.is_finite() || limit_budget <= 0.0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "features.rollout_budget.limit_tokens must be positive",
+            "features.rollout_budget allowance must be finite and positive",
         ));
     }
+    let reminder_at_context_start = config.reminder_at_context_start.unwrap_or(true);
     let reminder_at_remaining_tokens =
         config
             .reminder_at_remaining_tokens
@@ -3084,13 +3122,17 @@ fn resolve_rollout_budget_config(
                     "features.rollout_budget.reminder_at_remaining_tokens is required when rollout_budget is enabled",
                 )
             })?;
-    if reminder_at_remaining_tokens
-        .iter()
-        .any(|&tokens| tokens <= 0 || tokens >= limit_tokens)
-    {
+    if reminder_at_remaining_tokens.iter().any(|&tokens| {
+        // Persisted token allowances and thresholds are exact integers, including above 2^53.
+        tokens <= 0
+            || match config.limit_tokens {
+                Some(limit) => tokens >= limit,
+                None => rollout_budget_threshold_reached(limit_budget, tokens),
+            }
+    }) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "features.rollout_budget.reminder_at_remaining_tokens must contain only positive values below limit_tokens",
+            "features.rollout_budget.reminder_at_remaining_tokens must contain only positive values below the rollout allowance",
         ));
     }
     let sampling_token_weight = config.sampling_token_weight.unwrap_or(1.0);
@@ -3108,7 +3150,8 @@ fn resolve_rollout_budget_config(
     }
     Ok(Some(RolloutBudgetConfig {
         enforce_limit: config.enforce_limit.unwrap_or(true),
-        limit_tokens,
+        limit_budget,
+        reminder_at_context_start,
         reminder_at_remaining_tokens,
         sampling_token_weight,
         prefill_token_weight,
@@ -3697,12 +3740,29 @@ impl Config {
             sandbox_mode,
         );
         let requirements_toml = config_layer_stack.requirements_toml();
+        let restore_persisted_profile = sandbox_mode.is_none()
+            && permission_profile.is_none()
+            && default_permissions_override.is_none()
+            && persisted_permission_profile_id.is_none();
+        let persisted_read_only = restore_persisted_profile
+            && persisted_permission_profile
+                .as_ref()
+                .is_some_and(|profile| *profile == PermissionProfile::read_only());
+        if persisted_read_only
+            && !permission_profile_is_allowed(
+                &config_layer_stack,
+                BUILT_IN_READ_ONLY_PROFILE,
+                &PermissionProfile::read_only(),
+            )
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "The saved read-only permission profile is disallowed by requirements. Select a permission profile explicitly to continue.",
+            ));
+        }
         let persisted_permission_profile = persisted_permission_profile.filter(|profile| {
-            sandbox_mode.is_none()
-                && permission_profile.is_none()
-                && default_permissions_override.is_none()
-                && persisted_permission_profile_id.is_none()
-                && requirements_toml.allowed_permission_profiles.is_none()
+            restore_persisted_profile
+                && (persisted_read_only || requirements_toml.allowed_permission_profiles.is_none())
                 // Executor-owned enforcement and materialized grants are not portable
                 // thread defaults. Reject the original mode before preserving denials.
                 && !matches!(profile, PermissionProfile::External { .. })
@@ -3839,7 +3899,7 @@ impl Config {
         };
         dedupe_absolute_paths(&mut workspace_roots);
         let (
-            configured_network_proxy_config,
+            mut configured_network_proxy_config,
             mut permission_profile,
             mut file_system_sandbox_policy,
             mut active_permission_profile,
@@ -3980,6 +4040,21 @@ impl Config {
             )
         };
         if let Some(saved) = persisted_permission_profile {
+            // Canonical read-only recovery can remove writes without replacing a
+            // narrower read allowlist from the current configuration.
+            let saved = if persisted_read_only
+                && (!file_system_sandbox_policy.has_full_disk_read_access()
+                    || matches!(permission_profile, PermissionProfile::External { .. }))
+            {
+                permission_profile.intersect_with_read_only().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Could not restore the saved read-only permission profile under external enforcement. Select a permission profile explicitly to continue.",
+                    )
+                })?
+            } else {
+                saved
+            };
             let (mut saved_file_system, saved_network) = saved.to_runtime_permissions();
             saved_file_system.preserve_deny_read_restrictions_from(&file_system_sandbox_policy);
             let restored = PermissionProfile::from_runtime_permissions_with_enforcement(
@@ -3993,6 +4068,9 @@ impl Config {
             ) {
                 permission_profile = restored;
                 file_system_sandbox_policy = saved_file_system;
+                if persisted_read_only {
+                    configured_network_proxy_config = NetworkProxyConfig::default();
+                }
                 active_permission_profile = None;
                 profile_workspace_roots.clear();
             }
@@ -4053,6 +4131,8 @@ impl Config {
         let experimental_request_user_input_enabled =
             resolve_experimental_request_user_input_enabled(&cfg);
         let update_plan_enabled = resolve_update_plan_enabled(&cfg);
+        let response_process_mode = cfg.responses.as_ref().and_then(|responses| responses.process_mode);
+        let response_process_mode = response_process_mode.unwrap_or_default();
         let tool_registry = ToolRegistryConfig {
             error_on_tool_collisions: cfg
                 .features
@@ -4119,6 +4199,12 @@ impl Config {
         let allow_login_shell = cfg.allow_login_shell.unwrap_or(true);
 
         let history = cfg.history.unwrap_or_default();
+        let rollout_trace = cfg.rollout_trace.unwrap_or_default();
+        let defaults = TraceCaptureLimits::default();
+        let rollout_trace_limits = TraceCaptureLimits {
+            max_payload_bytes: rollout_trace.max_payload_bytes.unwrap_or(defaults.max_payload_bytes),
+            max_bytes: rollout_trace.max_bytes.unwrap_or(defaults.max_bytes),
+        };
 
         if multi_agent_v2.max_concurrent_threads_per_session == 0 {
             return Err(std::io::Error::new(
@@ -4728,6 +4814,7 @@ impl Config {
             application_network_policy: Default::default(),
             application_auth_route_config: None,
             history,
+            rollout_trace_limits,
             ephemeral: ephemeral.unwrap_or_default(),
             allow_persistent_dynamic_tool_updates: false,
             extra_config: None,
@@ -4810,6 +4897,7 @@ impl Config {
             experimental_request_user_input_enabled,
             update_plan_enabled,
             tool_registry,
+            response_process_mode,
             code_mode,
             background_terminal_max_timeout,
             thread_unload_delay,
@@ -5179,7 +5267,7 @@ fn resolve_effective_permission_selection<'a>(
     let profiles = merge_managed_permission_profiles(configured_profiles, requirements_toml)?;
     validate_user_permission_profile_names(profiles.as_ref())?;
     validate_required_permission_profile_catalog(requirements_toml, profiles.as_ref())?;
-    let valid_persisted_profile_id = persisted_profile_id.and_then(|(profile_id, context)| {
+    if let Some((profile_id, context)) = persisted_profile_id {
         compile_permission_profile(
             profiles.as_ref(),
             profile_id,
@@ -5187,11 +5275,17 @@ fn resolve_effective_permission_selection<'a>(
             /*workspace_write*/ None,
             &mut Vec::new(),
         )
-        .is_ok()
-        .then_some(profile_id)
-    });
+        .map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Could not load saved permission profile `{profile_id}`: {err}. Select a permission profile explicitly to continue."
+                ),
+            )
+        })?;
+    }
     let selected_profile_id = resolve_default_permissions(
-        default_permissions_override.or(valid_persisted_profile_id),
+        default_permissions_override.or(persisted_profile_id.map(|(profile_id, _)| profile_id)),
         configured_default_profile_id,
         requirements_toml,
         startup_warnings,
@@ -5201,7 +5295,7 @@ fn resolve_effective_permission_selection<'a>(
         profiles,
         selected_profile_id,
         persisted_profile_id_was_provided: default_permissions_override.is_none()
-            && valid_persisted_profile_id.is_some(),
+            && persisted_profile_id.is_some(),
         requirements_force_profile_selection: requirements_toml
             .allowed_permission_profiles
             .is_some(),

@@ -5707,6 +5707,26 @@
           "type": "object"
         },
         {
+          "properties": {
+            "method": {
+              "enum": [
+                "thread/search/partial"
+              ],
+              "title": "Thread/search/partialNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadSearchPartialNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/search/partialNotification",
+          "type": "object"
+        },
+        {
           "description": "Final exit notification for a `process/spawn` session.",
           "properties": {
             "method": {
@@ -7430,6 +7450,13 @@
         },
         "type": "object"
       },
+      "AccountUpdateReason": {
+        "enum": [
+          "workspaceRoutingReady",
+          "unknown"
+        ],
+        "type": "string"
+      },
       "AccountUpdatedNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -7452,6 +7479,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AccountUpdateReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set when initial routing discovery completes for the same authenticated owner."
           }
         },
         "title": "AccountUpdatedNotification",
@@ -9699,6 +9737,7 @@
               "modelNotFound",
               "policyCapacityUnavailable",
               "cyberPolicy",
+              "bioPolicy",
               "misalignmentPolicyViolation",
               "tooManyDenials",
               "internalServerError",
@@ -15858,6 +15897,17 @@
               "apiKey": {
                 "type": "string"
               },
+              "providerId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/v2/BedrockProviderId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Defaults to Amazon Bedrock Mantle when omitted."
+              },
               "region": {
                 "type": "string"
               },
@@ -15882,6 +15932,17 @@
             "properties": {
               "accessKeyId": {
                 "type": "string"
+              },
+              "providerId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/v2/BedrockProviderId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Defaults to Amazon Bedrock Mantle when omitted."
               },
               "region": {
                 "type": "string"
@@ -18161,6 +18222,20 @@
               }
             ]
           },
+          "headers_helper": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "headers_helper_refresh_interval_ms": {
+            "format": "uint64",
+            "minimum": 1.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "log_agent_responses": {
             "type": [
               "boolean",
@@ -20002,10 +20077,6 @@
           "name": {
             "type": "string"
           },
-          "position": {
-            "format": "int64",
-            "type": "integer"
-          },
           "recencyAt": {
             "description": "Newest non-archived member thread's recency, in Unix seconds; null when none exist.",
             "format": "int64",
@@ -20030,7 +20101,6 @@
           "id",
           "metadata",
           "name",
-          "position",
           "roots",
           "updatedAt"
         ],
@@ -26454,6 +26524,9 @@
               "input_item_id": {
                 "type": "string"
               },
+              "reason": {
+                "$ref": "#/definitions/v2/ThreadRealtimeSessionInputReason"
+              },
               "source_event_ids": {
                 "items": {
                   "type": "string"
@@ -26462,19 +26535,20 @@
               },
               "type": {
                 "enum": [
-                  "sessionEndInputSaved"
+                  "sessionInputSaved"
                 ],
-                "title": "SessionEndInputSavedThreadRealtimeItemType",
+                "title": "SessionInputSavedThreadRealtimeItemType",
                 "type": "string"
               }
             },
             "required": [
               "input",
               "input_item_id",
+              "reason",
               "source_event_ids",
               "type"
             ],
-            "title": "SessionEndInputSavedThreadRealtimeItem",
+            "title": "SessionInputSavedThreadRealtimeItem",
             "type": "object"
           }
         ],
@@ -26627,6 +26701,13 @@
         ],
         "title": "ThreadRealtimeSdpNotification",
         "type": "object"
+      },
+      "ThreadRealtimeSessionInputReason": {
+        "enum": [
+          "chunk",
+          "sessionEnd"
+        ],
+        "type": "string"
       },
       "ThreadRealtimeSessionOutcome": {
         "enum": [
@@ -27098,6 +27179,27 @@
           "threadId"
         ],
         "title": "ThreadRevertedNotification",
+        "type": "object"
+      },
+      "ThreadSearchPartialNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "description": "A best-effort incremental batch for `thread/search/stream`. Match `requestId` to the request on this connection. Only a small subset of verified matches may be emitted; rows are unique and arrive in discovery order, but may be dropped under load or fall outside the final sorted page. Thread fields use stored metadata and the current watched status; live thread settings are enriched in the final response. Replace provisional rows with the authoritative final response. No partials follow it or an error.",
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/definitions/v2/ThreadSearchResult"
+            },
+            "type": "array"
+          },
+          "requestId": {
+            "$ref": "#/definitions/v2/RequestId"
+          }
+        },
+        "required": [
+          "data",
+          "requestId"
+        ],
+        "title": "ThreadSearchPartialNotification",
         "type": "object"
       },
       "ThreadSearchResult": {

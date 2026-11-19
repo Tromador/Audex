@@ -546,6 +546,9 @@ impl ChatWidget {
                 self.add_hooks_output();
             }
             SlashCommand::Daemon => self.app_event_tx.send(AppEvent::OpenDaemonMenu),
+            SlashCommand::Rc => self.app_event_tx.send(AppEvent::RemoteControl(
+                crate::app::remote_control::Action::Menu,
+            )),
             SlashCommand::Warnings => self.app_event_tx.send(AppEvent::OpenWarnings),
             SlashCommand::Status => {
                 if self.should_prefetch_rate_limits() {
@@ -843,6 +846,9 @@ impl ChatWidget {
                 Err(error) => self.add_error_message(error),
             },
             SlashCommand::Audit => self.request_audit_command(trimmed.to_owned()),
+            SlashCommand::Rc => self.add_error_message(
+                "Open /rc and choose Disable to turn off remote control.".into(),
+            ),
             SlashCommand::Model if !trimmed.is_empty() => {
                 self.handle_model_command_args(trimmed);
                 self.app_event_tx.send(AppEvent::SettingsSelectionClosed);
@@ -1364,6 +1370,7 @@ impl ChatWidget {
             SlashCommand::Ide
             | SlashCommand::Status
             | SlashCommand::Daemon
+            | SlashCommand::Rc
             | SlashCommand::Pwd
             | SlashCommand::Usage
             | SlashCommand::DebugConfig

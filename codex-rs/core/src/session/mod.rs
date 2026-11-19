@@ -182,6 +182,7 @@ use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
 use codex_rollout::should_persist_response_item;
 use codex_rollout::state_db;
+use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::ThreadStartedTraceMetadata;
 use codex_rollout_trace::ThreadTraceContext;
 use codex_sandboxing::SandboxType;
@@ -263,9 +264,10 @@ mod guardian_checkpoint;
 mod handlers;
 pub(crate) mod inject;
 mod reasoning_effort;
-mod submission;
+pub(crate) mod submission;
 pub(crate) use reasoning_effort::RequestEffortUsage;
 pub(crate) use submission::Submission;
+use submission::SubmissionOp;
 mod cloud_plugins;
 mod input_queue;
 mod mcp;
@@ -276,11 +278,14 @@ mod model_catalog_settings;
 mod model_ids;
 pub(crate) mod multi_agents;
 mod plugin_selection;
+mod realtime_handoff;
 mod realtime_history;
 mod retained_context;
 mod review;
 mod rollout_budget;
 mod rollout_reconstruction;
+mod sampling_interrupt;
+pub(crate) use sampling_interrupt::SamplingInterrupt;
 #[allow(clippy::module_inception)]
 pub(crate) mod session;
 pub(crate) mod startup_prewarm;
@@ -388,8 +393,6 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
-use codex_protocol::models::LocalImagePreparation;
-use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
@@ -428,6 +431,8 @@ use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
 use codex_skills_extension::HostSkillsService;
 use codex_tools::ToolName;
+use codex_user_input::LocalImagePreparation;
+use codex_user_input::ResolvedUserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
 #[cfg(test)]
 use codex_utils_stream_parser::ProposedPlanSegment;
@@ -497,13 +502,16 @@ pub(crate) struct CompactionPrefix {
 }
 
 pub(crate) enum CompactedHistoryInstallation<'a> {
-    Complete(CompactedHistoryMetadata),
+    Complete(
+        CompactedHistoryMetadata,
+        Option<(&'a CompactionTraceContext, &'a ContextManager)>,
+    ),
     Prefix(PrefixCompactionInstallation<'a>),
 }
 
 impl From<CompactedHistoryMetadata> for CompactedHistoryInstallation<'_> {
     fn from(metadata: CompactedHistoryMetadata) -> Self {
-        Self::Complete(metadata)
+        Self::Complete(metadata, None)
     }
 }
 
@@ -1201,7 +1209,7 @@ impl SessionIo {
         } = op.into();
         let sub = Submission {
             id: id.clone(),
-            op,
+            op: op.into(),
             turn_extension_init,
             trace,
             parent_turn_id,
@@ -1231,7 +1239,7 @@ impl SessionIo {
     /// session loop exits before replying, the caller gets `InternalAgentDied`.
     pub(crate) async fn submit_turn_input(
         &self,
-        request: impl Into<WithTurnExtensionData<TurnInputRequest>>,
+        request: impl Into<WithTurnExtensionData<TurnInputRequest<ResolvedUserInput>>>,
         mode: TurnInputMode,
     ) -> CodexResult<TurnInputSubmission> {
         let id = new_submission_id();
@@ -1243,7 +1251,7 @@ impl SessionIo {
         let trace = request.trace.take();
         self.submit_with_id(Box::new(Submission {
             id,
-            op: Op::TurnInput {
+            op: SubmissionOp::TurnInput {
                 request: Box::new(request),
                 mode,
                 reply: reply_tx,
@@ -1274,7 +1282,8 @@ impl SessionIo {
                 thread_settings,
                 start_options,
                 reply: reply_tx,
-            },
+            }
+            .into(),
             trace,
             turn_extension_init,
             parent_turn_id: None,
@@ -2182,7 +2191,7 @@ impl Session {
             commit,
             previous_config,
             new_config,
-            permission_profile_changed,
+            refresh_network_proxy,
             mcp_inputs_changed,
             credential_masking_warning,
         ) = {
@@ -2218,10 +2227,11 @@ impl Session {
                 });
             let previous_config = notify_config_contributors
                 .then(|| self.build_effective_session_config(&state.session_configuration));
-            let previous_permission_profile = state.session_configuration.permission_profile();
-            let updated_permission_profile = updated.permission_profile();
-            let permission_profile_changed =
-                previous_permission_profile != updated_permission_profile;
+            let current = &state.session_configuration;
+            let refresh_network_proxy = current.permission_profile()
+                != updated.permission_profile()
+                || current.original_config_do_not_use.permissions.network
+                    != updated.original_config_do_not_use.permissions.network;
             let root_service_tier_changed = updated.parent_thread_id.is_none()
                 && state.session_configuration.step_settings.service_tier
                     != updated.step_settings.service_tier;
@@ -2281,7 +2291,7 @@ impl Session {
                 commit,
                 previous_config,
                 new_config,
-                permission_profile_changed,
+                refresh_network_proxy,
                 mcp_inputs_changed,
                 credential_masking_warning,
             )
@@ -2294,7 +2304,7 @@ impl Session {
             );
         }
         self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
-        if permission_profile_changed {
+        if refresh_network_proxy {
             self.refresh_managed_network_proxy_for_current_permission_profile()
                 .await;
         }
@@ -4004,20 +4014,21 @@ impl Session {
         assign_missing_item_id(item, &self.item_id_generator);
     }
 
-    pub(crate) fn response_item_from_user_input(&self, input: Vec<UserInput>) -> ResponseItem {
-        self.response_item_from_user_input_with_image_positions(input, &mut HashMap::new())
+    pub(crate) fn response_item_from_user_input(
+        &self,
+        input: &[ResolvedUserInput],
+    ) -> ResponseItem {
+        self.response_item_from_user_input_with_image_positions(input)
+            .0
     }
 
     fn response_item_from_user_input_with_image_positions(
         &self,
-        input: Vec<UserInput>,
-        user_image_content_indices: &mut HashMap<usize, usize>,
-    ) -> ResponseItem {
-        let mut item = ResponseItem::from(ResponseInputItem::from_user_input(
-            input,
-            LocalImagePreparation::Defer,
-            user_image_content_indices,
-        ));
+        input: &[ResolvedUserInput],
+    ) -> (ResponseItem, HashMap<usize, usize>) {
+        let (message, image_positions) =
+            ResolvedUserInput::into_message(input, LocalImagePreparation::Defer);
+        let mut item = ResponseItem::from(message);
         if let ResponseItem::Message {
             content,
             internal_chat_message_metadata_passthrough,
@@ -4046,7 +4057,7 @@ impl Session {
                     ..Default::default()
                 });
         }
-        item
+        (item, image_positions)
     }
 
     /// Appends to history, persists the prepared items, then notifies raw-item observers.
@@ -4859,9 +4870,11 @@ impl Session {
         installation: impl Into<CompactedHistoryInstallation<'a>>,
     ) -> bool {
         let installation = installation.into();
-        let compaction_model_hash = match &installation {
-            CompactedHistoryInstallation::Complete(metadata) => &metadata.compaction_model_hash,
-            CompactedHistoryInstallation::Prefix(prefix) => &prefix.model_info.comp_hash,
+        let (compaction_model_hash, trace) = match &installation {
+            CompactedHistoryInstallation::Complete(metadata, trace) => {
+                (&metadata.compaction_model_hash, *trace)
+            }
+            CompactedHistoryInstallation::Prefix(prefix) => (&prefix.model_info.comp_hash, None),
         };
         crate::model_search::SearchOwner::checkpoint(
             &self.services.thread_extension_data,
@@ -4898,9 +4911,9 @@ impl Session {
         let (compacted_item, world_state_baseline, started_item) = {
             let mut state = self.state.lock().await;
             let complete_replacement =
-                matches!(&installation, CompactedHistoryInstallation::Complete(_));
+                matches!(&installation, CompactedHistoryInstallation::Complete(..));
             let replacement = match installation {
-                CompactedHistoryInstallation::Complete(metadata) => {
+                CompactedHistoryInstallation::Complete(metadata, _) => {
                     let context = state
                         .additional_context
                         .restore_compacted_items(state.history.annotated_items(), &mut items);
@@ -4994,6 +5007,17 @@ impl Session {
             };
             (compacted_item, world_state_baseline, started_item)
         };
+
+        // Use the replacement captured under the state lock, including goal edits retained
+        // by the installer. A later edit or token recomputation cannot change this checkpoint.
+        if let Some((trace, input)) = trace
+            && let Some(replacement) = &compacted_item.replacement_history
+        {
+            trace.record_local_install(
+                input.raw_items(),
+                replacement.iter().map(|entry| &entry.item),
+            );
+        }
 
         if let Some((turn_context, item)) = started_item {
             // The prefix is now known to be valid; announce the install before checkpoint I/O.
@@ -5484,6 +5508,7 @@ impl Session {
         &self,
         step_context: &StepContext,
         world_state: Arc<WorldState>,
+        trace: &CompactionTraceContext,
     ) {
         let turn_context = step_context.turn.as_ref();
         let history = self.clone_history().await;
@@ -5515,15 +5540,18 @@ impl Session {
             turn_context_item,
             world_state_snapshot,
             /*rejected_audio_file_ids*/ Default::default(),
-            CompactedHistoryMetadata {
-                input_goal_ids,
-                message: String::new(),
-                window_number,
-                window_ids,
-                compaction_response_id: None,
-                compaction_model_hash: None,
-                reviewer_compaction_hash: None,
-            },
+            CompactedHistoryInstallation::Complete(
+                CompactedHistoryMetadata {
+                    input_goal_ids,
+                    message: String::new(),
+                    window_number,
+                    window_ids,
+                    compaction_response_id: None,
+                    compaction_model_hash: None,
+                    reviewer_compaction_hash: None,
+                },
+                Some((trace, &history)),
+            ),
         )
         .await;
         self.recompute_token_usage(turn_context).await;
@@ -5552,49 +5580,83 @@ impl Session {
         &self,
         step_context: &StepContext,
     ) -> CodexResult<Arc<WorldState>> {
-        let turn_context = step_context.turn.as_ref();
-        let reference_context_item = {
-            let state = self.state.lock().await;
-            state.reference_context_item()
+        let previous = loop {
+            if let Some(previous) = self.reference_context_item().await {
+                break previous;
+            }
+            if let Some(world_state) = self.try_publish_initial_context(step_context).await? {
+                return Ok(world_state);
+            }
+            // Another publisher installed the prefix. Render this turn against its baseline.
         };
-        let turn_context_item = step_context.to_turn_context_item();
-        let turn_context_changed = reference_context_item.as_ref() != Some(&turn_context_item);
-        let should_inject_full_context = reference_context_item.is_none();
         let world_state = self
-            .build_world_state_for_step(step_context, should_inject_full_context)
+            .build_world_state_for_step(step_context, /*new_window*/ false)
             .await?;
-        // Full initial context resets the baseline; later turns persist only its changes.
-        let (mut context_items, world_state_item) = if should_inject_full_context {
-            let (context_updates, snapshot) = self
-                .build_initial_context_with_world_state(step_context, &world_state)
-                .await;
-            let context_items =
-                crate::context_manager::updates::merge_world_state_updates(context_updates);
-            self.state
-                .lock()
-                .await
-                .history
-                .set_world_state_baseline(snapshot.clone());
-            (
-                context_items,
-                Some(WorldStateItem::full(snapshot.into_object())),
-            )
-        } else {
-            let (snapshot, mut fragments, world_state_item) = self
-                .state
-                .lock()
-                .await
-                .history
-                .render_step_world_state(&world_state);
-            world_state.resolve_host_roster(&mut fragments).await;
-            let items = crate::context_manager::updates::merge_world_state_updates(fragments);
-            self.state
-                .lock()
-                .await
-                .history
-                .set_world_state_baseline(snapshot);
-            (items, world_state_item)
-        };
+        let (snapshot, mut fragments, world_state_item) = self
+            .state
+            .lock()
+            .await
+            .history
+            .render_step_world_state(&world_state);
+        world_state.resolve_host_roster(&mut fragments).await;
+        let items = crate::context_manager::updates::merge_world_state_updates(fragments);
+        self.state
+            .lock()
+            .await
+            .history
+            .set_world_state_baseline(snapshot);
+        self.publish_step_context(step_context, items, world_state_item, Some(&previous))
+            .await;
+        Ok(Arc::new(world_state))
+    }
+
+    /// Render before acquiring the publication permit so extension and host reads can progress concurrently.
+    /// Only the winner appends the prefix and publishes its world-state and turn checkpoints.
+    async fn try_publish_initial_context(
+        &self,
+        step_context: &StepContext,
+    ) -> CodexResult<Option<Arc<WorldState>>> {
+        let world_state = self
+            .build_world_state_for_step(step_context, /*new_window*/ true)
+            .await?;
+        let (updates, snapshot) = self
+            .build_initial_context_with_world_state(step_context, &world_state)
+            .await;
+        let _permit = self
+            .initial_context_publication
+            .acquire()
+            .await
+            .map_err(|err| CodexErr::Fatal(format!("cannot publish initial context: {err}")))?;
+        if self.reference_context_item().await.is_some() {
+            return Ok(None);
+        }
+        let items = crate::context_manager::updates::merge_world_state_updates(updates);
+        self.state
+            .lock()
+            .await
+            .history
+            .set_world_state_baseline(snapshot.clone());
+        self.publish_step_context(
+            step_context,
+            items,
+            Some(WorldStateItem::full(snapshot.into_object())),
+            /*previous*/ None,
+        )
+        .await;
+        Ok(Some(Arc::new(world_state)))
+    }
+
+    async fn publish_step_context(
+        &self,
+        step_context: &StepContext,
+        mut context_items: Vec<ResponseItem>,
+        world_state_item: Option<WorldStateItem>,
+        previous: Option<&TurnContextItem>,
+    ) {
+        let turn_context = step_context.turn.as_ref();
+        let turn_context_item = step_context.to_turn_context_item();
+        let turn_context_changed = previous != Some(&turn_context_item);
+        let should_inject_full_context = previous.is_none();
         if !should_inject_full_context && turn_context_changed {
             context_items.extend(
                 self.build_turn_context_contribution_items(step_context)
@@ -5604,7 +5666,7 @@ impl Session {
         // A snapshot can change without producing model-visible or TurnContext updates.
         let only_world_state_changed = !turn_context_changed && context_items.is_empty();
         if only_world_state_changed && world_state_item.is_none() {
-            return Ok(Arc::new(world_state));
+            return;
         }
         if !context_items.is_empty() {
             self.record_conversation_items(
@@ -5621,7 +5683,7 @@ impl Session {
         }
         // A snapshot-only change does not require a duplicate TurnContext record.
         if only_world_state_changed {
-            return Ok(Arc::new(world_state));
+            return;
         }
         // Persist one `TurnContextItem` per real user turn so resume/lazy replay can recover the
         // latest durable baseline even when this turn emitted no model-visible context diffs.
@@ -5645,7 +5707,6 @@ impl Session {
         // context items.
         let mut state = self.state.lock().await;
         state.set_reference_context_item(Some(turn_context_item));
-        Ok(Arc::new(world_state))
     }
 
     /// Record reported spending without changing the context baseline or estimating usage.
@@ -5654,6 +5715,7 @@ impl Session {
         turn_context: &TurnContext,
         settings: &ResolvedStepSettings,
         incomplete: &ResponseIncompleteError,
+        charge: crate::client_common::SamplingCharge,
     ) {
         if let Some(response_id) = &incomplete.response_id {
             self.record_response_token_usage(
@@ -5668,7 +5730,10 @@ impl Session {
             .record_token_usage_info(
                 turn_context,
                 settings,
-                incomplete.token_usage.as_ref(),
+                crate::client_common::SamplingUsage {
+                    provider: incomplete.token_usage.clone(),
+                    charge,
+                },
                 TokenUsageContext::SpendingOnly,
             )
             .await;
@@ -5677,14 +5742,14 @@ impl Session {
     pub(crate) async fn update_token_usage_info(
         &self,
         turn_context: &TurnContext,
-        token_usage: Option<&TokenUsage>,
+        usage: crate::client_common::SamplingUsage,
         includes_reasoning: bool,
     ) -> CodexResult<()> {
         let result = self
             .record_token_usage_info(
                 turn_context,
                 &turn_context.initial_settings,
-                token_usage,
+                usage,
                 TokenUsageContext::Sampling {
                     includes_reasoning,
                     input_item_count: 0,
@@ -5743,10 +5808,10 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         settings: &ResolvedStepSettings,
-        token_usage: Option<&TokenUsage>,
+        usage: crate::client_common::SamplingUsage,
         context: TokenUsageContext,
     ) -> CodexResult<()> {
-        if let Some(token_usage) = token_usage {
+        let token_info = if let Some(token_usage) = usage.provider.as_ref() {
             let token_info = {
                 let mut state = self.state.lock().await;
                 match context {
@@ -5799,24 +5864,26 @@ impl Session {
                     token_usage,
                 );
             }
-            let budget_result = self
-                .record_rollout_budget_usage(&turn_context.sub_id, token_usage)
-                .await;
-            if let Some(token_info) = token_info.as_ref() {
-                for contributor in self.services.extensions.token_usage_contributors() {
-                    contributor
-                        .on_token_usage(
-                            &self.services.session_extension_data,
-                            &self.services.thread_extension_data,
-                            turn_context.extension_data.as_ref(),
-                            token_info,
-                        )
-                        .await;
-                }
+            token_info
+        } else {
+            None
+        };
+        let budget_result = self
+            .record_rollout_budget_usage(&turn_context.sub_id, &usage)
+            .await;
+        if let Some(token_info) = token_info.as_ref() {
+            for contributor in self.services.extensions.token_usage_contributors() {
+                contributor
+                    .on_token_usage(
+                        &self.services.session_extension_data,
+                        &self.services.thread_extension_data,
+                        turn_context.extension_data.as_ref(),
+                        token_info,
+                    )
+                    .await;
             }
-            budget_result?;
         }
-        Ok(())
+        budget_result
     }
 
     pub(crate) async fn recompute_token_usage(&self, turn_context: &TurnContext) {
@@ -5935,19 +6002,20 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         model_info: &ModelInfo,
-        input: &[UserInput],
+        input: &[ResolvedUserInput],
         client_id: Option<String>,
         metadata: UserInputMetadata,
         persist_context: PersistContext,
     ) {
-        // Persist the user message to history, but emit the turn item from `UserInput` so
-        // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
-        // those spans, and `record_response_item_and_emit_turn_item` would drop them.
-        let mut user_image_content_indices = HashMap::new();
-        let mut response_item = self.response_item_from_user_input_with_image_positions(
-            input.to_vec(),
-            &mut user_image_content_indices,
-        );
+        let display_input = input
+            .iter()
+            .map(ResolvedUserInput::to_user_input)
+            .collect::<Vec<_>>();
+        let mut user_message_item = UserMessageItem::new(&display_input);
+        // Emit full prompt telemetry only for inputs selected for recording.
+        turn_context.session_telemetry.user_prompt(&display_input);
+        let (mut response_item, user_image_content_indices) =
+            self.response_item_from_user_input_with_image_positions(input);
         if let Some(uuid) = metadata.response_item_uuid {
             response_item.set_id(Some(ResponseItemId::for_admitted_user_input(uuid)));
         }
@@ -5976,7 +6044,6 @@ impl Session {
                 }],
             )
             .await;
-        let mut user_message_item = UserMessageItem::new(input);
         apply_prepared_image_file_ids(
             &mut user_message_item,
             &prepared_items,
@@ -6034,15 +6101,6 @@ impl Session {
             return;
         };
         turn_state.lock().await.has_memory_citation = true;
-    }
-
-    pub async fn interrupt_task(self: &Arc<Self>) {
-        info!("interrupt received: abort current task, if any");
-        let had_active_turn = self.active_turn.lock().await.is_some();
-        self.abort_all_tasks(TurnAbortReason::Interrupted).await;
-        if !had_active_turn {
-            self.cancel_mcp_startup();
-        }
     }
 
     pub(crate) fn hooks(&self) -> Arc<Hooks> {

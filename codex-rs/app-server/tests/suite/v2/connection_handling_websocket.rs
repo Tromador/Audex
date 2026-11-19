@@ -575,7 +575,7 @@ pub(super) async fn spawn_websocket_server_with_env(
     codex_home: &Path,
     listen_url: &str,
     extra_args: &[String],
-    environment: &[(&str, &str)],
+    env_overrides: &[(&str, &std::ffi::OsStr)],
 ) -> Result<(Child, SocketAddr)> {
     let program = codex_utils_cargo_bin::cargo_bin("codex-app-server")
         .context("should find app-server binary")?;
@@ -587,10 +587,12 @@ pub(super) async fn spawn_websocket_server_with_env(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .envs(environment.iter().copied())
         .env("CODEX_HOME", codex_home)
         .env("RUST_LOG", "warn")
         .env("OTEL_METRIC_EXPORT_INTERVAL", "200");
+    for (key, value) in env_overrides {
+        cmd.env(key, value);
+    }
 
     let mut process = cmd
         .kill_on_drop(true)

@@ -147,6 +147,7 @@ impl App {
         };
         if let Some(pane) = self.sidebars.get_mut(&Some(active_id)) {
             pane.opening = None;
+            pane.cancel_hidden_document_primary(/*visible*/ false);
         }
         let input_state = self.chat_widget.capture_thread_input_state();
         let recap_progress = self.recap.progress();
@@ -165,13 +166,14 @@ impl App {
         }
     }
 
-    pub(super) fn retain_subscriptions_for_fork(&mut self) {
-        // Tasks can start while the fork RPC is pending.
+    pub(super) fn retain_thread_subscriptions(&mut self) {
+        // Keep approvals routable while leaving the current task.
         for id in self
             .thread_event_channels
             .keys()
             .copied()
             .chain(self.agent_navigation.tracked_thread_ids())
+            .chain(self.current_displayed_thread_id())
             .filter(|id| {
                 !self.side_threads.contains_key(id)
                     && !self
@@ -877,7 +879,11 @@ impl App {
             }
             AppCommand::SetThreadName { name } => {
                 let name = name.to_string();
-                app_server.thread_set_name(thread_id, name.clone()).await?;
+                if let Err(error) = app_server.thread_set_name(thread_id, name.clone()).await {
+                    self.chat_widget
+                        .add_error_message(format!("Failed to rename thread: {error}"));
+                    return Ok(true);
+                }
                 self.chat_widget.display_thread_name(thread_id, name);
                 self.cancel_thread_title_generation(thread_id);
                 Ok(true)
@@ -1147,6 +1153,7 @@ impl App {
             return Ok(());
         }
         self.track_side_chat_title(thread_id, &notification);
+        self.notice_sidebar_file_item(thread_id, &notification);
         if self.current_displayed_thread_id() == Some(thread_id)
             && let ServerNotification::TurnCompleted(notification) = &notification
         {
@@ -1624,6 +1631,21 @@ impl App {
             self.recap.reset_for_new_thread(Instant::now());
         }
         self.primary_thread_id = Some(thread_id);
+        if self.local_settings.workspace_enabled(&self.config)
+            && matches!(
+                presentation,
+                ThreadAttachPresentation::SessionLineage
+                    | ThreadAttachPresentation::SessionLineageAfterClear
+            )
+        {
+            self.restore_sidebar_agent_outcomes(
+                thread_id,
+                &turns,
+                super::sidebar_subagents::OutcomeReplay::History,
+            );
+            self.app_event_tx
+                .send(AppEvent::DiscoverSidebarAgents(thread_id));
+        }
         self.agents_overview.hidden_threads.remove(&thread_id);
         self.agents_overview.threads.entry(thread_id).or_default();
         self.primary_session_configured = Some(session.clone());
@@ -1897,6 +1919,18 @@ impl App {
         mut snapshot: ThreadEventSnapshot,
         resume_restored_queue: bool,
     ) {
+        if let Some(root) = self.primary_thread_id
+            && snapshot
+                .session
+                .as_ref()
+                .is_some_and(|s| s.thread_id == root)
+        {
+            self.restore_sidebar_agent_outcomes(
+                root,
+                &snapshot.turns,
+                super::sidebar_subagents::OutcomeReplay::History,
+            );
+        }
         let mut reasoning_replay = reasoning_replay::ReasoningReplay::new(&mut snapshot);
         let replayed_final_items = realtime_delivery::completed_agent_items(&snapshot);
         let replayed_voice_texts = realtime_delivery::replayed_voice_texts(&snapshot);
@@ -2288,7 +2322,9 @@ impl App {
             && self.startup_protected_input_boundary
         {
             self.chat_widget.pre_draw_tick();
-            self.render_chat_widget_frame(tui, tui.terminal.last_known_screen_size)?;
+            let screen_size = tui.prepare_draw_size()?;
+            self.handle_draw_pre_render(tui, screen_size)?;
+            self.render_chat_widget_frame(tui, screen_size)?;
             self.discard_startup_modal_input(tui)?;
         }
         if self.backtrack_render_pending {

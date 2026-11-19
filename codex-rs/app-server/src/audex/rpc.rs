@@ -57,7 +57,10 @@ impl AuditRpc {
         let events_root = root.join("runs");
         let events: service::Events = Arc::new(move |event| {
             let notification = progress(&events_root, event);
-            outgoing.try_send_server_notification(ServerNotification::AuditProgress(notification));
+            outgoing.try_send_server_notification(
+                crate::outgoing_message::NotificationTarget::Broadcast,
+                ServerNotification::AuditProgress(notification),
+            );
         });
         let (service, settings) = match settings {
             Ok(settings) => {

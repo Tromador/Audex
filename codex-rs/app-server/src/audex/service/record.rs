@@ -206,8 +206,13 @@ pub fn attempts(directory: &Path) -> Result<Vec<(PathBuf, AttemptStatus)>> {
 
 /// Called before there are any writers. Reconciliation never launches reviewers.
 pub fn reconcile(runs_root: &Path, report: impl Fn(RunId, anyhow::Error)) -> Result<()> {
-    fs::create_dir_all(runs_root)?;
-    for entry in fs::read_dir(runs_root)? {
+    // The first started run creates the root, so a host that never audits leaves no files.
+    let entries = match fs::read_dir(runs_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
         let entry = entry?;
         let Some(id) = entry
             .file_name()

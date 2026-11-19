@@ -660,7 +660,8 @@ async fn snippet_is_operator_text_and_invalid_requests_launch_nothing() -> Resul
         text: "source".into(),
     };
     assert!(service.start(request).is_err());
-    assert_eq!(fs::read_dir(&service.runs_root)?.count(), 0);
+    // Invalid requests create nothing, not even the lazily created runs root.
+    assert!(!service.runs_root.try_exists()?);
     fixture
         .fake
         .script("one", vec![Step::Finish(Completion::Succeeded, None)]);

@@ -223,6 +223,7 @@ impl AuditService {
         };
         let id = Uuid::now_v7();
         let directory = self.run_directory(id);
+        fs::create_dir_all(&self.runs_root)?;
         fs::create_dir(&directory)?;
         let targets = if let Some(paths) = paths {
             paths

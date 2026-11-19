@@ -91,6 +91,38 @@ impl Session {
         &self,
         config: &Config,
     ) -> (McpConfig, McpRuntimeContext) {
+        let environments = self.services.turn_environments.snapshot().await;
+        self.project_mcp_config_and_context(config, &environments)
+            .await
+    }
+
+    /// Compares status requests against the permission and environment inputs used at publication.
+    pub(crate) async fn mcp_status_config_and_context(
+        &self,
+        config: &Config,
+    ) -> (McpConfig, McpRuntimeContext) {
+        let environments = self.services.turn_environments.snapshot().await;
+        let (mut mcp_config, context) = self
+            .project_mcp_config_and_context(config, &environments)
+            .await;
+        // Runtime publication uses the per-turn config, whose cwd follows the local selection.
+        mcp_config.host_cwd = environments
+            .local_environment_cwd()
+            .unwrap_or_else(|| config.cwd.clone());
+        Self::bind_mcp_server_environments(
+            &mut mcp_config,
+            config,
+            &environments,
+            self.services.auth_manager.auth_cached().as_ref(),
+        );
+        (mcp_config, context)
+    }
+
+    async fn project_mcp_config_and_context(
+        &self,
+        config: &Config,
+        environments: &TurnEnvironmentSnapshot,
+    ) -> (McpConfig, McpRuntimeContext) {
         let originator = self.originator().await;
         let (session_source, host_fallback_cwd, disabled_plugin_ids) = {
             let state = self.state.lock().await;
@@ -100,17 +132,16 @@ impl Session {
                 state.active_disabled_plugin_ids.clone(),
             )
         };
-        let environments = self.services.turn_environments.snapshot().await;
         let environment_selections = environments.all_selections();
         let selected_capability_roots = self
-            .resolve_selected_capability_roots_for_step(&environments)
+            .resolve_selected_capability_roots_for_step(environments)
             .await;
         let ready_selected_capability_roots =
             Self::ready_selected_capability_roots(&selected_capability_roots);
         let (executor_capability_discovery_v2, inventory_changed) = self
             .executor_capability_discovery_for_step_v2(
                 config,
-                &environments,
+                environments,
                 /*skill_turn*/ None,
             )
             .await;
@@ -118,7 +149,7 @@ impl Session {
             .executor_capability_discovery_for_step(
                 config,
                 &selected_capability_roots,
-                &environments,
+                environments,
                 executor_capability_discovery_v2.as_deref(),
                 /*skill_turn*/ None,
             )
@@ -151,10 +182,10 @@ impl Session {
                 )
                 .await;
         let mcp_config = self
-            .project_selected_environment_mcp_servers(config, &environments, mcp_projection)
+            .project_selected_environment_mcp_servers(config, environments, mcp_projection)
             .await
             .config;
-        let runtime_context = self.mcp_runtime_context(&environments, &host_fallback_cwd);
+        let runtime_context = self.mcp_runtime_context(environments, &host_fallback_cwd);
         (mcp_config, runtime_context)
     }
 
@@ -1008,10 +1039,15 @@ async fn review_guardian_mcp_elicitation(
     session: Arc<Session>,
     request: ElicitationReviewRequest,
 ) -> anyhow::Result<Option<ElicitationResponse>> {
-    let Some((turn_context, cancellation_token)) =
-        session.active_turn_context_and_cancellation_token().await
-    else {
-        return Ok(None);
+    let (turn_context, cancellation_token) = {
+        let active = session.active_turn.lock().await;
+        let Some(task) = active.as_ref().and_then(|turn| turn.task.as_ref()) else {
+            return Ok(None);
+        };
+        (
+            Arc::clone(&task.turn_context),
+            task.mcp_elicitation_cancellation.child_token(),
+        )
     };
 
     let Some(mcp_config) = session.services.mcp_runtime.current_config() else {
@@ -1030,14 +1066,17 @@ async fn review_guardian_mcp_elicitation(
     let approval_context = call_id
         .and_then(|call_id| session.mcp_tool_approval_metadata(&request.server_key, call_id));
 
+    let is_js_preflight = request.elicitation.meta().is_some_and(|meta| {
+        metadata_str(meta, MCP_ELICITATION_TOOL_NAME_KEY) == Some("js")
+            && metadata_str(meta, MCP_ELICITATION_CONNECTOR_ID_KEY) == Some("node_repl")
+    });
     // User approval skips ordinary CUA checks, not separate sensitive requests.
     let user_cua_execution = step_settings.approvals_reviewer() == ApprovalsReviewer::User
         && is_node_repl_backed_server(&request.server_name)
+        && is_js_preflight
         && request.elicitation.meta().is_some_and(|meta| {
-            metadata_str(meta, MCP_ELICITATION_TOOL_NAME_KEY) == Some("js")
-                && metadata_str(meta, MCP_ELICITATION_CONNECTOR_ID_KEY) == Some("node_repl")
-                && metadata_str(meta, MCP_ELICITATION_APPROVAL_KIND_KEY)
-                    == Some(MCP_ELICITATION_APPROVAL_KIND_MCP_TOOL_CALL)
+            metadata_str(meta, MCP_ELICITATION_APPROVAL_KIND_KEY)
+                == Some(MCP_ELICITATION_APPROVAL_KIND_MCP_TOOL_CALL)
                 && meta.get(MCP_ELICITATION_SENSITIVE_ACTION_KEY) != Some(&Value::Bool(true))
                 && meta.get("codex_requires_user_input") != Some(&Value::Bool(true))
         });
@@ -1298,6 +1337,20 @@ async fn review_guardian_mcp_elicitation(
         }
     };
     guardian_request.category = guardian_scope;
+    if !is_js_preflight
+        && review_context
+            .turn()
+            .config
+            .features
+            .enabled(Feature::GuardianNestedApprovalContext)
+        && let Some(call_id) = originating_call_id
+        && matches!(
+            &guardian_request.request,
+            Ok(crate::guardian::GuardianApprovalRequest::McpToolCall { .. })
+        )
+    {
+        review_context.enclosing_invocation_id = Some(call_id.to_owned());
+    }
     // Keep the action the server asked about, but use its owner's rules from the original call.
     if let Ok(crate::guardian::GuardianApprovalRequest::McpToolCall {
         prompt_permissions, ..

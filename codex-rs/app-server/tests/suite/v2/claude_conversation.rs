@@ -571,7 +571,7 @@ async fn claude_conversation_reconnect_legacy_history_and_configured_model() -> 
         f.home.path(),
         "ws://127.0.0.1:0",
         &[],
-        &[("HOME", f.host_home.to_str().unwrap())],
+        &[("HOME", f.host_home.as_os_str())],
     )
     .await?;
     let mut ws = connect_websocket(address).await?;

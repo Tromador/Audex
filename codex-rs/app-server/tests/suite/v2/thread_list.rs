@@ -1291,6 +1291,22 @@ async fn thread_search_filters_by_source_kind() -> Result<()> {
 }
 
 #[tokio::test]
+async fn thread_search_preserves_large_query_compatibility_on_empty_history() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_minimal_config(codex_home.path())?;
+    let mut server = init_mcp(codex_home.path()).await?;
+    for term in ["s".repeat(65_536), "x".repeat(65_537)] {
+        let request_id = server
+            .send_raw_request("thread/search", Some(json!({"searchTerm": term})))
+            .await?;
+        let response: ThreadSearchResponse =
+            timeout(DEFAULT_READ_TIMEOUT, server.read_response(request_id)).await??;
+        assert!(response.data.is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_list_db_only_errors_distinguish_unavailable_database_from_empty_history()
 -> Result<()> {
     use codex_app_server::in_process;
@@ -1820,6 +1836,15 @@ async fn thread_list_empty_source_kinds_defaults_to_interactive_only() -> Result
         Some("mock_provider"),
         /*git_info*/ None,
     )?;
+    let desktop_id = create_fake_rollout_with_source(
+        codex_home.path(),
+        "2025-02-01T10-30-00",
+        "2025-02-01T10:30:00Z",
+        "Desktop",
+        Some("mock_provider"),
+        /*git_info*/ None,
+        CoreSessionSource::Custom("chatgpt".to_string()),
+    )?;
     let exec_id = create_fake_rollout_with_source(
         codex_home.path(),
         "2025-02-01T11-00-00",
@@ -1846,9 +1871,9 @@ async fn thread_list_empty_source_kinds_defaults_to_interactive_only() -> Result
 
     assert_eq!(next_cursor, None);
     let ids: Vec<_> = data.iter().map(|thread| thread.id.as_str()).collect();
-    assert_eq!(ids, vec![cli_id.as_str()]);
+    assert_eq!(ids, vec![desktop_id.as_str(), cli_id.as_str()]);
     assert_ne!(cli_id, exec_id);
-    assert_eq!(data[0].source, SessionSource::Cli);
+    assert_eq!(data[1].source, SessionSource::Cli);
 
     Ok(())
 }

@@ -57,8 +57,8 @@ use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
-use codex_protocol::user_input::UserInput;
 use codex_thread_store::InMemoryThreadStore;
+use codex_user_input::ResolvedUserInput;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
@@ -794,7 +794,7 @@ async fn thread_id_generator_applies_to_roots_children_and_forks() {
         .control(root.thread.session.session_id())
         .spawn_agent_with_metadata(
             config.clone(),
-            vec![UserInput::Text {
+            vec![ResolvedUserInput::Text {
                 text: "child task".to_string(),
                 text_elements: Vec::new(),
             }],
@@ -1141,12 +1141,15 @@ fn assistant_msg(text: &str) -> ResponseItem {
 }
 
 fn contextual_user_interrupted_marker() -> ResponseItem {
-    interrupted_turn_history_marker(InterruptedTurnHistoryMarker::ContextualUser)
-        .expect("contextual-user interrupted marker should be enabled")
+    interrupted_turn_history_marker(
+        InterruptedTurnHistoryMarker::ContextualUser,
+        /*cause*/ None,
+    )
+    .expect("contextual-user interrupted marker should be enabled")
 }
 
 fn developer_interrupted_marker() -> ResponseItem {
-    interrupted_turn_history_marker(InterruptedTurnHistoryMarker::Developer)
+    interrupted_turn_history_marker(InterruptedTurnHistoryMarker::Developer, /*cause*/ None)
         .expect("developer interrupted marker should be enabled")
 }
 
@@ -1826,7 +1829,8 @@ async fn spawn_internal_session_preserves_parent_lineage_without_forking_history
     let mut config = test_config().await;
     config.rollout_budget = Some(RolloutBudgetConfig {
         enforce_limit: true,
-        limit_tokens: 100,
+        limit_budget: 100.0,
+        reminder_at_context_start: true,
         reminder_at_remaining_tokens: vec![75, 50, 25],
         sampling_token_weight: 1.0,
         prefill_token_weight: 1.0,
@@ -1975,10 +1979,13 @@ async fn spawn_internal_session_preserves_parent_lineage_without_forking_history
         .session
         .services
         .agent_control
-        .record_usage(TokenUsage {
-            output_tokens: 25,
-            ..Default::default()
-        })
+        .record_usage(
+            Some(TokenUsage {
+                output_tokens: 25,
+                ..Default::default()
+            }),
+            codex_hooks::HookCharge::default(),
+        )
         .await
         .expect("record reviewer usage");
     let reminder = parent
@@ -1989,7 +1996,7 @@ async fn spawn_internal_session_preserves_parent_lineage_without_forking_history
         .pending_budget_reminder(parent.thread_id, "window")
         .await
         .expect("parent budget reminder");
-    assert_eq!(reminder.remaining_tokens, 75);
+    assert_eq!(reminder.remaining_units, 75.0);
     assert_eq!(reviewer_config.parent_thread_id, Some(parent.thread_id));
     assert_eq!(reviewer_config.forked_from_thread_id, None);
     assert_eq!(reviewer_config.originator, "codex_work_desktop");
@@ -3842,7 +3849,7 @@ fn multi_agent_v2_interrupted_marker_uses_developer_input_message() {
             content: vec![ContentItem::InputText {
                 text: format!(
                     "<turn_aborted>\n{}\n</turn_aborted>",
-                    crate::context::TurnAborted::INTERRUPTED_DEVELOPER_GUIDANCE
+                    crate::context::TurnAborted::INTERRUPTED_NEUTRAL_GUIDANCE
                 ),
             }],
             phase: None,

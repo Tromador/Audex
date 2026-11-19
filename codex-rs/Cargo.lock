@@ -2223,10 +2223,12 @@ dependencies = [
 name = "codex-app-server-client"
 version = "0.0.0"
 dependencies = [
+ "codex-api",
  "codex-app-server",
  "codex-app-server-protocol",
  "codex-app-server-transport",
  "codex-arg0",
+ "codex-backend-client",
  "codex-cloud-client",
  "codex-config",
  "codex-core",
@@ -2234,6 +2236,7 @@ dependencies = [
  "codex-feedback",
  "codex-http-client",
  "codex-login",
+ "codex-model-provider",
  "codex-protocol",
  "codex-uds",
  "codex-utils-absolute-path",
@@ -2315,7 +2318,7 @@ dependencies = [
  "tracing",
  "ts-rs",
  "uuid",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -2390,7 +2393,7 @@ dependencies = [
  "url",
  "uuid",
  "wiremock",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -2620,7 +2623,6 @@ dependencies = [
  "codex-sandboxing",
  "codex-skills-extension",
  "codex-state",
- "codex-stdio-to-uds",
  "codex-tcp-tunnel",
  "codex-terminal-detection",
  "codex-thread-store",
@@ -2670,7 +2672,7 @@ dependencies = [
  "which 8.0.0",
  "windows-sys 0.61.2",
  "wiremock",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -3092,6 +3094,7 @@ dependencies = [
  "codex-test-binary-support",
  "codex-thread-store",
  "codex-tools",
+ "codex-user-input",
  "codex-utils-absolute-path",
  "codex-utils-audio",
  "codex-utils-cache",
@@ -3167,7 +3170,7 @@ dependencies = [
  "whoami 1.6.1",
  "windows-sys 0.61.2",
  "wiremock",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -3336,7 +3339,7 @@ dependencies = [
  "uuid",
  "walkdir",
  "wiremock",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -3826,7 +3829,7 @@ dependencies = [
  "tracing",
  "uuid",
  "wiremock",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -3836,20 +3839,28 @@ dependencies = [
  "anyhow",
  "chrono",
  "codex-analytics",
+ "codex-api",
  "codex-attachment-store",
  "codex-context-fragments",
  "codex-core",
  "codex-extension-api",
+ "codex-features",
+ "codex-guardian-context",
  "codex-guardian-reviewer",
  "codex-history",
+ "codex-http-client",
+ "codex-login",
  "codex-message-board",
+ "codex-model-provider",
  "codex-protocol",
  "codex-state",
  "codex-thread-store",
  "codex-tools",
  "codex-utils-string",
+ "codex-websocket-client",
  "core_test_support",
  "futures",
+ "http 1.4.0",
  "insta",
  "pretty_assertions",
  "serde",
@@ -3858,6 +3869,8 @@ dependencies = [
  "test-case",
  "tokio",
  "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3937,6 +3950,7 @@ dependencies = [
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
@@ -3981,7 +3995,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "windows-sys 0.61.2",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -4717,7 +4731,7 @@ dependencies = [
  "landlock",
  "libc",
  "pretty_assertions",
- "quick-xml 0.41.0",
+ "quick-xml",
  "schemars 0.8.22",
  "seccompiler",
  "serde",
@@ -4753,6 +4767,7 @@ dependencies = [
  "codex-protocol",
  "codex-state",
  "codex-thread-store",
+ "codex-user-input",
  "codex-utils-absolute-path",
  "core_test_support",
  "pretty_assertions",
@@ -4885,6 +4900,7 @@ dependencies = [
  "codex-protocol",
  "codex-state",
  "codex-utils-absolute-path",
+ "codex-utils-cargo-bin",
  "codex-utils-output-truncation",
  "codex-utils-path",
  "codex-utils-process",
@@ -4901,7 +4917,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -4919,7 +4935,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "uuid",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -5112,35 +5128,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-stdio-to-uds"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "codex-uds",
- "codex-utils-cargo-bin",
- "pretty_assertions",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "codex-tcp-tunnel"
 version = "0.0.0"
 dependencies = [
  "anyhow",
  "bytes",
  "clap",
+ "h2",
  "h3",
  "h3-quinn",
  "http 1.4.0",
+ "hyper-rustls",
+ "hyper-util",
  "pretty_assertions",
  "quinn",
- "rand 0.9.3",
  "rcgen",
  "rustls",
  "rustls-native-certs",
- "serde_json",
  "tokio",
+ "tokio-rustls",
+ "tower-service",
  "url",
 ]
 
@@ -5201,7 +5208,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -5279,9 +5286,11 @@ dependencies = [
  "codex-rollout",
  "codex-sandboxing",
  "codex-shell-command",
+ "codex-skills",
  "codex-state",
  "codex-terminal-detection",
  "codex-uds",
+ "codex-user-input",
  "codex-utils-absolute-path",
  "codex-utils-approval-presets",
  "codex-utils-cargo-bin",
@@ -5347,7 +5356,9 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "ts-rs",
  "two-face",
+ "unicode-bidi",
  "unicode-linebreak",
  "unicode-segmentation",
  "unicode-width 0.2.1",
@@ -5376,6 +5387,20 @@ dependencies = [
  "tokio-util",
  "uds_windows",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "codex-user-input"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "codex-protocol",
+ "codex-utils-image",
+ "derive_more 2.1.1",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -5626,6 +5651,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
+ "nix 0.28.0",
  "portable-pty",
  "pretty_assertions",
  "shared_library",
@@ -5963,8 +5989,8 @@ dependencies = [
  "compression-core",
  "flate2",
  "memchr",
- "zstd",
- "zstd-safe",
+ "zstd 0.13.3",
+ "zstd-safe 7.2.4",
 ]
 
 [[package]]
@@ -6052,9 +6078,12 @@ checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
 name = "constant_time_eq"
-version = "0.4.2"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+checksum = "9eb6feb175df65d0a3ccd3e73484e940d0ac664e8034f0519fd49a93db3071d9"
+dependencies = [
+ "rustversion",
+]
 
 [[package]]
 name = "convert_case"
@@ -6199,7 +6228,7 @@ dependencies = [
  "tracing-subscriber",
  "walkdir",
  "wiremock",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -6355,7 +6384,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 [[package]]
 name = "crossterm"
 version = "0.29.0"
-source = "git+https://github.com/openai-oss-forks/crossterm?rev=ed1cdab335221515706178d68495bba2aed1924f#ed1cdab335221515706178d68495bba2aed1924f"
+source = "git+https://github.com/openai-oss-forks/crossterm?rev=37ca4a27a9424ec5dbe6451f48c339d7b45f8d63#37ca4a27a9424ec5dbe6451f48c339d7b45f8d63"
 dependencies = [
  "bitflags 2.13.1",
  "crossterm_winapi",
@@ -10382,9 +10411,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.29"
+version = "1.1.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85bc9657773828b90eeb625adff10eeac83cc21bbfd8e23a03eaa8a33c9e28d9"
+checksum = "fee3f59f4321dab0c78d828942e7aa09d0bd8ad6e78a501977e6bf3d02938045"
 dependencies = [
  "cc",
  "libc",
@@ -10561,9 +10590,9 @@ dependencies = [
 
 [[package]]
 name = "lzma-rust2"
-version = "0.21.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fde178a3caf126c440fa15628147772d8ee590a39477d711353fbe2e58a73a5b"
+checksum = "7277c9742229dc25243236d578b6471a798c554512c6f6a04365ec2e87c2a3bb"
 dependencies = [
  "sha2 0.11.0",
 ]
@@ -11607,6 +11636,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tracing",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -12096,13 +12126,13 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "plist"
-version = "1.9.0"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "092791278e026273c1b65bbdcfbba3a300f2994c896bd01ab01da613c29c46f1"
+checksum = "7da1d65da6dd5d1e44199ac0f58712d241c0f439f80adea8924d832384087f85"
 dependencies = [
  "base64 0.22.1",
  "indexmap 2.14.0",
- "quick-xml 0.39.4",
+ "quick-xml",
  "serde",
  "time",
 ]
@@ -12562,15 +12592,6 @@ name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
-
-[[package]]
-name = "quick-xml"
-version = "0.39.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
-dependencies = [
- "memchr",
-]
 
 [[package]]
 name = "quick-xml"
@@ -13535,8 +13556,8 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.5.1"
-source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=98a54789b80110ad210495c4ad845c89e1980471#98a54789b80110ad210495c4ad845c89e1980471"
+version = "3.6.0"
+source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=b11a40d889e022087d7f2b8cd23aa28e19ceaf5b#b11a40d889e022087d7f2b8cd23aa28e19ceaf5b"
 dependencies = [
  "async-trait",
  "base64 0.23.0",
@@ -13571,8 +13592,8 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "3.5.1"
-source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=98a54789b80110ad210495c4ad845c89e1980471#98a54789b80110ad210495c4ad845c89e1980471"
+version = "3.6.0"
+source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=b11a40d889e022087d7f2b8cd23aa28e19ceaf5b#b11a40d889e022087d7f2b8cd23aa28e19ceaf5b"
 dependencies = [
  "darling 0.24.0",
  "proc-macro2",
@@ -16361,7 +16382,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -17278,12 +17299,12 @@ dependencies = [
 
 [[package]]
 name = "wayland-scanner"
-version = "0.31.10"
+version = "0.31.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c324a910fd86ebdc364a3e61ec1f11737d3b1d6c273c0239ee8ff4bc0d24b4a"
+checksum = "338e30461b3a2b67d70eb30a6d89f8e0c93a833e07d2ae89085cd070c4a00ac0"
 dependencies = [
  "proc-macro2",
- "quick-xml 0.39.4",
+ "quick-xml",
  "quote",
 ]
 
@@ -18444,13 +18465,13 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.0.0"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "711e8c9646791c49b7eb799a19c4ae70a9b8372ddc6a1fa4778defd1e2aa5d5e"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
  "aes 0.9.3",
  "bzip2",
- "constant_time_eq 0.4.2",
+ "constant_time_eq 0.6.1",
  "crc32fast",
  "deflate64",
  "flate2",
@@ -18459,13 +18480,14 @@ dependencies = [
  "indexmap 2.14.0",
  "lzma-rust2",
  "memchr",
+ "nix 0.31.3",
  "pbkdf2 0.13.0",
  "sha1 0.11.0",
  "time",
  "typed-path",
  "zeroize",
  "zopfli",
- "zstd",
+ "zstd 0.14.3",
 ]
 
 [[package]]
@@ -18517,7 +18539,16 @@ version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
 dependencies = [
- "zstd-safe",
+ "zstd-safe 7.2.4",
+]
+
+[[package]]
+name = "zstd"
+version = "0.14.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
+dependencies = [
+ "zstd-safe 8.2.0",
 ]
 
 [[package]]
@@ -18530,10 +18561,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
+name = "zstd-safe"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.2+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",

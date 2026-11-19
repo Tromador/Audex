@@ -99,7 +99,12 @@ pub(crate) fn view(directory: &Path) -> Result<AuditRun> {
 
 pub(crate) fn list(root: &Path) -> Result<Vec<AuditRun>> {
     let mut ids = Vec::new();
-    for entry in fs::read_dir(root)? {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
         let entry = entry?;
         if entry.file_type()?.is_dir()
             && entry

@@ -112,6 +112,7 @@ pub(crate) struct InitializedTerminal {
     pub(crate) terminal: Terminal,
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) terminal_app_over_ssh: bool,
+    pub(crate) herdr_kitty_graphics: Option<bool>,
     pub(crate) stderr_guard: terminal_stderr::TerminalStderrGuard,
 }
 
@@ -517,6 +518,12 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
     let backend = CrosstermBackend::new(stdout());
 
     #[cfg(unix)]
+    let probe_herdr = {
+        let info = codex_terminal_detection::terminal_info();
+        info.multiplexer.is_none() && info.term_program.as_deref() == Some("herdr")
+    };
+
+    #[cfg(unix)]
     let startup_probe = {
         use crate::terminal_probe::StartupKeyboardEnhancementProbe;
 
@@ -526,8 +533,11 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
         } else {
             StartupKeyboardEnhancementProbe::Query
         };
-        match crate::terminal_probe::startup(crate::terminal_probe::DEFAULT_TIMEOUT, keyboard_probe)
-        {
+        match crate::terminal_probe::startup(
+            crate::terminal_probe::DEFAULT_TIMEOUT,
+            keyboard_probe,
+            probe_herdr,
+        ) {
             Ok(probe) => {
                 tracing::info!(
                     duration_ms = %started_at.elapsed().as_millis(),
@@ -543,15 +553,18 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
                     duration_ms = %started_at.elapsed().as_millis(),
                     "terminal startup probes failed: {err}"
                 );
-                crate::terminal_probe::StartupProbe {
-                    cursor_position: None,
-                    default_colors: None,
-                    keyboard_enhancement_supported: None,
-                    terminal_app_over_ssh: None,
-                }
+                crate::terminal_probe::StartupProbe::default()
             }
         }
     };
+
+    #[cfg(unix)]
+    ALTERNATE_SCREEN.initial_scroll_enabled.store(
+        startup_probe
+            .alternate_scroll_enabled
+            .unwrap_or(/*default*/ false),
+        Ordering::Relaxed,
+    );
 
     #[cfg(unix)]
     crate::terminal_palette::set_default_colors_from_startup_probe(startup_probe.default_colors);
@@ -604,6 +617,10 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
             .unwrap_or(/*default*/ false),
         #[cfg(not(unix))]
         terminal_app_over_ssh: false,
+        #[cfg(unix)]
+        herdr_kitty_graphics: probe_herdr.then_some(startup_probe.kitty_graphics),
+        #[cfg(not(unix))]
+        herdr_kitty_graphics: None,
         stderr_guard,
     };
     restore_guard.active = false;
@@ -735,6 +752,7 @@ pub struct Tui {
     enhanced_keys_supported: bool,
     // Cache the startup result so later configuration loads use the same terminal policy.
     pub(crate) terminal_app_over_ssh: bool,
+    pub(crate) herdr_kitty_graphics: Option<bool>,
     notification_backend: Option<DesktopNotificationBackend>,
     notification_condition: NotificationCondition,
     scrollback: ScrollbackStrategy,
@@ -813,6 +831,7 @@ impl Tui {
             terminal_focused: Arc::new(AtomicBool::new(true)),
             enhanced_keys_supported,
             terminal_app_over_ssh: false,
+            herdr_kitty_graphics: None,
             notification_backend: Some(detect_backend(NotificationMethod::default())),
             notification_condition: NotificationCondition::default(),
             scrollback,
@@ -1071,6 +1090,12 @@ impl Tui {
 
         if let Err(err) = terminal_stderr::resume() {
             tracing::warn!("failed to suppress terminal stderr after external program: {err}");
+        }
+        // An editor's suspend/resume cycle can change termios behind crossterm's raw-mode cache.
+        // Clear that cache so set_modes actually restores raw mode.
+        #[cfg(unix)]
+        if let Err(err) = disable_raw_mode() {
+            tracing::warn!("failed to reset raw mode after external program: {err}");
         }
         if let Err(err) = set_modes() {
             tracing::warn!("failed to re-enable terminal modes after external program: {err}");
@@ -1587,6 +1612,8 @@ impl Tui {
         hud: Option<crate::bottom_pane::ShortcutHud>,
         draw_fn: impl FnOnce(&mut custom_terminal::Frame),
     ) -> Result<()> {
+        // This draw uses the caller's resolved geometry directly, so its reservation is consumed.
+        self.screen_size.pending_draw_size = None;
         // If we are resuming from ^Z, we need to prepare the resume action now so we can apply it
         // in the synchronized update.
         #[cfg(unix)]

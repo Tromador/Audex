@@ -1,4 +1,6 @@
 use super::Submission;
+use super::sampling_interrupt::SamplingInterrupt;
+use super::submission::SubmissionOp;
 use crate::McpRefreshReason;
 use crate::WithTurnExtensionData;
 use crate::realtime_conversation::handle_audio as handle_realtime_conversation_audio;
@@ -48,7 +50,7 @@ use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_thread_store::PersistContext;
 
-use crate::context_manager::is_user_turn_boundary;
+use crate::context_manager::is_instruction_turn_boundary;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::mcp::RequestId as ProtocolRequestId;
 use codex_rmcp_client::ElicitationAction;
@@ -60,7 +62,7 @@ use tracing::info;
 use tracing::warn;
 
 pub async fn interrupt(sess: &Arc<Session>) {
-    sess.interrupt_task().await;
+    sess.interrupt_task(sess.active_turn.lock().await).await;
 }
 
 pub async fn clean_background_terminals(sess: &Arc<Session>) {
@@ -430,8 +432,9 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
     info!("Shutting down Codex instance");
     let history = sess.clone_history().await;
     let turn_count = history
-        .raw_items()
-        .filter(|item| is_user_turn_boundary(item))
+        .annotated_items()
+        .iter()
+        .filter(|item| is_instruction_turn_boundary(item))
         .count();
     sess.services.session_telemetry.counter(
         "codex.conversation.turn.count",
@@ -548,7 +551,8 @@ pub(super) async fn submission_loop(
                         },
                         async {
                             while let Ok(sub) = rx_sub.recv().await {
-                                if let Op::InterAgentCommunication { communication, start_options } = sub.op
+                                if let SubmissionOp::Protocol(op) = sub.op
+                                    && let Op::InterAgentCommunication { communication, start_options } = *op
                                     && sub.message_delivery.as_ref().is_some_and(crate::agent_communication::MessageDelivery::awaits_result_write)
                                 {
                                     let mail = crate::PendingAgentMessage::new(communication, sub.message_delivery);
@@ -610,20 +614,47 @@ pub(super) async fn submission_loop(
         );
         let dispatch_span = submission_dispatch_span(&sub);
         let should_exit = async {
-            match sub.op {
+            let op = match sub.op {
+                SubmissionOp::TurnInput {
+                    request,
+                    mode,
+                    reply,
+                } => {
+                    let request = WithTurnExtensionData {
+                        request: *request,
+                        turn_extension_init: sub.turn_extension_init,
+                    };
+                    let result = turn_input::handle(&sess, request, mode, sub.id.clone()).await;
+                    let _ = reply.send(result);
+                    return false;
+                }
+                SubmissionOp::Protocol(op) => *op,
+            };
+            match op {
                 Op::ExternalConversation {
                     request,
                     execution,
                     reply,
                 } => {
-                    let result =
-                        turn_input::handle_external(&sess, *request, execution, sub.id.clone())
-                            .await;
+                    // Captures client attachments the way ordinary turn input is resolved.
+                    let result = match crate::codex_thread::resolve_client_turn_input(*request)
+                        .await
+                    {
+                        Ok(request) => {
+                            turn_input::handle_external(&sess, request, execution, sub.id.clone())
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
                     let _ = reply.send(result);
                     false
                 }
                 Op::Interrupt => {
                     interrupt(&sess).await;
+                    false
+                }
+                Op::InterruptAgent => {
+                    SamplingInterrupt::request(&sess).await;
                     false
                 }
                 Op::InterruptIfNoPendingInput { turn_id, reply } => {
@@ -706,19 +737,6 @@ pub(super) async fn submission_loop(
                 }
                 Op::RealtimeConversationListVoices => {
                     realtime_conversation_list_voices(&sess, sub.id.clone()).await;
-                    false
-                }
-                Op::TurnInput {
-                    request,
-                    mode,
-                    reply,
-                } => {
-                    let request = WithTurnExtensionData {
-                        request: *request,
-                        turn_extension_init: sub.turn_extension_init,
-                    };
-                    let result = turn_input::handle(&sess, request, mode, sub.id.clone()).await;
-                    let _ = reply.send(result);
                     false
                 }
                 Op::RecoverTurn {
@@ -977,8 +995,8 @@ async fn approve_guardian_denied_action(sess: &Arc<Session>, event: GuardianAsse
 pub(super) fn submission_dispatch_span(sub: &Submission) -> tracing::Span {
     let op_name = sub.op.kind();
     let span_name = format!("op.dispatch.{op_name}");
-    let dispatch_span = match &sub.op {
-        Op::RealtimeConversationAudio(_) => {
+    let dispatch_span = match sub.op.as_protocol() {
+        Some(Op::RealtimeConversationAudio(_)) => {
             debug_span!(
                 "submission_dispatch",
                 otel.name = span_name.as_str(),

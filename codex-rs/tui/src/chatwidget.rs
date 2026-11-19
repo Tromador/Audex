@@ -52,7 +52,6 @@ use crate::bottom_pane::StatusLineSetupView;
 use crate::bottom_pane::StatusSurfacePreviewData;
 use crate::bottom_pane::StatusSurfacePreviewItem;
 use crate::bottom_pane::TerminalTitleItem;
-use crate::bottom_pane::TerminalTitleSetupView;
 use crate::diff_model::FileChange;
 use crate::git_action_directives::parse_assistant_markdown;
 use crate::legacy_core::config::Config;
@@ -404,6 +403,9 @@ use self::status_state::TerminalTitleStatusKind;
 mod status_controls;
 mod status_surface_commands;
 mod status_surfaces;
+mod statusline_reader;
+pub(crate) use statusline_reader::StatuslineReadEvent;
+
 pub(crate) mod statusline_state;
 use self::status_surface_commands::StatusSurfaceOverrides;
 mod streaming;
@@ -576,9 +578,11 @@ pub(crate) struct ChatWidget {
     pub(crate) initial_user_message: Option<UserMessage>,
     status_account_display: Option<StatusAccountDisplay>,
     pub(crate) remote_connection: Option<RemoteConnectionStatus>,
+    statusline_read: Option<statusline_reader::ActiveStatuslineRead>,
+    pub(crate) statusline_disconnected: bool,
     /// Remote app servers cannot read image paths on the TUI host.
     pub(crate) snapshot_local_images: bool,
-    pub(crate) thread_settings_owner: crate::app_server_session::ThreadSettingsOwner,
+    pub(crate) thread_params_mode: crate::app_server_session::ThreadParamsMode,
     pending_image_submission: Option<image_submission::PendingImageSubmission>,
     pub(crate) local_worktree_operations: bool,
     pub(crate) windows_sandbox_local_server: bool,
@@ -590,6 +594,7 @@ pub(crate) struct ChatWidget {
     token_usage_pending: bool,
     // Status and polling use account usage reads; response streams may identify meters differently.
     rate_limit_snapshots_by_limit_id: BTreeMap<String, RateLimitSnapshotDisplay>,
+    inherited_quota_provider: Option<String>,
     refreshing_status_outputs: Vec<(u64, StatusHistoryHandle)>,
     next_status_refresh_request_id: u64,
     pending_rate_limit_reset_request_id: Option<u64>,
@@ -600,6 +605,8 @@ pub(crate) struct ChatWidget {
     pending_rate_limit_reset_hint: Option<PlainHistoryCell>,
     available_rate_limit_reset_credits: Option<i64>,
     next_rate_limit_reset_request_id: u64,
+    pub(crate) account_plan: Option<PlanType>,
+    quota_plan: Option<PlanType>,
     plan_type: Option<PlanType>,
     codex_rate_limit_reached_type: Option<RateLimitReachedType>,
     codex_spend_control_reached: Option<bool>,
@@ -724,6 +731,7 @@ pub(crate) struct ChatWidget {
     /// Main chat-surface bindings resolved from `tui.keymap.chat`.
     chat_keymap: ChatKeymap,
     new_backend_label: Option<String>,
+    cloud_environment_name: Option<String>,
     /// Whether the preset submenu owns the next key.
     quick_dial_menu: bool,
     /// Ignore a held key after it dismisses the preset submenu.

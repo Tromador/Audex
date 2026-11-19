@@ -2267,7 +2267,7 @@ async fn shared_apps_snapshot_requires_writable_discovery_and_a_shared_cache() -
         );
 
         let mut config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
-        config.requires_read_only_mcp_tools = read_only;
+        config.client.requires_read_only_mcp_tools = read_only;
         let mut catalog = crate::ResolvedMcpCatalog::builder();
         catalog.register(crate::McpServerRegistration::from_hosted_apps(
             "fixture",
@@ -2342,7 +2342,7 @@ async fn hosted_apps_protocol_mode_is_independent_of_generic_mode() -> anyhow::R
         ),
     ] {
         let mut config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
-        config.protocol_mode = generic_mode;
+        config.client.protocol_mode = generic_mode;
         config.host_owned_apps_protocol_mode = hosted_mode;
         let mut catalog = crate::ResolvedMcpCatalog::builder();
         catalog.register(crate::McpServerRegistration::from_hosted_apps(
@@ -2671,11 +2671,16 @@ async fn capture_binding_preserves_ready_client_catalog_and_shares_prepared_meta
             .expect("metadata object")
             .clone(),
     ));
+    let mut app_only = create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "calendar.read_context");
+    app_only.callable_namespace = "calendar".to_string();
+    app_only.connector_id = Some("calendar".to_string());
+    app_only.tool.meta = hidden_collision.tool.meta.clone();
     let mut ready_client = create_test_managed_client(vec![
         create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "client_local_tool"),
         create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "client_local_blocked"),
         visible_collision,
         hidden_collision,
+        app_only,
     ])
     .await;
     let tool_filter = ToolFilter {
@@ -2723,7 +2728,7 @@ async fn capture_binding_preserves_ready_client_catalog_and_shares_prepared_meta
             tool_approval_modes: HashMap::new(),
         },
     );
-    let manager = Arc::new(manager);
+    let mut manager = Arc::new(manager);
 
     assert_eq!(
         manager
@@ -2783,6 +2788,39 @@ async fn capture_binding_preserves_ready_client_catalog_and_shares_prepared_meta
         )
         .is_none()
     );
+
+    let config = Arc::clone(step.config());
+    let expected = step
+        .tool_info(
+            &McpServerKey::unscoped(CODEX_APPS_MCP_SERVER_NAME),
+            "calendar.read_context",
+        )
+        .expect("app-only tool metadata")
+        .clone();
+    drop(prepared);
+    drop(step);
+    let (unrelated, mut started, _release) =
+        create_gated_async_managed_client(create_test_managed_client(Vec::new()).await);
+    let connections = Arc::get_mut(&mut manager).expect("no retained calls or bindings");
+    connections.insert_test_client("unrelated", unrelated);
+    connections.required_servers = vec![McpServerKey::unscoped("unrelated")];
+
+    // A host hook prepares its hidden tool without starting an unrelated required server.
+    let prepared = tokio::select! {
+        result = manager.prepare_app_hook_call(Arc::clone(&config), "calendar.read_context") => {
+            result.expect("prepare the current Apps call")
+        }
+        _ = &mut started => panic!("App hook preparation started an unrelated server"),
+    };
+    assert_eq!(prepared.tool_info(), &expected);
+    for tool in ["shared_cached_tool", "client_local_blocked", "collision"] {
+        assert!(
+            manager
+                .prepare_app_hook_call(Arc::clone(&config), tool)
+                .await
+                .is_err()
+        );
+    }
 }
 
 #[tokio::test]
@@ -5029,11 +5067,11 @@ fn gov_codex_apps_retain_local_chatgpt_auth_provider() -> anyhow::Result<()> {
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = codex_model_provider::auth_provider_from_auth(&auth);
     let mut config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
-    config.chatgpt_base_url = "https://gov.chatgpt.com/backend-api/".to_string();
+    config.client.chatgpt_base_url = "https://gov.chatgpt.com/backend-api/".to_string();
     config.apps_enabled = true;
 
     let local_config = crate::codex_apps_mcp_server_config(
-        &config.chatgpt_base_url,
+        &config.client.chatgpt_base_url,
         /*apps_mcp_product_sku*/ None,
         /*originator*/ None,
     );
@@ -5902,7 +5940,7 @@ async fn read_only_policy_does_not_reuse_a_writable_connection() {
     .await;
     for read_only in [false, true] {
         let mut mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
-        mcp_config.requires_read_only_mcp_tools = read_only;
+        mcp_config.client.requires_read_only_mcp_tools = read_only;
         let reconciled = reconcile_reusable_server_with_mcp_config(
             &previous,
             "docs",
@@ -6837,7 +6875,7 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
     .await;
     let codex_home = tempdir().expect("tempdir");
     let mut mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
-    mcp_config.protocol_mode = codex_rmcp_client::McpProtocolMode::V20260728;
+    mcp_config.client.protocol_mode = codex_rmcp_client::McpProtocolMode::V20260728;
 
     let reconciled = McpConnectionSet::new(
         /*ema_auth*/ None,
@@ -6902,7 +6940,7 @@ async fn reconciliation_reuses_legacy_stdio_server_when_modern_protocol_is_enabl
     .await;
     let codex_home = tempdir().expect("tempdir");
     let mut mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
-    mcp_config.protocol_mode = codex_rmcp_client::McpProtocolMode::V20260728;
+    mcp_config.client.protocol_mode = codex_rmcp_client::McpProtocolMode::V20260728;
 
     let reconciled = McpConnectionSet::new(
         /*ema_auth*/ None,

@@ -5,6 +5,7 @@ use super::*;
 use crate::app::session_lifecycle::FreshSessionStart;
 use crate::app_event::TranscriptExportDestination;
 use crate::bottom_pane::BottomPaneView;
+use crate::statusline_metrics::tests::Collector;
 use crate::test_support::boxed_future;
 use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_parented_rollout_with_source;
@@ -226,6 +227,8 @@ async fn cloud_async_question_reply_uses_cloud_admission() -> Result<()> {
 
     for rejected in [false, true] {
         let (mut app, _events, mut ops) = make_test_app_with_channels().await;
+        let metrics = Collector::new();
+        app.statusline_metrics = metrics.metrics(&mut app.config);
         let id = ThreadId::new();
         app.enqueue_primary_thread_session(
             test_thread_session(id, app.config.cwd.to_path_buf()),
@@ -303,6 +306,7 @@ async fn cloud_async_question_reply_uses_cloud_admission() -> Result<()> {
             command.response.send(Ok(receipt)).unwrap();
         });
         result?;
+        assert!(metrics.snapshot().is_empty());
         let composer = app.chat_widget.composer_text_with_pending();
         if rejected {
             insta::assert_snapshot!(composer, @r"
@@ -327,6 +331,7 @@ async fn cloud_resume_picker_reconciles_admitted_steers() -> Result<()> {
     use codex_protocol::models::MessagePhase;
 
     let (mut app, mut events, mut ops) = make_test_app_with_channels().await;
+    app.local_settings.tui.show_tooltips = false;
     let [original, other, failed] = std::array::from_fn(|_| ThreadId::new());
     app.app_server_target = AppServerTarget::Cloud;
     app.enqueue_primary_thread_session(
@@ -561,7 +566,7 @@ async fn cloud_resume_picker_reconciles_admitted_steers() -> Result<()> {
             .iter()
             .flat_map(|cell| cell.display_lines(/*width*/ 80))
             .map(|line| line.to_string())
-            .filter(|line| line.contains("response"))
+            .filter(|line| line.starts_with("• ") && line.contains("response"))
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -1957,6 +1962,64 @@ async fn make_history_test_app() -> Result<(Box<App>, tempfile::TempDir)> {
 }
 
 #[tokio::test]
+async fn first_prompt_counts_once_before_and_after_resume() -> Result<()> {
+    use crate::app::session_lifecycle::ThreadAttachPresentation::Fresh;
+    use crate::app::session_lifecycle::ThreadAttachPresentation::SessionLineage;
+    use core_test_support::responses;
+
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    let model = responses::start_mock_server().await;
+    app_test_support::MockResponsesConfig::new(&model.uri()).write(&app.config.codex_home)?;
+    app.config = app
+        .rebuild_config_for_cwd(app.config.cwd.to_path_buf())
+        .await?;
+    let metrics = Collector::new();
+    app.statusline_metrics = metrics.metrics(&mut app.config);
+    let mut server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let saved = create_history_rollout(&app.config, ThreadHistoryMode::Legacy, "saved prompt")?;
+    let fresh = server.start_thread(&app.config).await?;
+    let resumed = server
+        .resume_thread(
+            &app.local_settings,
+            app.config.clone(),
+            saved,
+            app.resume_model_settings(),
+        )
+        .await?;
+
+    for (thread, presentation, mode) in [
+        (fresh, Fresh, "feature_off"),
+        (resumed, SessionLineage, "builtin"),
+    ] {
+        let thread_id = thread.session.thread_id;
+        app.replace_chat_widget_with_app_server_thread(
+            &mut tui,
+            thread,
+            presentation,
+            /*initial_user_message*/ None,
+        )
+        .await?;
+        drain_app_events(&mut app, &mut tui, &mut server, &mut events).await?;
+        app.chat_widget
+            .set_feature_enabled(Feature::TuiExtensionsStatusLine, mode == "builtin");
+        for text in ["first prompt", "follow-up"] {
+            let sent = responses::mount_sse_once(&model, responses::sse_completed("ok")).await;
+            app.chat_widget.apply_external_edit(text.into());
+            app.chat_widget.handle_key_event(KeyCode::Enter.into());
+            drain_app_events(&mut app, &mut tui, &mut server, &mut events).await?;
+            super::safety_buffering::wait_for_turn_completed(&mut app, &mut server, thread_id)
+                .await;
+            let input = sent.single_request().message_input_texts("user");
+            assert_eq!(input.last().map(String::as_str), Some(text));
+        }
+        assert_eq!(metrics.snapshot(), [format!("first_prompt mode={mode} 1")]);
+    }
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn read_only_history_hides_the_statusline_until_interactive_resume() -> Result<()> {
     let (mut app, _codex_home) = make_history_test_app().await?;
     let thread_id = create_history_rollout(&app.config, ThreadHistoryMode::Legacy, "saved prompt")?;
@@ -2285,6 +2348,7 @@ fn spawn_approved_task_tool_call(
         app_event_tx.send(AppEvent::DynamicToolCallCompleted {
             request_id,
             response,
+            reply: None,
         });
     });
 }
@@ -2374,12 +2438,12 @@ async fn external_transport_registers_dynamic_tools_and_finds_task_mentions() ->
         .await?;
     let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
 
-    crate::task_mentions::spawn_search(
-        restarted_app_server.request_handle(),
+    let handle = restarted_app_server.request_handle();
+    restarted_app_server.task_search.spawn(
+        handle,
         "bbd".to_string(),
         startup.session.thread_id,
         app.config.cwd.to_path_buf(),
-        restarted_app_server.task_search_generation(),
         crate::app_event_sender::AppEventSender::new(sender),
     );
 
@@ -2402,38 +2466,249 @@ async fn external_transport_registers_dynamic_tools_and_finds_task_mentions() ->
 }
 
 #[tokio::test]
-async fn archive_current_thread_reports_success_only_after_archiving() -> Result<()> {
+async fn embedded_archive_completes_after_opening_command_center() -> Result<()> {
     let (mut app, _codex_home) = make_history_test_app().await?;
-    let thread_id = ThreadId::from_string(
-        &create_fake_rollout(
-            &app.config.codex_home,
-            "2026-08-25T01-00-00",
-            "2026-08-25T01:00:00Z",
-            "archive me",
-            Some(&app.config.model_provider_id),
-            /*git_info*/ None,
-        )
-        .expect("create rollout"),
-    )?;
-    let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
-
+    let thread_id = create_history_rollout(&app.config, ThreadHistoryMode::Legacy, "archive me")?;
+    let mut server = crate::start_embedded_app_server_for_picker(&app.config).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    app.active_thread_id = Some(ThreadId::new());
-    assert_matches!(
-        app.archive_current_thread(&mut tui, &mut app_server)
-            .await?,
-        AppRunControl::Continue
-    );
-
+    let (_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     app.active_thread_id = Some(thread_id);
-    assert_matches!(
-        app.archive_current_thread(&mut tui, &mut app_server)
-            .await?,
-        AppRunControl::Continue
-    );
-
+    Box::pin(app.archive_current_thread(&mut tui, &mut server)).await?;
     assert!(app.chat_widget.active_view_is(AGENTS_OVERVIEW_VIEW_ID));
-    app_server.shutdown().await?;
+    assert_matches!(
+        app.saved_openings.next_event(&mut events).await,
+        Some(AppEvent::ArchiveFinished { thread_id: id, result: Ok(()), .. }) if id == thread_id
+    );
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn archive_opens_command_center_before_the_server_replies() -> Result<()> {
+    use crate::app::agents_overview::tests::overview_thread;
+    use codex_app_server_client::AppServerClient;
+    use codex_app_server_client::CloudClient;
+    use codex_app_server_client::CloudOperation;
+    use futures::FutureExt;
+
+    for (mode, succeeded) in [
+        (crate::ThreadParamsMode::Cloud, true),
+        (crate::ThreadParamsMode::Remote, false),
+    ] {
+        let (mut app, old_events, _ops) = make_test_app_with_channels().await;
+        let (client, mut commands, _server_events) = CloudClient::channel(/*capacity*/ 1);
+        let mut server = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
+            AppServerClient::Cloud(client),
+            mode,
+        );
+        app.app_server_target = if mode == crate::ThreadParamsMode::Cloud {
+            AppServerTarget::Cloud
+        } else {
+            AppServerTarget::Remote {
+                endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
+            }
+        };
+        let thread_id = ThreadId::from_string("11111111-1111-4111-8111-111111111111")?;
+        let other_id = ThreadId::new();
+        for (id, name) in [(thread_id, "Archive me"), (other_id, "Keep me")] {
+            app.agents_overview.threads.insert(
+                id,
+                Some(overview_thread(
+                    id,
+                    /*parent_thread_id*/ None,
+                    name,
+                    ThreadStatus::Idle,
+                )),
+            );
+        }
+        let session = test_thread_session(thread_id, app.config.cwd.to_path_buf());
+        app.enqueue_primary_thread_session(session.clone(), Vec::new())
+            .await?;
+        app.chat_widget.handle_thread_session(session);
+        app.ensure_thread_channel(other_id);
+        app.chat_widget.insert_str("Unsent draft");
+        let input = app.chat_widget.capture_thread_input_state().expect("draft");
+        let tool_id = AppServerRequestId::Integer(123);
+        app.dynamic_tool_tasks.insert(
+            tool_id.clone(),
+            (thread_id.to_string(), tokio::spawn(std::future::pending())),
+        );
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+
+        assert_matches!(
+            Box::pin(app.handle_event(&mut tui, &mut server, AppEvent::ArchiveCurrentThread))
+                .now_or_never()
+                .expect("the confirmation must not wait for the archive RPC")?,
+            AppRunControl::Continue
+        );
+        assert!(app.chat_widget.active_view_is(AGENTS_OVERVIEW_VIEW_ID));
+        assert_eq!(app.current_displayed_thread_id(), None);
+        assert_eq!(app.agents_overview.visible_thread_ids, [other_id]);
+        assert_eq!(
+            app.agents_overview.input_states.get(&thread_id),
+            Some(&input)
+        );
+
+        let command = commands
+            .try_recv()
+            .expect("archive queued ahead of refresh");
+        assert!(matches!(
+            command.operation,
+            CloudOperation::Request(request)
+                if matches!(request.as_ref(), ClientRequest::ThreadArchive { params, .. }
+                    if params.thread_id == thread_id.to_string())
+        ));
+        let reply = if succeeded {
+            Ok(serde_json::json!({}))
+        } else {
+            Err(JSONRPCErrorError {
+                code: -32000,
+                message: "Archive rejected".into(),
+                data: None,
+            })
+        };
+        // Reconnect replaces the UI event channel without losing archive results.
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        app.app_event_tx = AppEventSender::new(tx);
+        drop(old_events);
+        command.response.send(Ok(reply)).expect("archive pending");
+        let event = app
+            .saved_openings
+            .next_event(&mut events)
+            .await
+            .expect("archive completion");
+        assert_matches!(&event, AppEvent::ArchiveFinished { .. });
+        Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+
+        if succeeded {
+            assert_eq!(app.agents_overview.visible_thread_ids, [other_id]);
+            assert!(!app.agents_overview.input_states.contains_key(&thread_id));
+            assert!(!app.dynamic_tool_tasks.contains_key(&tool_id));
+        } else {
+            let (_, task) = app
+                .dynamic_tool_tasks
+                .remove(&tool_id)
+                .expect("tool still running");
+            assert!(!task.is_finished());
+            task.abort();
+            let frame = render_bottom_popup(&app.chat_widget, /*width*/ 120);
+            let error = &frame[frame
+                .find("  Unable to complete action")
+                .expect("expected archive error dialog")..];
+            insta::assert_snapshot!(error, @"
+              Unable to complete action
+              Failed to archive thread 11111111-1111-4111-8111-111111111111: failed to archive session
+
+
+            › 1. Return to command center
+
+              enter select · esc back
+            ");
+            assert!(app.agents_overview.visible_thread_ids.contains(&thread_id));
+            assert_eq!(
+                app.agents_overview.input_states.get(&thread_id),
+                Some(&input)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn archive_shows_progress_and_keeps_the_session_when_side_chat_cleanup_fails() -> Result<()> {
+    archive_progress_scenario(/*owned_screen*/ false).await
+}
+
+#[tokio::test]
+async fn fullscreen_archive_progress_handles_terminal_shrink() -> Result<()> {
+    archive_progress_scenario(/*owned_screen*/ true).await
+}
+
+async fn archive_progress_scenario(owned_screen: bool) -> Result<()> {
+    use codex_app_server_client::AppServerClient;
+    use codex_app_server_client::CloudClient;
+    use codex_app_server_client::CloudOperation;
+
+    let (mut app, _events, _ops) = make_test_app_with_channels().await;
+    let (client, mut commands, _server_events) = CloudClient::channel(/*capacity*/ 1);
+    let mut server = AppServerSession::new(
+        crate::backend_id::BackendId::new(),
+        AppServerClient::Cloud(client),
+        crate::ThreadParamsMode::Remote,
+    );
+    app.app_server_target = AppServerTarget::Remote {
+        endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
+    };
+    let thread_id = ThreadId::new();
+    let session = test_thread_session(thread_id, app.config.cwd.to_path_buf());
+    app.enqueue_primary_thread_session(session.clone(), Vec::new())
+        .await?;
+    app.chat_widget.handle_thread_session(session);
+    app.chat_widget.insert_str("Unsent draft");
+    let side_id = ThreadId::new();
+    app.side_threads
+        .insert(side_id, SideThreadState::new(thread_id));
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    if owned_screen {
+        tui.set_owned_screen(/*owned*/ true)?;
+        tui.terminal
+            .resize(Size::new(/*width*/ 80, /*height*/ 37))?;
+    }
+
+    let mut archive =
+        Box::pin(app.handle_event(&mut tui, &mut server, AppEvent::ArchiveCurrentThread));
+    assert!(futures::poll!(archive.as_mut()).is_pending());
+    let interrupt = commands.try_recv().expect("side chat interrupt");
+    assert!(matches!(
+        interrupt.operation,
+        CloudOperation::Request(request)
+            if matches!(request.as_ref(), ClientRequest::TurnInterrupt { params, .. }
+                if params.thread_id == side_id.to_string())
+    ));
+    interrupt
+        .response
+        .send(Ok(Ok(serde_json::json!({}))))
+        .expect("pending interrupt");
+    assert!(futures::poll!(archive.as_mut()).is_pending());
+    let unsubscribe = commands.try_recv().expect("side chat unsubscribe");
+    assert!(matches!(
+        unsubscribe.operation,
+        CloudOperation::Request(request)
+            if matches!(request.as_ref(), ClientRequest::ThreadUnsubscribe { params, .. }
+                if params.thread_id == side_id.to_string())
+    ));
+    unsubscribe
+        .response
+        .send(Ok(Err(JSONRPCErrorError {
+            code: -32000,
+            message: "Unsubscribe rejected".into(),
+            data: None,
+        })))
+        .expect("pending unsubscribe");
+    assert_matches!(archive.await?, AppRunControl::Continue);
+    assert!(commands.try_recv().is_err(), "archive must not be sent");
+
+    // The handler drew this frame before it waited for either cleanup reply.
+    let rendered = buffer_text(tui.terminal.previous_buffer());
+    insta::assert_snapshot!(
+        rendered
+            .lines()
+            .find(|line| line.contains("Archiving"))
+            .expect("archive progress hint")
+            .trim(),
+        @"Archiving…"
+    );
+    assert_eq!(app.current_displayed_thread_id(), Some(thread_id));
+    assert!(app.side_threads.contains_key(&side_id));
+    assert_eq!(
+        app.chat_widget.composer_draft_snapshot().text,
+        "Unsent draft"
+    );
+    assert!(!render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("Archiving"));
+    if owned_screen {
+        tui.set_owned_screen(/*owned*/ false)?;
+    }
     Ok(())
 }
 
@@ -2459,12 +2734,16 @@ async fn archive_current_thread_returns_to_agents() -> Result<()> {
         let (mut app, _codex_home) = make_history_test_app().await?;
         let thread_id =
             create_history_rollout(&app.config, ThreadHistoryMode::Legacy, "archive me")?;
-        let (mut server, requests, proxy) = start_recording_app_server(
-            &app.config,
-            /*blocked_thread_list*/ None,
-            /*failed_thread_name*/ None,
-        )
-        .await?;
+        let (mut server, requests, proxy) = if matches!(&target, AppServerTarget::Remote { .. }) {
+            start_recording_remote_app_server(&app.config).await?
+        } else {
+            start_recording_app_server(
+                &app.config,
+                /*blocked_thread_list*/ None,
+                /*failed_thread_name*/ None,
+            )
+            .await?
+        };
         let resumed = server
             .resume_thread(
                 &app.local_settings,
@@ -2510,15 +2789,24 @@ async fn archive_current_thread_returns_to_agents() -> Result<()> {
                 .await?,
             AppRunControl::Continue
         );
-        loop {
-            let event = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), events.recv())
-                .await?
-                .expect("expected command center refresh");
-            let refreshed = matches!(&event, AppEvent::AgentsOverviewThreadsLoaded { .. });
-            Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
-            if refreshed {
-                break;
+        let mut archived = false;
+        let mut refreshed = false;
+        while !archived || !refreshed {
+            let event = tokio::time::timeout(
+                Duration::from_secs(/*secs*/ 5),
+                app.saved_openings.next_event(&mut events),
+            )
+            .await?
+            .expect("expected archive completion and command center refresh");
+            match &event {
+                AppEvent::ArchiveFinished { result, .. } => {
+                    assert_eq!(*result, Ok(()));
+                    archived = true;
+                }
+                AppEvent::AgentsOverviewThreadsLoaded { .. } => refreshed = true,
+                _ => {}
             }
+            Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
         }
         assert!(
             app.agents_overview
@@ -3207,6 +3495,7 @@ async fn check_dynamic_tool_requests(
     let AppEvent::DynamicToolCallCompleted {
         request_id,
         response,
+        reply,
     } = event
     else {
         panic!("expected a dynamic tool completion event")
@@ -3226,6 +3515,7 @@ async fn check_dynamic_tool_requests(
         AppEvent::DynamicToolCallCompleted {
             request_id,
             response,
+            reply,
         },
     ))
     .await?;
@@ -4556,7 +4846,7 @@ async fn agents_overview_seeds_loaded_threads_when_recent_listing_is_unavailable
         ),
         (
             HistoryCapabilities::ThreadListFails,
-            vec!["recency_at", "recency_at"],
+            vec!["recency_at", "recency_at", "recency_at"],
         ),
     ] {
         let (mut app, _codex_home) = make_history_test_app().await?;
@@ -4598,14 +4888,18 @@ async fn agents_overview_seeds_loaded_threads_when_recent_listing_is_unavailable
                     .collect::<Vec<_>>(),
                 vec![started.session.thread_id]
             );
-            assert!(
+            let initial_list_failed =
+                attempt == 0 && capabilities == HistoryCapabilities::ThreadListFails;
+            assert_eq!(
                 app.agents_overview
                     .initialized
-                    .contains(&app_server.backend_id())
+                    .contains(&app_server.backend_id()),
+                !initial_list_failed
             );
             assert_eq!(
-                app.agents_overview.has_more(app_server.backend_id()),
-                capabilities == HistoryCapabilities::ThreadListFails
+                app.agents_overview
+                    .has_more_for(&app.backend_registry, app_server.backend_id()),
+                initial_list_failed
             );
             if attempt == 0 {
                 app.handle_app_server_event(
@@ -5455,7 +5749,7 @@ async fn change_directory_scenario() -> Result<()> {
         fs::create_dir_all(directory.join(".codex"))?;
         fs::write(directory.join(".codex/config.toml"), "")?;
     }
-    let contents = "developer_instructions = \"destination policy\"\nmodel_reasoning_effort = \"high\"\napproval_policy = \"on-request\"\n[tui]\ntheme = \"dracula\"\n[tui.keymap.global]\nopen_transcript = \"f12\"";
+    let contents = "developer_instructions = \"destination policy\"\nmodel_reasoning_effort = \"high\"\napproval_policy = \"on-request\"\n[tui]\ntheme = \"dracula\"\nmouse_scroll_speed = 1.75\n[tui.keymap.global]\nopen_transcript = \"f12\"";
     fs::write(trusted.join(".codex/config.toml"), contents)?;
     let agents = trusted.join("AGENTS.md");
     fs::write(&agents, "Follow destination project instructions.")?;
@@ -5808,6 +6102,7 @@ async fn change_directory_scenario() -> Result<()> {
     let warning = "Project-local config, hooks, and exec policies are disabled";
     assert!(history().iter().any(|line| line.contains(warning)));
     let untrusted_permissions = app.config.permissions.permission_profile().clone();
+    assert_eq!(app.chat_widget.config_panel_tui.mouse_scroll_speed, None);
     app.change_working_directory(&mut tui, &mut server, trusted.clone().abs())
         .await;
     assert_eq!(app.config.cwd, trusted.abs());
@@ -5821,6 +6116,28 @@ async fn change_directory_scenario() -> Result<()> {
             &untrusted_permissions
         )
     );
+    app.chat_widget.open_config_panel();
+    app.chat_widget.handle_key_event(KeyCode::Char('/').into());
+    app.chat_widget.handle_paste("mouse scroll speed".into());
+    let panel = render_bottom_popup(&app.chat_widget, /*width*/ 120);
+    assert!(
+        panel
+            .lines()
+            .any(|line| { line.contains("Mouse scroll speed") && line.contains("1.75×") })
+    );
+    app.chat_widget.handle_key_event(KeyCode::Enter.into());
+    let handoff = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            AppEvent::OpenConfigEditor(handoff) => Some(handoff),
+            _ => None,
+        })
+        .expect("mouse scroll speed editor handoff");
+    app.chat_widget.open_config_editor(
+        handoff,
+        crate::config_panel::ResumeCurrentAvailability::Available,
+    );
+    let picker = render_bottom_popup(&app.chat_widget, /*width*/ 80);
+    assert!(picker.contains("1.75× (current)"));
     server.shutdown().await?;
     proxy.await??;
     Ok(())
@@ -5960,7 +6277,7 @@ fn fresh_session_keeps_its_name_and_draft_when_cycling_backends() -> Result<()> 
                         toml::from_str(&std::fs::read_to_string(&preference_path)?)?;
                     Ok(saved["tui"]["default_hosts"].clone().try_into()?)
                 };
-                assert!(app.can_cycle_conversation_backend());
+                assert!(app.backend_draft().is_some());
                 app.start_new_session_on_other_backend(
                     &mut tui,
                     &mut backends,
@@ -6755,5 +7072,62 @@ async fn provider_error_preserves_partial_history_notice() -> Result<()> {
         server.shutdown().await?;
         proxy.await??;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn snapshot_thread_switch_discards_queued_previous_history() -> Result<()> {
+    let (mut app, mut events, _op_rx) = make_test_app_with_channels().await;
+    app.transcript_cells = vec![plain_line_cell("Previous thread transcript")];
+    app.chat_widget
+        .add_plain_history_lines(vec![Line::from("Previous queued history")]);
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+    let next_thread_id = ThreadId::new();
+    app.render_thread_snapshot(
+        &mut tui,
+        &mut app_server,
+        next_thread_id,
+        ThreadEventSnapshot {
+            delegated_turns: Vec::new(),
+            session: Some(test_thread_session(
+                next_thread_id,
+                test_path_buf("/tmp/next"),
+            )),
+            turns: vec![test_turn(
+                "next-turn",
+                TurnStatus::Completed,
+                vec![ThreadItemPayload::UserMessage {
+                    id: "next-user".to_string(),
+                    client_id: None,
+                    content: vec![AppServerUserInput::Text {
+                        text: "Next thread prompt".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                }],
+            )],
+            events: Vec::new(),
+            active_reasoning_item: None,
+            input_state: None,
+        },
+        /*resume_restored_queue*/ false,
+    )
+    .await?;
+    assert_eq!(app.pending_thread_switch_resets, 1);
+    while let Ok(event) = events.try_recv() {
+        app.handle_event(&mut tui, &mut app_server, event).await?;
+    }
+    assert_eq!(app.pending_thread_switch_resets, 0);
+    let rendered = app
+        .render_transcript_lines_for_reflow(/*width*/ 80)
+        .lines
+        .iter()
+        .map(rendered_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!rendered.contains("Previous thread transcript"));
+    assert!(!rendered.contains("Previous queued history"));
+    assert!(rendered.contains("Next thread prompt"));
+    app_server.shutdown().await?;
     Ok(())
 }

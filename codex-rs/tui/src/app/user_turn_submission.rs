@@ -30,6 +30,19 @@ pub(super) async fn try_submit_user_turn(
         .then(|| app.audits.reports.for_turn(thread_id))
         .flatten();
     let carries_audit_context = audit_context.is_some();
+    let is_user_prompt = *turn_trigger == "user"
+        && matches!(
+            cloud_submission,
+            CloudSubmissionIntent::StartOrSteer | CloudSubmissionIntent::StartIfIdle
+        );
+    if is_user_prompt
+        && app.primary_thread_id == Some(thread_id)
+        && app.active_thread_id == Some(thread_id)
+        && app.chat_widget.thread_id() == Some(thread_id)
+    {
+        app.statusline_metrics
+            .record_first_prompt(&app.config, &app.chat_widget);
+    }
     let intent = if *turn_trigger == "user" {
         match (*cloud_submission, app_server.thread_params_mode()) {
             (

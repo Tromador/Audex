@@ -158,6 +158,7 @@ type AgentControlFactory =
 fn capture_test_op(op: &Op) -> Option<Op> {
     match op {
         Op::Interrupt => Some(Op::Interrupt),
+        Op::InterruptAgent => Some(Op::InterruptAgent),
         Op::InterAgentCommunication {
             communication,
             start_options,
@@ -205,6 +206,16 @@ pub enum ThreadRegistration {
     Current,
     Absent,
     Replaced,
+}
+
+/// A manager-started runtime's receipt stays committed across unload. A runtime
+/// started without a manager has no receipt in its thread extension store.
+pub struct ThreadRegistrationReceipt(Arc<AtomicBool>);
+
+impl ThreadRegistrationReceipt {
+    pub fn was_registered(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 // TODO(ccunningham): Add an explicit non-interrupting live-turn snapshot once
@@ -1017,6 +1028,10 @@ impl ThreadManager {
 
     pub fn image_store(&self) -> Arc<dyn AttachmentStore> {
         Arc::clone(&self.state.image_store)
+    }
+
+    pub fn thread_store(&self) -> Arc<dyn ThreadStore> {
+        Arc::clone(&self.state.thread_store)
     }
 
     /// Starts the local rollout migration path after a runtime feature enablement.
@@ -2596,11 +2611,13 @@ impl ThreadManagerState {
         let inherited_environments = captured_environments.or(inherited_environments);
         let session_source = session_source.unwrap_or_else(|| self.session_source.clone());
         if thread_extension_init.get::<InheritedSessionId>().is_some()
-            && (!matches!(&initial_history, InitialHistory::New)
-                || session_source.is_non_root_agent())
+            && (!matches!(
+                &initial_history,
+                InitialHistory::New | InitialHistory::Forked(_)
+            ) || session_source.is_non_root_agent())
         {
             return Err(CodexErr::InvalidRequest(
-                "an inherited agent session ID requires a fresh thread started directly by the host"
+                "an inherited agent session ID requires a new or forked thread started directly by the host"
                     .to_string(),
             ));
         }
@@ -2903,6 +2920,8 @@ impl ThreadManagerState {
                 &session_source,
             ) => manager,
         };
+        let registered = Arc::new(AtomicBool::new(false));
+        thread_extension_init.insert(ThreadRegistrationReceipt(Arc::clone(&registered)));
         let spawn_result = Session::spawn(SessionSpawnArgs {
             attached_thread,
             startup,
@@ -2997,7 +3016,7 @@ impl ThreadManagerState {
             }
         }
         let finalize_result = self
-            .finalize_thread_spawn(session, io, tracked_session_source)
+            .finalize_thread_spawn(session, io, tracked_session_source, &registered)
             .await;
         let (new_thread, tier_acceptance) = match finalize_result {
             Ok(registered) => registered,
@@ -3040,6 +3059,7 @@ impl ThreadManagerState {
         session: Arc<Session>,
         io: SessionIo,
         session_source: SessionSource,
+        registered: &AtomicBool,
     ) -> CodexResult<(NewThread, Option<ServiceTierAcceptance>)> {
         let thread_id = session.thread_id();
         let event = io.next_event().await?;
@@ -3080,6 +3100,8 @@ impl ThreadManagerState {
                     session_configured.rollout_path.clone(),
                     session_source,
                 ));
+                // All registration checks passed; publish the receipt with this insertion.
+                registered.store(true, Ordering::Release);
                 e.insert(thread.clone());
                 let tier_acceptance = pending_service_tier.and_then(|(mut state, update)| {
                     state.service_tier_acceptance =
@@ -3315,14 +3337,18 @@ fn append_interrupted_boundary(
     match history {
         InitialHistory::New | InitialHistory::Cleared => {
             let mut history = Vec::new();
-            if let Some(marker) = interrupted_turn_history_marker(interrupted_marker) {
+            if let Some(marker) =
+                interrupted_turn_history_marker(interrupted_marker, /*cause*/ None)
+            {
                 history.push(RolloutItem::ResponseItem(marker.into()));
             }
             history.push(aborted_event);
             InitialHistory::Forked(history)
         }
         InitialHistory::Forked(mut history) => {
-            if let Some(marker) = interrupted_turn_history_marker(interrupted_marker) {
+            if let Some(marker) =
+                interrupted_turn_history_marker(interrupted_marker, /*cause*/ None)
+            {
                 history.push(RolloutItem::ResponseItem(marker.into()));
             }
             history.push(aborted_event);
@@ -3330,7 +3356,9 @@ fn append_interrupted_boundary(
         }
         InitialHistory::Resumed(resumed) => {
             let mut history = Arc::unwrap_or_clone(resumed.history);
-            if let Some(marker) = interrupted_turn_history_marker(interrupted_marker) {
+            if let Some(marker) =
+                interrupted_turn_history_marker(interrupted_marker, /*cause*/ None)
+            {
                 history.push(RolloutItem::ResponseItem(marker.into()));
             }
             history.push(aborted_event);

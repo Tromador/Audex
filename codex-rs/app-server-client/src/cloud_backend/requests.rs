@@ -33,6 +33,27 @@ pub(super) enum Response {
 }
 
 impl Requests {
+    pub(super) fn thread_name_saved(
+        &mut self,
+        params: protocol::ThreadSetNameParams,
+        output: &mpsc::UnboundedSender<crate::AppServerEvent>,
+    ) {
+        if let Some(loaded) = &mut self.loaded
+            && loaded.thread.id == params.thread_id
+        {
+            loaded.thread.name = Some(params.name.clone());
+        }
+        send_notification(
+            output,
+            protocol::ServerNotification::ThreadNameUpdated(
+                protocol::ThreadNameUpdatedNotification {
+                    thread_id: params.thread_id,
+                    thread_name: Some(params.name),
+                },
+            ),
+        );
+    }
+
     pub(super) fn read_thread(
         &self,
         params: &protocol::ThreadReadParams,
@@ -57,7 +78,7 @@ impl Requests {
         &mut self,
         request: protocol::ClientRequest,
         mode: cloud::SubmissionMode,
-        project: Option<cloud::ProjectEnvironment>,
+        environment: Option<cloud::EnvironmentSelection>,
         output: &mpsc::UnboundedSender<crate::AppServerEvent>,
     ) -> Result<Response> {
         use protocol::ClientRequest as Request;
@@ -72,23 +93,12 @@ impl Requests {
                 }
                 serde_json::to_value(page)?
             }
-            Request::ThreadSetName { params, .. } => {
-                let name = params.name.trim();
-                self.client.set_thread_name(&params.thread_id, name).await?;
-                if let Some(loaded) = &mut self.loaded
-                    && loaded.thread.id == params.thread_id
-                {
-                    loaded.thread.name = Some(name.to_owned());
-                }
-                send_notification(
-                    output,
-                    protocol::ServerNotification::ThreadNameUpdated(
-                        protocol::ThreadNameUpdatedNotification {
-                            thread_id: params.thread_id,
-                            thread_name: Some(name.to_owned()),
-                        },
-                    ),
-                );
+            Request::ThreadSetName { mut params, .. } => {
+                params.name = params.name.trim().to_owned();
+                self.client
+                    .set_thread_name(&params.thread_id, &params.name)
+                    .await?;
+                self.thread_name_saved(params, output);
                 serde_json::to_value(protocol::ThreadSetNameResponse {})?
             }
             Request::ThreadArchive { params, .. } => {
@@ -120,7 +130,10 @@ impl Requests {
                         "Cloud conversations start with server defaults. Custom settings are not supported yet."
                     );
                 }
-                let settings = self.client.prewarm_thread(model, provider, project).await?;
+                let settings = self
+                    .client
+                    .prewarm_thread(model, provider, environment)
+                    .await?;
                 return attach_response(settings);
             }
             Request::ThreadResume { params, .. } => {

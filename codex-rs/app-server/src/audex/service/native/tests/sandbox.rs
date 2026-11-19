@@ -7,7 +7,8 @@ async fn effective_profile_confines_actual_commands_without_inference() -> Resul
     use codex_protocol::config_types::WindowsSandboxLevel;
     use codex_protocol::shell_environment::create_env_from_vars;
     use codex_sandboxing::{
-        SandboxCommand, SandboxManager, SandboxSelection, SandboxTransformRequest,
+        SandboxCommand, SandboxExecutables, SandboxManager, SandboxNetwork, SandboxSelection,
+        SandboxTransformRequest, SandboxType, SandboxablePreference,
     };
     use codex_utils_path_uri::PathUri;
     use std::collections::HashMap;
@@ -96,13 +97,13 @@ async fn effective_profile_confines_actual_commands_without_inference() -> Resul
             },
             permissions: &profile,
             workspace_roots: None,
-            runtime_readable_paths: &[],
-            selection: SandboxSelection::RequirePlatform,
-            enforce_managed_network: false,
-            environment_id: None,
-            network: None,
+            selection: SandboxSelection::Platform {
+                preference: SandboxablePreference::Require,
+                windows_sandbox: SandboxType::None,
+            },
+            network: SandboxNetwork::default(),
             sandbox_policy_cwd: &cwd,
-            sandbox_exe: Some(sandbox_exe),
+            executables: SandboxExecutables::Launcher(Some(sandbox_exe)),
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
         })?;
