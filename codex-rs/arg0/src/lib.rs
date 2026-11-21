@@ -177,7 +177,7 @@ fn prepare_path_env_var_with_aliases(
 /// `codex-linux-sandbox` we *directly* execute
 /// [`codex_linux_sandbox::run_main`] (which never returns). Otherwise we:
 ///
-/// 1.  Load `.env` values from `~/.codex/.env` before creating any threads.
+/// 1.  Load `.env` values from `~/.audex/.env` before creating any threads.
 /// 2.  Spawn a main runtime thread with a controlled stack size.
 /// 3.  Construct a Tokio multi-thread runtime.
 /// 4.  Capture the current executable path and derive the
@@ -269,10 +269,10 @@ fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 
 const ILLEGAL_ENV_VAR_PREFIX: &str = "CODEX_";
 
-/// Load env vars from ~/.codex/.env.
+/// Load env vars from ~/.audex/.env.
 ///
 /// Security: Do not allow `.env` files to create or modify any variables
-/// with names starting with `CODEX_`.
+/// with names starting with `CODEX_` or `AUDEX_`.
 fn load_dotenv() {
     if let Ok(codex_home) = find_codex_home()
         && let dotenv_path = codex_home.join(".env")
@@ -283,7 +283,7 @@ fn load_dotenv() {
     }
 }
 
-/// Helper to set vars from a dotenvy iterator while filtering out `CODEX_` keys.
+/// Helper to set vars from a dotenvy iterator while filtering out `CODEX_` and `AUDEX_` keys.
 fn set_filtered<I>(iter: I)
 where
     I: IntoIterator<Item = Result<(String, String), dotenvy::Error>>,
@@ -295,7 +295,8 @@ where
             Err(dotenvy::Error::Io(err)) if err.kind() != std::io::ErrorKind::InvalidData => break,
             Err(_) => continue,
         };
-        if !key.to_ascii_uppercase().starts_with(ILLEGAL_ENV_VAR_PREFIX) {
+        let upper = key.to_ascii_uppercase();
+        if !upper.starts_with(ILLEGAL_ENV_VAR_PREFIX) && !upper.starts_with("AUDEX_") {
             // It is safe to call set_var() because our process is
             // single-threaded at this point in its execution.
             unsafe { std::env::set_var(&key, &value) };
@@ -549,6 +550,68 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn dotenv_filters_application_namespaces() -> anyhow::Result<()> {
+        const CHILD_FILE: &str = "ARG0_DOTENV_FILTER_TEST_FILE";
+        const ALLOWED_KEY: &str = "ARG0_DOTENV_ALLOWED_TEST_VAR";
+        const PROTECTED_KEYS: &[&str] = &[
+            "AUDEX_HOME",
+            "AUDEX_SQLITE_HOME",
+            "AUDEX_TUI_SESSION_LOG_PATH",
+            "AUDEX_TUI_RECORD_SESSION",
+            "AUDEX_FUTURE_OPTION",
+            "aUdEx_test_option",
+            "CODEX_HOME",
+            "CODEX_SQLITE_HOME",
+            "cOdEx_test_option",
+        ];
+        if let Some(path) = std::env::var_os(CHILD_FILE) {
+            let before = PROTECTED_KEYS
+                .iter()
+                .map(std::env::var_os)
+                .collect::<Vec<_>>();
+            super::set_filtered(dotenvy::from_path_iter(path)?);
+            for (key, expected) in PROTECTED_KEYS.iter().zip(before) {
+                assert_eq!(std::env::var_os(key), expected, "protected key: {key}");
+            }
+            assert_eq!(std::env::var(ALLOWED_KEY).as_deref(), Ok("allowed"));
+            return Ok(());
+        }
+
+        // Run environment mutation in a separate process with only this test active.
+        let root = TempDir::new()?;
+        let path = root.path().join(".env");
+        let mut contents = PROTECTED_KEYS
+            .iter()
+            .map(|key| format!("{key}=injected\n"))
+            .collect::<String>();
+        contents.push_str(&format!("{ALLOWED_KEY}=allowed\n"));
+        fs::write(&path, contents)?;
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "tests::dotenv_filters_application_namespaces",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(CHILD_FILE, path)
+            .env("AUDEX_SQLITE_HOME", "inherited-state-directory")
+            .env_remove("AUDEX_TUI_SESSION_LOG_PATH")
+            .env_remove("AUDEX_TUI_RECORD_SESSION")
+            .env_remove("AUDEX_FUTURE_OPTION")
+            .env_remove("aUdEx_test_option")
+            .env_remove("cOdEx_test_option")
+            .env_remove(ALLOWED_KEY)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
 
     struct PackagePathTestFixture {
         _temp_dir: TempDir,

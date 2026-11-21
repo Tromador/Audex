@@ -122,7 +122,7 @@ async fn environment_discovery_refreshes_after_cloud_startup() {
         ])
         .current_dir(home.path())
         .env(SERVER, server.uri())
-        .env("CODEX_HOME", home.path())
+        .env("AUDEX_HOME", home.path())
         .env(
             "CODEX_REFRESH_TOKEN_URL_OVERRIDE",
             format!("{}/token", server.uri()),
@@ -217,7 +217,7 @@ async fn cloud_list_preserves_existing_agent_identity_during_runtime_rollout() -
                 .args(["--exact", TEST, "--nocapture"])
                 .current_dir(home.path())
                 .env(MODE, mode)
-                .env("CODEX_HOME", home.path())
+                .env("AUDEX_HOME", home.path())
                 .env(
                     "CODEX_CLOUD_TASKS_BASE_URL",
                     "https://chatgpt.com/backend-api",

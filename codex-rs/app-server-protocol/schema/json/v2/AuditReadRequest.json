@@ -8,7 +8,8 @@
         "findings",
         "finding",
         "output",
-        "diagnostics"
+        "diagnostics",
+        "report"
       ],
       "type": "string"
     }

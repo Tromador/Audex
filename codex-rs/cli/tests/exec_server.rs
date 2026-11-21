@@ -63,7 +63,7 @@ use wiremock::matchers::path;
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
     let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
-    cmd.env("CODEX_HOME", codex_home);
+    cmd.env("AUDEX_HOME", codex_home);
     Ok(cmd)
 }
 
@@ -112,7 +112,7 @@ async fn local_exec_server_projects_global_mxc_preference() -> Result<()> {
     let cwd = url::Url::from_directory_path(home.path())
         .map_err(|()| anyhow::anyhow!("could not convert home to file URL"))?;
     let mut child = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
-        .env("CODEX_HOME", home.path())
+        .env("AUDEX_HOME", home.path())
         .args([
             "-c",
             "features.prefer_mxc=true",
@@ -371,7 +371,7 @@ async fn assert_pat_registry_reload(change: PatCredentialChange) -> Result<()> {
     let mut command = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
     command
         .current_dir(home.path())
-        .env("CODEX_HOME", home.path())
+        .env("AUDEX_HOME", home.path())
         .env_remove("CODEX_ACCESS_TOKEN")
         .env("CODEX_AUTHAPI_BASE_URL", auth_server.uri())
         .env_remove("CODEX_API_KEY")
@@ -520,7 +520,7 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
     let mut command = tokio::process::Command::new(executable);
     command
         .current_dir(codex_home.path())
-        .env("CODEX_HOME", codex_home.path())
+        .env("AUDEX_HOME", codex_home.path())
         .env("CODEX_API_KEY", "test-api-key")
         .env_remove("CODEX_ACCESS_TOKEN")
         .env(
@@ -725,7 +725,7 @@ async fn forward_rejects_stdin_credentials_on_opposite_sides_of_subcommand() -> 
     let rotating = "--executor-credential-stdin";
     for (before, after) in [(bearer, rotating), (rotating, bearer)] {
         let mut child = tokio::process::Command::new(&codex)
-            .env("CODEX_HOME", home.path())
+            .env("AUDEX_HOME", home.path())
             .arg("exec-server")
             .args(remote)
             .args([before, "forward", "--connect", "ws://127.0.0.1:8765"])
@@ -818,7 +818,7 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{}/v1/metrics", protocol = "jso
     )?;
     let mut command = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
     command
-        .env("CODEX_HOME", home.path())
+        .env("AUDEX_HOME", home.path())
         .env_remove(codex_exec_server::CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE_ENV_VAR)
         .env("CODEX_API_KEY", "general-api-key")
         .env("OPENAI_API_KEY", "general-openai-key")
@@ -993,7 +993,7 @@ async fn remote_exec_server_scoped_credentials_never_fall_back_for_another_envir
     )?;
     let mut command = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
     let mut child = command
-        .env("CODEX_HOME", home.path())
+        .env("AUDEX_HOME", home.path())
         .env("CODEX_API_KEY", "general-api-key")
         .env("CODEX_ACCESS_TOKEN", "general-agent-identity")
         .env("NO_PROXY", "127.0.0.1,localhost")
@@ -1122,7 +1122,7 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{base_url}/v1/metrics", protoco
     let subprocess = async move {
         let mut command = tokio::process::Command::new(codex_bin);
         command
-            .env("CODEX_HOME", codex_home)
+            .env("AUDEX_HOME", codex_home)
             .env("NO_PROXY", "127.0.0.1,localhost")
             .env("no_proxy", "127.0.0.1,localhost")
             .args(["exec-server", "--listen", "stdio"])
@@ -1252,7 +1252,7 @@ async fn send_json_line(
 fn local_exec_server_exits_successfully_on_sigterm() -> Result<()> {
     let codex_home = TempDir::new()?;
     let mut child = std::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
-        .env("CODEX_HOME", codex_home.path())
+        .env("AUDEX_HOME", codex_home.path())
         .args(["exec-server", "--listen", "ws://127.0.0.1:0"])
         .stdout(Stdio::piped())
         .spawn()?;

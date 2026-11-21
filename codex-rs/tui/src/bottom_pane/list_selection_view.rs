@@ -125,8 +125,10 @@ pub(crate) enum SelectionRowDisplay {
 pub(crate) type SelectionAction = Box<dyn Fn(&AppEventSender) + Send + Sync>;
 pub(crate) type SelectionKeyAction = Box<dyn Fn(&AppEventSender, KeyBinding) + Send + Sync>;
 
-/// A second way to accept the highlighted row, sharing its dismissal behavior.
+/// A second action on the highlighted row, optionally opening a child view.
 pub(crate) struct SelectionSecondaryAction {
+    /// Leave this picker beneath the view opened by the secondary action.
+    pub keep_open: bool,
     pub key: KeyBinding,
     pub action: SelectionAction,
     pub footer_hint: Line<'static>,
@@ -1006,6 +1008,10 @@ impl ListSelectionView {
                         return;
                     };
                     (action.action)(&self.app_event_tx);
+                    if action.keep_open {
+                        self.last_selected_actual_idx = selected_actual_idx;
+                        return;
+                    }
                 }
             }
             if item.dismiss_on_select {
@@ -2017,6 +2023,7 @@ mod tests {
                             tx.send(AppEvent::UpdateModel("primary".into()))
                         })],
                         secondary_action: Some(SelectionSecondaryAction {
+                            keep_open: false,
                             key: crate::key_hint::plain(KeyCode::Char('s')),
                             action: Box::new(|tx| {
                                 tx.send(AppEvent::UpdateModel("secondary".into()))

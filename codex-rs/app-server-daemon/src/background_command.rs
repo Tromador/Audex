@@ -13,7 +13,7 @@ pub(crate) fn set_working_directory(command: &mut Command, state_dir: &Path) -> 
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
         Err(err) => return Err(err.into()),
     };
-    if let Ok(value) = std::env::var("CODEX_HOME")
+    if let Ok(value) = std::env::var("AUDEX_HOME")
         && !value.is_empty()
     {
         let home = codex_utils_home_dir::find_codex_home()?;
@@ -28,12 +28,12 @@ pub(crate) fn set_working_directory(command: &mut Command, state_dir: &Path) -> 
             // The home resolver ignores non-Unicode env values; keep the valid original alias.
             absolute.as_path()
         };
-        command.env("CODEX_HOME", preserved);
+        command.env("AUDEX_HOME", preserved);
     }
     // Preserve process-scoped paths before changing cwd; CA names match CUSTOM_CA_ENV_KEYS.
     for name in [
         #[cfg(windows)]
-        "CODEX_SQLITE_HOME",
+        "AUDEX_SQLITE_HOME",
         "CODEX_CA_CERTIFICATE",
         "SSL_CERT_FILE",
         "REQUESTS_CA_BUNDLE",
@@ -55,7 +55,7 @@ pub(crate) fn set_working_directory(command: &mut Command, state_dir: &Path) -> 
         };
         if matches!(
             name,
-            "CODEX_SQLITE_HOME" | "npm_config_cafile" | "NPM_CONFIG_CAFILE"
+            "AUDEX_SQLITE_HOME" | "npm_config_cafile" | "NPM_CONFIG_CAFILE"
         ) {
             value = value.to_str().unwrap_or_default().trim().into();
         }
@@ -67,7 +67,7 @@ pub(crate) fn set_working_directory(command: &mut Command, state_dir: &Path) -> 
         } else {
             matches!(
                 name,
-                "CODEX_SQLITE_HOME" | "AWS_CONFIG_FILE" | "AWS_SHARED_CREDENTIALS_FILE"
+                "AUDEX_SQLITE_HOME" | "AWS_CONFIG_FILE" | "AWS_SHARED_CREDENTIALS_FILE"
             ) && std::path::Path::new(&value).starts_with("~")
         };
         if value.is_empty() || expands_home {

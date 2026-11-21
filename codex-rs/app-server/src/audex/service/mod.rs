@@ -200,6 +200,39 @@ impl AuditService {
         self.runs_root.join(id.to_string())
     }
 
+    /// Delete retained records only, after the operator confirms a historical run.
+    pub fn delete(&mut self, id: RunId) -> Result<()> {
+        if let Some(run) = self.runs.get(&id) {
+            ensure!(
+                run.reviewers
+                    .values()
+                    .all(|reviewer| reviewer.task.as_ref().is_none_or(JoinHandle::is_finished)),
+                "audit is still running; wait for it to finish before deleting"
+            );
+        }
+        let directory = self.run_directory(id);
+        ensure!(
+            directory.symlink_metadata()?.file_type().is_dir(),
+            "audit records must be a directory"
+        );
+        ensure!(
+            read::record(&directory)?.id == id,
+            "run directory and record disagree"
+        );
+        ensure!(
+            read::view(&directory)?
+                .reviewers
+                .iter()
+                .all(|s| !matches!(s.state.as_str(), "queued" | "running")),
+            "audit is still running"
+        );
+        // Never follow target paths recorded inside run.json. remove_dir_all also
+        // removes symlinks within this directory without traversing their targets.
+        fs::remove_dir_all(directory)?;
+        self.runs.remove(&id);
+        Ok(())
+    }
+
     pub fn start(&mut self, request: StartRequest) -> Result<RunId> {
         ensure!(
             !request.reviewers.is_empty(),

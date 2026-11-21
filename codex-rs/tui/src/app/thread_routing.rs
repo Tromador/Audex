@@ -979,9 +979,15 @@ impl App {
                 message,
                 model,
                 audit,
+                no_audit,
             } => {
+                let audit = crate::claude::audit_context(
+                    audit.as_deref(),
+                    *no_audit,
+                    self.audits.reports.active_id(thread_id),
+                );
                 app_server
-                    .thread_claude(thread_id, message.clone(), model.clone(), audit.clone())
+                    .thread_claude(thread_id, message.clone(), model.clone(), audit)
                     .await?;
                 Ok(true)
             }
@@ -1724,6 +1730,9 @@ impl App {
                 ThreadBufferedEvent::AuditControlOutcome(result) => {
                     self.enqueue_audit_control_outcome(thread_id, result).await;
                 }
+                ThreadBufferedEvent::AuditReport(report) => {
+                    self.enqueue_audit_report(thread_id, report).await;
+                }
             }
         }
         self.chat_widget
@@ -2197,6 +2206,7 @@ impl App {
             ThreadBufferedEvent::AuditControlOutcome(result) => {
                 self.show_audit_control_outcome(result)
             }
+            ThreadBufferedEvent::AuditReport(report) => self.chat_widget.show_audit_report(report),
         }
         if needs_refresh {
             self.refresh_status_line();
@@ -2230,6 +2240,7 @@ impl App {
             ThreadBufferedEvent::AuditControlOutcome(result) => {
                 self.show_audit_control_outcome(result)
             }
+            ThreadBufferedEvent::AuditReport(report) => self.chat_widget.show_audit_report(report),
         }
     }
 

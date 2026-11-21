@@ -26,7 +26,7 @@ impl LifecycleLock {
         })?;
         Self::acquire_at(
             &directory
-                .join("com.openai.codex")
+                .join("com.openai.audex")
                 .join("user-verification")
                 .join(format!("{}.lock", namespace.label)),
             Duration::from_secs(/*secs*/ 60),

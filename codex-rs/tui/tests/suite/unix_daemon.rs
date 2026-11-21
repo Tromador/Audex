@@ -12,7 +12,7 @@ pub(super) async fn start(home: &Path, extra_args: &[&str]) -> Result<(Child, St
     let mut daemon = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
         .args(["app-server", "--listen", "unix://"])
         .args(extra_args)
-        .env("CODEX_HOME", home)
+        .env("AUDEX_HOME", home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())

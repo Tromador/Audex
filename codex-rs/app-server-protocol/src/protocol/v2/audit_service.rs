@@ -31,6 +31,10 @@ pub struct AuditStartRequest {
     pub reviewers: Vec<AuditReviewer>,
     /// Operator-named UTF-8 guidance file, read once at start.
     pub guidance: Option<String>,
+    /// Literal operator guidance, mutually exclusive with the guidance file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub guidance_text: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -42,6 +46,7 @@ pub enum AuditReadView {
     Finding,
     Output,
     Diagnostics,
+    Report,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -85,6 +90,20 @@ pub struct AuditCancelRequest {
 pub struct AuditRetryRequest {
     pub run_id: String,
     pub reviewer: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct AuditDeleteRequest {
+    pub run_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AuditDeleteResponse {
+    pub run_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

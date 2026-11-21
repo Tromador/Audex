@@ -79,6 +79,7 @@ impl ThreadEventStore {
                     .note_evicted_server_request(request.as_ref()),
                 ThreadBufferedEvent::HistoryEntryResponse(_)
                 | ThreadBufferedEvent::AuditControlOutcome(_)
+                | ThreadBufferedEvent::AuditReport(_)
                 | ThreadBufferedEvent::FeedbackSubmission(_) => {}
             }
         }

@@ -427,6 +427,21 @@ class AuditCancelRequest(BaseModel):
     run_id: Annotated[str, Field(alias="runId")]
 
 
+class AuditDeleteRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    run_id: Annotated[str, Field(alias="runId")]
+
+
+class AuditDeleteResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    run_id: Annotated[str, Field(alias="runId")]
+
+
 class PathsAuditInput(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -465,6 +480,7 @@ class AuditReadView(Enum):
     finding = "finding"
     output = "output"
     diagnostics = "diagnostics"
+    report = "report"
 
 
 class AuditRetryRequest(BaseModel):
@@ -533,6 +549,13 @@ class AuditStartRequest(BaseModel):
     cwd: Annotated[str, Field(description="Base directory for the operator's relative paths.")]
     guidance: Annotated[
         str | None, Field(description="Operator-named UTF-8 guidance file, read once at start.")
+    ] = None
+    guidance_text: Annotated[
+        str | None,
+        Field(
+            alias="guidanceText",
+            description="Literal operator guidance, mutually exclusive with the guidance file.",
+        ),
     ] = None
     input: AuditInput
     reviewers: list[AuditReviewer]
@@ -7882,6 +7905,15 @@ class CancelLoginAccountResponse(BaseModel):
     status: CancelLoginAccountStatus
 
 
+class AuditDeleteRequest1(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["audit/delete"], Field(title="Audit/deleteRequestMethod")]
+    params: AuditDeleteRequest
+
+
 class AuditStartRequest1(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -14317,7 +14349,8 @@ class ExternalAgentConfigImportRecordHistoryRequest(BaseModel):
 
 class ClientRequest(
     RootModel[
-        AuditStartRequest1
+        AuditDeleteRequest1
+        | AuditStartRequest1
         | AuditListRequest1
         | AuditReadRequest1
         | AuditCancelRequest1
@@ -14436,7 +14469,8 @@ class ClientRequest(
     ]
 ):
     root: Annotated[
-        AuditStartRequest1
+        AuditDeleteRequest1
+        | AuditStartRequest1
         | AuditListRequest1
         | AuditReadRequest1
         | AuditCancelRequest1

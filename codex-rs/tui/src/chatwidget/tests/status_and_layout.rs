@@ -56,6 +56,27 @@ fn take_workspace_headline_request_id(
     }
 }
 
+#[tokio::test]
+async fn reconnect_status_uses_disconnect_time_instead_of_turn_time() {
+    let reconnect_status = regex_lite::Regex::new(r"Reconnecting to server… \(\d+s\)").unwrap();
+    for running in [false, true] {
+        let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+        chat.thread_id = Some(ThreadId::new());
+        if running {
+            handle_turn_started(&mut chat, "turn-1");
+        }
+        let old_elapsed = Duration::from_secs(/*secs*/ 23 * 60);
+        chat.bottom_pane.reset_status_timer(old_elapsed);
+
+        chat.pause_for_disconnect();
+        let rendered = render_bottom_popup(&chat, /*width*/ 80);
+        assert!(reconnect_status.is_match(&rendered), "{rendered}");
+        if running {
+            assert!(chat.bottom_pane.status_elapsed().unwrap() >= old_elapsed);
+        }
+    }
+}
+
 /// Receiving a token usage update without usage clears the context indicator.
 #[tokio::test]
 async fn token_count_none_resets_context_indicator() {

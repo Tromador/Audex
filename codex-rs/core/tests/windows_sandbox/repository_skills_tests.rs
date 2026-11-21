@@ -17,7 +17,7 @@ use std::sync::Arc;
 async fn windows_elevated_repository_skills_enforce_cached_read_denials() -> anyhow::Result<()> {
     let _account_guard = WindowsSandboxAccountTestGuard::acquire()?;
     let codex_home = codex_home_for_windows_sandbox_test("windows-repository-skills-codex-home")?;
-    let _codex_home_guard = EnvVarGuard::set("CODEX_HOME", codex_home.path().as_os_str());
+    let _codex_home_guard = EnvVarGuard::set("AUDEX_HOME", codex_home.path().as_os_str());
     stage_windows_sandbox_helpers()?;
 
     const PRIVATE_BODY: &str = "WINDOWS_DENIED_SKILL_INSTRUCTIONS";

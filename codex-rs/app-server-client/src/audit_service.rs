@@ -13,6 +13,16 @@ impl AuditClient {
     pub fn new(handle: AppServerRequestHandle) -> Self {
         Self { handle }
     }
+    pub async fn delete(&self, run_id: String) -> Result<(), TypedRequestError> {
+        let _: codex_app_server_protocol::AuditDeleteResponse = self
+            .handle
+            .request_typed(ClientRequest::AuditDelete {
+                request_id: id(),
+                params: codex_app_server_protocol::AuditDeleteRequest { run_id },
+            })
+            .await?;
+        Ok(())
+    }
     pub async fn start(&self, params: AuditStartRequest) -> Result<AuditRun, TypedRequestError> {
         let response: AuditRunResponse = self
             .handle
@@ -104,7 +114,10 @@ pub fn start_disclosure(params: &AuditStartRequest) -> String {
         ));
     }
     if let Some(guidance) = &params.guidance {
-        text.push_str(&format!("\nGuidance: {guidance}\n"));
+        text.push_str(&format!("\nGuidance file: {guidance}\n"));
+    }
+    if let Some(text_guidance) = &params.guidance_text {
+        text.push_str(&format!("\nInline guidance:\n{text_guidance}\n"));
     }
     text.push_str("\nRead-only audit. Completed results enter this conversation; two or more completed reviewers trigger one Codex comparison using the conversation's current model.");
     text
@@ -115,6 +128,29 @@ mod tests {
     use super::*;
     use crate::{AppServerClient, CloudClient, CloudOperation};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn delete_uses_only_the_selected_run() {
+        let (cloud, mut commands, _incoming) = CloudClient::channel(1);
+        let client = AuditClient::new(AppServerClient::Cloud(cloud).request_handle());
+        let work = client.delete("selected".into());
+        let server = async {
+            let command = commands.recv().await.unwrap();
+            let CloudOperation::Request(request) = command.operation else {
+                panic!()
+            };
+            assert!(
+                matches!(*request, ClientRequest::AuditDelete { params, .. } if params.run_id == "selected")
+            );
+            command
+                .response
+                .send(Ok(Ok(json!({"runId":"selected"}))))
+                .unwrap();
+        };
+        let (result, ()) = tokio::join!(work, server);
+        result.unwrap();
+        assert!(commands.try_recv().is_err());
+    }
 
     #[tokio::test]
     async fn five_wrappers_use_only_the_approved_wire_methods() {
@@ -132,7 +168,8 @@ mod tests {
                         cwd: "/cwd".into(),
                         brief: "brief".into(),
                         reviewers: vec![],
-                        guidance: None
+                        guidance: None,
+                        guidance_text: None,
                     })
                     .await
                     .unwrap(),

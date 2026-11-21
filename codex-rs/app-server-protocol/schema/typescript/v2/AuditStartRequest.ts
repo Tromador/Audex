@@ -12,4 +12,8 @@ cwd: string, brief: string, reviewers: Array<AuditReviewer>,
 /**
  * Operator-named UTF-8 guidance file, read once at start.
  */
-guidance: string | null, };
+guidance: string | null,
+/**
+ * Literal operator guidance, mutually exclusive with the guidance file.
+ */
+guidanceText?: string, };

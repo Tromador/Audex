@@ -83,7 +83,7 @@ foo = "bar"
     )?;
 
     let output = Command::new(codex_utils_cargo_bin::cargo_bin("codex-app-server")?)
-        .env("CODEX_HOME", codex_home.path())
+        .env("AUDEX_HOME", codex_home.path())
         .env(
             "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
             codex_home.path().join("managed_config.toml"),
@@ -110,7 +110,7 @@ fn relative_managed_otel_helper_fails_startup(command: &str) -> Result<()> {
         format!("[otel]\nheaders_helper = '{command}'"),
     )?;
     let output = Command::new(codex_utils_cargo_bin::cargo_bin("codex-app-server")?)
-        .env("CODEX_HOME", home.path())
+        .env("AUDEX_HOME", home.path())
         .env(
             "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
             home.path().join("managed_config.toml"),
@@ -148,7 +148,7 @@ fn managed_auth_requirements_fail_closed_for_standalone_app_server() -> Result<(
         std::fs::write(codex_home.path().join("config.toml"), config)?;
 
         let output = Command::new(codex_utils_cargo_bin::cargo_bin("codex-app-server")?)
-            .env("CODEX_HOME", codex_home.path())
+            .env("AUDEX_HOME", codex_home.path())
             .env(
                 "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
                 codex_home.path().join("managed_config.toml"),

@@ -5,8 +5,6 @@ use codex_app_server_protocol::{
 };
 use serde_json::{Value, json};
 
-pub(crate) const SOURCE_NOTICE: &str = "Source is live and may have changed since the review. Read it with your own source tools and state relevant differences. Agreement is not verification.";
-
 pub(crate) fn selection(value: &ReviewerSelection) -> AuditReviewer {
     AuditReviewer {
         route: value.route.clone(),
@@ -78,6 +76,13 @@ pub(crate) fn view(directory: &Path) -> Result<AuditRun> {
         record::read_optional(&directory.join("summary.md"))?
             .map(String::from_utf8)
             .transpose()?
+            // Older summaries ended with this generated notice. Do not rewrite
+            // retained records or remove matching words from reviewer evidence.
+            .map(|text| {
+                text.strip_suffix("\nSource is live and may have changed since the review.\n")
+                    .unwrap_or(&text)
+                    .to_owned()
+            })
     } else {
         None
     };
@@ -93,7 +98,8 @@ pub(crate) fn view(directory: &Path) -> Result<AuditRun> {
         reviewers,
         complete: complete && summary.is_some(),
         summary,
-        source_notice: SOURCE_NOTICE.into(),
+        // Retain the wire field for compatibility, without an automatic notice.
+        source_notice: String::new(),
     })
 }
 
@@ -133,8 +139,17 @@ pub(crate) fn read(directory: &Path, params: &AuditReadRequest) -> Result<AuditR
         .as_deref()
         .map(|s| reviewer_index(&record, s))
         .transpose()?;
-    if matches!(query, AuditReadView::Finding | AuditReadView::Output) {
+    if matches!(
+        query,
+        AuditReadView::Finding | AuditReadView::Output | AuditReadView::Report
+    ) {
         ensure!(selected.is_some(), "select a reviewer");
+    }
+    if matches!(query, AuditReadView::Report) {
+        ensure!(
+            params.offset == 0 && params.limit.is_none() && params.number.is_none(),
+            "view=report displays the complete review; omit offset, limit and number"
+        );
     }
     let mut entries = Vec::new();
     for (index, reviewer) in record.reviewers.iter().enumerate() {
@@ -160,6 +175,14 @@ pub(crate) fn read(directory: &Path, params: &AuditReadRequest) -> Result<AuditR
                 continue;
             }
             match query {
+                AuditReadView::Report => {
+                    let markdown = summary::render_review(&record, &path, &attempt)?;
+                    return Ok(AuditReadResult {
+                        run,
+                        data: Some(json!({"reviewer":reviewer.label, "attempt":attempt.attempt,
+                            "markdown":markdown, "cwd":record.targets.working_directories.first()})),
+                    });
+                }
                 AuditReadView::Reviewers => {
                     entries.push(serde_json::to_value(status(&path, &attempt)?)?)
                 }
@@ -202,7 +225,7 @@ pub(crate) fn read(directory: &Path, params: &AuditReadRequest) -> Result<AuditR
                     return Ok(AuditReadResult {
                         run,
                         data: Some(
-                            json!({"reviewer":reviewer.label,"attempt":attempt.attempt,"content":content,"available":output.is_some(),"nextOffset":(end < total).then_some(end),"sourceNotice":SOURCE_NOTICE}),
+                            json!({"reviewer":reviewer.label,"attempt":attempt.attempt,"content":content,"available":output.is_some(),"nextOffset":(end < total).then_some(end)}),
                         ),
                     });
                 }
@@ -222,6 +245,9 @@ pub(crate) fn read(directory: &Path, params: &AuditReadRequest) -> Result<AuditR
             }
         }
     }
+    if matches!(query, AuditReadView::Report) {
+        anyhow::bail!("No retained attempt for the selected reviewer");
+    }
     if matches!(query, AuditReadView::Finding) {
         ensure!(!entries.is_empty(), "unknown finding number");
     }
@@ -234,8 +260,6 @@ pub(crate) fn read(directory: &Path, params: &AuditReadRequest) -> Result<AuditR
     let end = params.offset.min(total) + page.len();
     Ok(AuditReadResult {
         run,
-        data: Some(
-            json!({"items":page,"nextOffset":(end < total).then_some(end),"sourceNotice":SOURCE_NOTICE}),
-        ),
+        data: Some(json!({"items":page,"nextOffset":(end < total).then_some(end)})),
     })
 }

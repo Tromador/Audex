@@ -52,7 +52,7 @@ async fn pipes_stdin_and_stdout_through_socket() -> anyhow::Result<()> {
         let output = Command::from(command)
             .args(["app-server", "proxy", "--sock"])
             .arg(&socket_path)
-            .env("CODEX_HOME", dir.path())
+            .env("AUDEX_HOME", dir.path())
             .stdin(stdin)
             .kill_on_drop(true)
             .output()

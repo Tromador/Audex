@@ -848,7 +848,7 @@ async fn turn_start_additional_context_flows_to_model_input(
     assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
 
     let mut params = serde_json::to_value(TurnStartParams {
-        thread_id: thread.id,
+        thread_id: thread.id.clone(),
         client_user_message_id: None,
         input: vec![V2UserInput::Text {
             text: "inspect tab".to_string(),
@@ -966,6 +966,21 @@ async fn turn_start_additional_context_flows_to_model_input(
         );
         assert!(!body.to_string().contains("function_call_output"));
     }
+
+    // Additional context reaches the model without becoming visible conversation
+    // text, including when the TUI reloads the thread after reconnecting.
+    let history: codex_app_server_protocol::ThreadReadResponse = mcp
+        .request(|id| codex_app_server_protocol::ClientRequest::ThreadRead {
+            request_id: id,
+            params: codex_app_server_protocol::ThreadReadParams {
+                thread_id: thread.id,
+                include_turns: true,
+            },
+        })
+        .await?;
+    let transcript = serde_json::to_string(&history.thread.turns)?;
+    assert!(transcript.contains("inspect tab"));
+    assert!(!transcript.contains("source value"));
 
     Ok(())
 }

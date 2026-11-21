@@ -290,7 +290,7 @@ async fn mcp_hooks_preserve_ownership_with_same_named_servers() -> Result<()> {
             codex_utils_cargo_bin::cargo_bin("codex")?,
         ))
         .args(["exec-server", "--listen", "ws://127.0.0.1:0"])
-        .env("CODEX_HOME", home.path())
+        .env("AUDEX_HOME", home.path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .kill_on_drop(true)

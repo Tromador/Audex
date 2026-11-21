@@ -457,6 +457,7 @@ fn create_filesystem_args(
                 if project_subpath != Path::new(".git")
                     && project_subpath != Path::new(".agents")
                     && project_subpath != Path::new(".codex")
+                    && project_subpath != Path::new(".audex")
                 {
                     return None;
                 }

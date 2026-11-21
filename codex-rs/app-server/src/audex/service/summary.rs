@@ -113,7 +113,66 @@ pub fn render(run_dir: &Path) -> Result<String> {
             }
         }
     }
-    out.push_str("Citation checks are location checks, not verification of findings. Agreement is not verification.\n\nSource is live and may have changed since the review.\n");
+    out.push_str("Citation checks are location checks, not verification of findings. Agreement is not verification.\n");
     record::write_atomic(&run_dir.join("summary.md"), out.as_bytes())?;
+    Ok(out)
+}
+
+/// Render one retained attempt for direct display without changing its wording
+/// or the aggregate summary used by comparison. This never writes run files.
+pub(super) fn render_review(
+    run: &RunRecord,
+    directory: &Path,
+    status: &AttemptStatus,
+) -> Result<String> {
+    let mut out = format!(
+        "# Review — {}\n\n**Reviewer:** {} / {}\n\n**Audit created:** {}\n\n**Attempt:** {} — {}\n\n",
+        status.reviewer.label,
+        status.reviewer.route,
+        status.reviewer.model,
+        run.created_at,
+        status.attempt,
+        word(&status.state)
+    );
+    if let Some(bytes) = record::read_optional(&directory.join("result.json"))? {
+        let result: CheckedResult = serde_json::from_slice(&bytes)?;
+        writeln!(out, "## Summary\n\n{}\n", result.summary)?;
+        for (index, checked) in result.findings.iter().enumerate() {
+            let finding = &checked.finding;
+            writeln!(out, "## Finding {}: {}\n", index + 1, finding.title)?;
+            writeln!(
+                out,
+                "**Severity:** {}\n\n**Confidence:** {}\n\n**Source:** {}:{}-{}\n\n**Citation check:** {}\n",
+                word(&finding.severity),
+                word(&finding.confidence),
+                finding.path,
+                finding.start_line,
+                finding.end_line,
+                word(&checked.citation)
+            )?;
+            for (label, text) in [
+                ("Trigger", &finding.trigger),
+                ("Mechanism", &finding.mechanism),
+                ("Impact", &finding.impact),
+                ("Evidence", &finding.evidence),
+                ("Remediation", &finding.remediation),
+            ] {
+                writeln!(out, "**{label}:**\n\n{text}\n")?;
+            }
+        }
+    } else {
+        let output = record::read_optional(&directory.join("output.txt"))?
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No retained review for {} attempt {} ({})",
+                    status.reviewer.label,
+                    status.attempt,
+                    word(&status.state)
+                )
+            })?;
+        out.push_str("## Review\n\n");
+        out.push_str(&String::from_utf8(output)?);
+    }
     Ok(out)
 }

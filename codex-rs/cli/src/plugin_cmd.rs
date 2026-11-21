@@ -769,7 +769,7 @@ async fn load_plugin_command_context(
     overrides: Vec<(String, toml::Value)>,
     marketplace_name: Option<&str>,
 ) -> Result<PluginCommandContext> {
-    let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
+    let codex_home = find_codex_home().context("failed to resolve AUDEX_HOME")?;
     let config = Config::load_with_cli_overrides(overrides)
         .await
         .context("failed to load configuration")?;

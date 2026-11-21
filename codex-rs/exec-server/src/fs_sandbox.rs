@@ -672,7 +672,7 @@ mod tests {
                     "fs_sandbox::tests::windows_helper_binds_executable_and_workspace_grants",
                 ])
                 .env(CHILD, "1")
-                .env("CODEX_HOME", home.path())
+                .env("AUDEX_HOME", home.path())
                 .output()
                 .expect("run isolated Windows helper test");
             assert!(

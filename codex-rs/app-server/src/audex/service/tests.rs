@@ -1,4 +1,5 @@
 mod regressions;
+mod reports;
 
 use super::record::Measurement;
 use super::*;
@@ -810,7 +811,7 @@ async fn structured_findings_persist_citation_flags_and_render_all_fields() -> R
         assert!(summary.contains(expected), "{expected}");
     }
     assert!(summary.find("one: succeeded") < summary.find("Reviewer claim"));
-    assert!(summary.contains("Source is live"));
+    assert!(!summary.contains("Source is live"));
     Ok(())
 }
 

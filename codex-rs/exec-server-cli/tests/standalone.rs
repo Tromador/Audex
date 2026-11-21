@@ -40,7 +40,7 @@ async fn registration_bearer_rejects_plaintext_remote_registry() -> anyhow::Resu
             "test",
             "--registration-bearer-stdin",
         ])
-        .env("CODEX_HOME", home.path())
+        .env("AUDEX_HOME", home.path())
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -102,7 +102,7 @@ async fn registration_uses_its_bearer_before_and_after_desktop_sign_in() -> anyh
             .args(["--remote", &registry.uri(), "--environment-id", "test"])
             .arg("--registration-bearer-stdin")
             .stdin(Stdio::piped())
-            .env("CODEX_HOME", home.path())
+            .env("AUDEX_HOME", home.path())
             .kill_on_drop(true)
             .spawn()?;
         server
@@ -134,7 +134,7 @@ async fn standalone_initializes_reports_version_and_runs_helpers() -> anyhow::Re
         .map_err(|()| anyhow::anyhow!("file URI"))?;
     let version = tokio::process::Command::from(background_command(&binary))
         .arg("--version")
-        .env("CODEX_HOME", directory.path())
+        .env("AUDEX_HOME", directory.path())
         .output()
         .await?;
     assert!(version.status.success(), "{version:?}");
@@ -178,7 +178,7 @@ async fn standalone_initializes_reports_version_and_runs_helpers() -> anyhow::Re
         let mut child = tokio::process::Command::from(background_command(&binary))
             .args(["--listen", "stdio"])
             .current_dir(directory.path())
-            .env("CODEX_HOME", directory.path())
+            .env("AUDEX_HOME", directory.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

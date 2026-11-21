@@ -39,7 +39,7 @@ fn remote_addr_has_explicit_port(addr: &str, parsed: &Url) -> bool {
 pub fn resolve_remote_addr(addr: &str) -> color_eyre::Result<RemoteAppServerEndpoint> {
     if let Some(socket_path) = addr.strip_prefix("unix://") {
         let socket_path = if socket_path.is_empty() {
-            let codex_home = find_codex_home().wrap_err("failed to resolve CODEX_HOME")?;
+            let codex_home = find_codex_home().wrap_err("failed to resolve AUDEX_HOME")?;
             crate::app_server_control_socket_path(&codex_home).map_err(color_eyre::Report::new)?
         } else {
             AbsolutePathBuf::relative_to_current_dir(socket_path)

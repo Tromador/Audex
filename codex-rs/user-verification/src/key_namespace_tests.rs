@@ -9,4 +9,10 @@ fn namespaces_are_stable_and_separate_accounts() {
     assert_eq!(first, UserVerificationKeyNamespace::new("account-user-one"));
     assert_ne!(first, UserVerificationKeyNamespace::new("account-user-two"));
     assert!(!first.label.contains("account-user-one"));
+    assert!(
+        first
+            .label
+            .starts_with("com.openai.audex.user-verification.")
+    );
+    assert!(!first.label.starts_with("com.openai.codex."));
 }

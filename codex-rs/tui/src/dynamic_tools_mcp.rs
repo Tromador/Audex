@@ -335,7 +335,14 @@ impl ServerHandler for DynamicToolMcpHandler {
                 let thread_id = codex_protocol::ThreadId::from_string(&params.thread_id)
                     .map_err(|error| error.to_string())?;
                 let action = crate::audit::tool_action(&params.tool, params.arguments)?;
-                crate::audit::execute(request_handle, thread_id, action, app_event_tx).await
+                crate::audit::execute(
+                    request_handle,
+                    thread_id,
+                    action,
+                    app_event_tx,
+                    crate::audit::AuditOrigin::Model,
+                )
+                .await
             }
             .await;
             crate::audit::response(result)

@@ -710,7 +710,7 @@ async fn external_agent_config_import_sends_completion_notification_for_sync_onl
         .without_auto_env()
         .with_env_overrides(&[
             ("HOME", Some(home_dir.as_str())),
-            ("CODEX_SQLITE_HOME", Some(sqlite_home_dir.as_str())),
+            ("AUDEX_SQLITE_HOME", Some(sqlite_home_dir.as_str())),
         ])
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
@@ -815,7 +815,7 @@ async fn external_agent_config_records_externally_completed_import_history() -> 
         .without_auto_env()
         .with_env_overrides(&[
             ("HOME", Some(home_dir.as_str())),
-            ("CODEX_SQLITE_HOME", Some(sqlite_home_dir.as_str())),
+            ("AUDEX_SQLITE_HOME", Some(sqlite_home_dir.as_str())),
         ])
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;

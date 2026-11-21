@@ -50,7 +50,7 @@ If official documentation conflicts with a callable capability verified in the c
 
 - Prompt or thread context: one-off task constraints.
 - Repository `AGENTS.md`: durable team conventions, commands, and verification expectations; nested files apply more specifically within their subtree.
-- Project `.codex/config.toml`: settings for a trusted repository, including sandbox, MCP, hooks, model, and reasoning defaults.
+- Project `.audex/config.toml`: settings for a trusted repository, including sandbox, MCP, hooks, model, and reasoning defaults.
 - Global config or global guidance: personal defaults across repositories.
 - Skill: a reusable workflow, optionally with focused references or scripts.
 - Plugin: an installable bundle of skills, tools, commands, MCP configuration, hooks, apps, assets, or related metadata.

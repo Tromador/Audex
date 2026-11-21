@@ -1185,7 +1185,7 @@ async fn internal_follow_up_preserves_questions_on_submission_and_disconnect_rec
     chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
     chat.bottom_pane.handle_paste("Partial answer".into());
     let before = chat.capture_thread_input_state().unwrap().questions;
-    assert!(chat.queue_internal_follow_up("Audit follow-up".into()));
+    assert!(chat.queue_internal_follow_up("Audit follow-up".into(), None));
     assert_answer(ops.try_recv().unwrap(), "Audit follow-up");
     assert_eq!(chat.capture_thread_input_state().unwrap().questions, before);
     assert_eq!(chat.bottom_pane.composer_text(), "Operator draft");
@@ -1201,7 +1201,7 @@ async fn internal_follow_up_preserves_questions_on_submission_and_disconnect_rec
             .front()
             .unwrap()
             .source,
-        UserMessageSource::InternalFollowUp
+        UserMessageSource::InternalFollowUp(None)
     );
     assert_eq!(
         restored.capture_thread_input_state().unwrap().questions,

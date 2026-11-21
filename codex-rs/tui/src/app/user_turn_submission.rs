@@ -20,16 +20,30 @@ pub(super) async fn try_submit_user_turn(
         items,
         cloud_submission,
         client_user_message_id,
+        audit_comparison,
         ..
     } = op
     else {
         return Ok(false);
     };
-    // Reports join an explicitly submitted operator message, never background execution.
-    let audit_context = (*turn_trigger == "user")
+    let mut audit_context = (*turn_trigger == "user")
         .then(|| app.audits.reports.for_turn(thread_id))
         .flatten();
-    let carries_audit_context = audit_context.is_some();
+    if let Some(id) = audit_comparison {
+        let Some(run) = app.audits.runs.get(&(thread_id, id.to_string())) else {
+            app.chat_widget
+                .discard_deleted_audit_comparison(client_user_message_id);
+            return Ok(true);
+        };
+        audit_context.get_or_insert_default().insert(
+            "audex_comparison".into(),
+            codex_app_server_protocol::AdditionalContextEntry {
+                value: crate::audit::comparison_prompt(run),
+                kind: codex_app_server_protocol::AdditionalContextKind::Untrusted,
+                name: Some("audex_comparison".into()),
+            },
+        );
+    }
     let is_user_prompt = *turn_trigger == "user"
         && matches!(
             cloud_submission,
@@ -99,21 +113,6 @@ pub(super) async fn try_submit_user_turn(
                 store.clear_active_turn_id();
             }
         }
-    }
-
-    // Only confirmed admission consumes a report; anything else may still need to carry it.
-    if carries_audit_context
-        && matches!(
-            &result,
-            Ok((
-                UserMessageAdmission::Started(_)
-                    | UserMessageAdmission::Steered(_)
-                    | UserMessageAdmission::StartResponse(_),
-                _
-            ))
-        )
-    {
-        app.audits.reports.acknowledged(thread_id);
     }
 
     let ordinary = intent != CloudSubmissionIntent::UseKnownTurn;

@@ -174,12 +174,16 @@ impl ChatWidget {
 
     /// Queue application-generated work without treating it as a new operator prompt.
     /// The source survives normal queuing/restoration and preserves question drafts.
-    pub(crate) fn queue_internal_follow_up(&mut self, text: String) -> bool {
+    pub(crate) fn queue_internal_follow_up(
+        &mut self,
+        text: String,
+        audit: Option<uuid::Uuid>,
+    ) -> bool {
         self.queue_user_message_with_options_and_source(
             text.into(),
             QueuedInputAction::Literal,
             Vec::new(),
-            UserMessageSource::InternalFollowUp,
+            UserMessageSource::InternalFollowUp(audit),
         )
     }
 

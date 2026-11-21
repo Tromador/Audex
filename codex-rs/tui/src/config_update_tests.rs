@@ -42,7 +42,7 @@ async fn remote_project_trust_guards_thread_start_and_preserves_repository_decis
     std::fs::create_dir_all(&project_cwd)?;
     std::fs::create_dir(project_root.join(".git"))?;
     std::fs::write(project_root.join(".git/HEAD"), "ref: refs/heads/main\n")?;
-    std::fs::create_dir(project_cwd.join(".codex"))?;
+    std::fs::create_dir(project_cwd.join(".audex"))?;
     let undecided_config = format!(
         "[{}]\n",
         trusted_project_edit(&project_root)
@@ -51,7 +51,7 @@ async fn remote_project_trust_guards_thread_start_and_preserves_repository_decis
     );
     std::fs::write(codex_home.join("config.toml"), &undecided_config)?;
     std::fs::write(
-        project_cwd.join(".codex/config.toml"),
+        project_cwd.join(".audex/config.toml"),
         "model_reasoning_effort = \"high\"\n",
     )?;
     let config = ConfigBuilder::default()
@@ -164,9 +164,9 @@ async fn remote_project_trust_guards_thread_start_and_preserves_repository_decis
     "
     );
 
-    std::fs::create_dir(project_root.join(".codex"))?;
+    std::fs::create_dir(project_root.join(".audex"))?;
     std::fs::write(
-        project_root.join(".codex/config.toml"),
+        project_root.join(".audex/config.toml"),
         "model_reasoning_effort = \"low\"\n",
     )?;
     for (parent, child) in [("untrusted", "trusted"), ("trusted", "untrusted")] {
@@ -187,7 +187,7 @@ async fn remote_project_trust_guards_thread_start_and_preserves_repository_decis
             (child == "untrusted").then_some(Some(TrustLevel::Untrusted))
         );
     }
-    std::fs::remove_dir_all(project_root.join(".codex"))?;
+    std::fs::remove_dir_all(project_root.join(".audex"))?;
     let untrusted_projects = replace_config_value(
         "projects",
         serde_json::json!({
@@ -200,8 +200,8 @@ async fn remote_project_trust_guards_thread_start_and_preserves_repository_decis
     )
     .await?;
 
-    std::fs::remove_file(project_cwd.join(".codex/config.toml"))?;
-    std::fs::remove_dir(project_cwd.join(".codex"))?;
+    std::fs::remove_file(project_cwd.join(".audex/config.toml"))?;
+    std::fs::remove_dir(project_cwd.join(".audex"))?;
     let canonical_project_cwd = PathBuf::from(project_trust_key(&project_root)).join("nested");
     let error = read_trust(&canonical_project_cwd, ProjectTrustHost::Remote)
         .await
@@ -321,11 +321,11 @@ fn format_config_error_preserves_server_validation_message() {
 fn effective_defaults_accept_foreign_layer_paths() -> Result<()> {
     let layers = serde_json::json!([
         {"name": {"type": "system", "file": "/etc/codex/config.toml"}, "version": "1", "config": {}},
-        {"name": {"type": "project", "dotCodexFolder": "C:\\work\\.codex"}, "disabledReason": "untrusted", "version": "1", "config": {}}
+        {"name": {"type": "project", "dotCodexFolder": "C:\\work\\.audex"}, "disabledReason": "untrusted", "version": "1", "config": {}}
     ]);
     let response: EffectiveConfig = serde_json::from_value(serde_json::json!({
         "config": {"model": "server-model"},
-        "origins": {"model": {"name": {"type": "user", "file": "C:\\Users\\user\\.codex\\config.toml", "profile": null}, "version": "1"}},
+        "origins": {"model": {"name": {"type": "user", "file": "C:\\Users\\user\\.audex\\config.toml", "profile": null}, "version": "1"}},
         "layers": layers,
     }))?;
     assert_eq!(

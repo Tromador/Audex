@@ -56,6 +56,68 @@ struct Fixture {
     fake: Arc<Fake>,
     notifications: Arc<std::sync::Mutex<Vec<AuditProgress>>>,
 }
+
+#[tokio::test]
+async fn delete_preserves_source_other_runs_and_refuses_running_or_invalid_ids() -> Result<()> {
+    let f = Fixture::new()?;
+    let source = f.home.path().join("source");
+    std::fs::create_dir(&source)?;
+    std::fs::write(source.join("example.rs"), "preserve live source\n")?;
+    let input = json!({"type":"paths","paths":[source]});
+    let first = f.start(input.clone(), &["good"]).await?;
+    let second = f.start(input.clone(), &["good"]).await?;
+    f.wait(&first).await?;
+    f.wait(&second).await?;
+    let second_before = f
+        .request(
+            "audit/read",
+            json!({"runId":second,"view":"output","reviewer":"1"}),
+        )
+        .await?;
+    let directory = f.home.path().join("audex/runs").join(&first);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&source, directory.join("source-link"))?;
+    assert!(
+        f.request("audit/delete", json!({"runId":"../../source"}))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        f.request("audit/delete", json!({"runId":first})).await?["runId"],
+        first
+    );
+    assert!(!directory.exists());
+    assert_eq!(
+        std::fs::read_to_string(source.join("example.rs"))?,
+        "preserve live source\n"
+    );
+    assert_eq!(
+        f.request(
+            "audit/read",
+            json!({"runId":second,"view":"output","reviewer":"1"})
+        )
+        .await?,
+        second_before
+    );
+    let page = f.request("audit/list", json!({})).await?;
+    assert_eq!(page["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(page["runs"][0]["runId"], second);
+    assert!(
+        f.request("audit/delete", json!({"runId":first}))
+            .await
+            .is_err()
+    );
+    let running = f.start(input, &["wait"]).await?;
+    assert!(
+        f.request("audit/delete", json!({"runId":running}))
+            .await
+            .is_err()
+    );
+    f.request("audit/cancel", json!({"runId":running})).await?;
+    f.wait(&running).await?;
+    f.request("audit/delete", json!({"runId":running})).await?;
+    Ok(())
+}
 impl Fixture {
     fn new() -> Result<Self> {
         let home = tempfile::tempdir()?;
@@ -140,6 +202,14 @@ async fn rpc_uses_run_files_for_all_shapes_guidance_and_all_read_views() -> Resu
                 .contains("fake review")
         );
         let directory = f.home.path().join("audex/runs").join(&id);
+        let summary_path = directory.join("summary.md");
+        let original = std::fs::read_to_string(&summary_path)?;
+        assert!(!original.contains("may have changed"));
+        let legacy = format!("{original}\nSource is live and may have changed since the review.\n");
+        std::fs::write(&summary_path, &legacy)?;
+        let reread = f.request("audit/read", json!({"runId":id})).await?;
+        assert_eq!(reread["run"]["summary"], original);
+        assert_eq!(std::fs::read_to_string(&summary_path)?, legacy);
         let record = service::read::record(&directory)?;
         if input["type"] == "paths" {
             assert_eq!(
@@ -156,12 +226,9 @@ async fn rpc_uses_run_files_for_all_shapes_guidance_and_all_read_views() -> Resu
                 )
                 .await?;
             assert_eq!(read["data"]["items"].as_array().unwrap().len(), 1);
-            assert!(
-                read["data"]["sourceNotice"]
-                    .as_str()
-                    .unwrap()
-                    .contains("may have changed")
-            );
+            assert!(read["data"].get("sourceNotice").is_none());
+            assert_eq!(read["run"]["sourceNotice"], "");
+            assert!(!read.to_string().contains("may have changed"));
             if view == "findings" {
                 assert_eq!(read["data"]["nextOffset"], 1);
             }
@@ -217,6 +284,37 @@ async fn rpc_uses_run_files_for_all_shapes_guidance_and_all_read_views() -> Resu
         std::fs::read_dir(f.home.path().join("audex"))?.all(|e| e.unwrap().file_name() == "runs")
     );
     assert!(f.notifications.lock().unwrap().iter().any(|e| e.complete));
+    Ok(())
+}
+
+#[tokio::test]
+async fn inline_guidance_is_literal_and_conflicting_sources_never_start_a_run() -> Result<()> {
+    let f = Fixture::new()?;
+    let filename = "review notes.md";
+    std::fs::write(f.home.path().join(filename), "guidance from file")?;
+    let mut params = json!({
+        "input": {"type":"snippet", "name":"example.rs", "text":"source"},
+        "cwd": f.home.path(), "brief":"review", "reviewers":[{"route":"native","model":"good"}],
+        "guidance":"missing file", "guidanceText": filename,
+    });
+    let error = f.request("audit/start", params.clone()).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("only one of guidance and guidanceText")
+    );
+    assert_eq!(f.request("audit/list", json!({})).await?["runs"], json!([]));
+    assert_eq!(f.fake.calls.load(Ordering::SeqCst), 0);
+    params.as_object_mut().unwrap().remove("guidance");
+    for expected in [filename, "guidance from file"] {
+        let response = f.request("audit/start", params.clone()).await?;
+        let id = response["run"]["runId"].as_str().context("run id")?;
+        f.wait(id).await?;
+        let record = service::read::record(&f.home.path().join("audex/runs").join(id))?;
+        assert_eq!(record.guidance.as_deref(), Some(expected));
+        params.as_object_mut().unwrap().remove("guidanceText");
+        params["guidance"] = json!(filename);
+    }
     Ok(())
 }
 

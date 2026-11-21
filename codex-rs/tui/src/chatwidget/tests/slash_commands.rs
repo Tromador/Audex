@@ -3963,6 +3963,7 @@ async fn slash_claude_routes_literal_text_without_codex_user_turn() {
         op,
         AppCommand::ClaudeTurn {
             audit: None,
+            no_audit: false,
             model: Some("claude-sonnet-5-5".into()),
             message: "Isn't Codex's answer wrong?\n  Check again.".into()
         }

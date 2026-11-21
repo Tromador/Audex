@@ -212,7 +212,7 @@ impl ChatWidget {
 
         match cmd {
             SlashCommand::Claude => self.add_info_message(crate::claude::USAGE.into(), None),
-            SlashCommand::Audit => self.request_audit_command("list".to_owned()),
+            SlashCommand::Audit => self.request_audit_command(String::new()),
             SlashCommand::Daybreak => {
                 if !self.config.features.enabled(Feature::CliDaybreak) {
                     return;
@@ -832,6 +832,7 @@ impl ChatWidget {
                 Ok(crate::claude::Request {
                     model,
                     audit,
+                    no_audit,
                     message,
                 }) => {
                     if source == SlashCommandDispatchSource::Live {
@@ -841,6 +842,7 @@ impl ChatWidget {
                         message,
                         model,
                         audit,
+                        no_audit,
                     });
                 }
                 Err(error) => self.add_error_message(error),

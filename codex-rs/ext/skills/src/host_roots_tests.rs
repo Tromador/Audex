@@ -309,8 +309,8 @@ fn layer_roots_preserve_scope_precedence_and_disabled_projects() {
     let system_folder = absolute(temp_dir.path().join("etc/codex"));
     let home_folder = absolute(temp_dir.path().join("home"));
     let user_folder = home_folder.join("codex");
-    let project_folder = absolute(temp_dir.path().join("repo/.codex"));
-    let nested_project_folder = absolute(temp_dir.path().join("repo/nested/.codex"));
+    let project_folder = absolute(temp_dir.path().join("repo/.audex"));
+    let nested_project_folder = absolute(temp_dir.path().join("repo/nested/.audex"));
     let config_stack = stack(vec![
         ConfigLayerEntry::new(
             ConfigLayerSource::System {
@@ -803,7 +803,7 @@ async fn resolved_project_layer_loads_skill_without_git_marker() {
     let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let temp_dir = TempDir::new().expect("temp dir");
     let workspace = absolute(temp_dir.path().join("workspace"));
-    let dot_codex = workspace.join(".codex");
+    let dot_codex = workspace.join(".audex");
     let skill_root = dot_codex.join("skills");
     fs::create_dir_all(&workspace).expect("create workspace");
     let skill_path = write_skill(&skill_root, "local", "local-skill");
@@ -841,7 +841,7 @@ async fn resolved_project_layer_loads_skill_when_cwd_is_file() {
     let access = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let temp_dir = TempDir::new().expect("temp dir");
     let repository = absolute(temp_dir.path().join("repo"));
-    let dot_codex = repository.join(".codex");
+    let dot_codex = repository.join(".audex");
     let skill_root = dot_codex.join("skills");
     fs::create_dir_all(&repository).expect("create repository");
     fs::write(repository.join(".git"), "gitdir: fake\n").expect("write git marker");
@@ -976,8 +976,8 @@ async fn resolved_config_and_repo_roots_preserve_order_and_dedupe_paths_not_name
     fs::create_dir_all(&cwd).expect("create cwd");
     fs::write(repository.join(".git"), "gitdir: fake\n").expect("write git marker");
 
-    let project_dot_codex = repository.join(".codex");
-    let nested_project_dot_codex = repository.join("nested/.codex");
+    let project_dot_codex = repository.join(".audex");
+    let nested_project_dot_codex = repository.join("nested/.audex");
     let user_skills = codex_home.join("skills");
     let root_project_skill = write_skill(
         &project_dot_codex.join("skills"),

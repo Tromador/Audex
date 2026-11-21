@@ -1292,6 +1292,7 @@ impl MessageProcessor {
                 .await;
             }
             request @ (ClientRequest::AuditStart { .. }
+            | ClientRequest::AuditDelete { .. }
             | ClientRequest::AuditRead { .. }
             | ClientRequest::AuditList { .. }
             | ClientRequest::AuditCancel { .. }

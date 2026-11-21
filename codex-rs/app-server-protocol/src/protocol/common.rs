@@ -520,6 +520,11 @@ enum GatewayOAuthLoginParamsTypeScript {
 }
 
 client_request_definitions! {
+    AuditDelete => "audit/delete" {
+        params: v2::AuditDeleteRequest,
+        serialization: None,
+        response: v2::AuditDeleteResponse,
+    },
     AuditStart => "audit/start" {
         params: v2::AuditStartRequest,
         serialization: None,

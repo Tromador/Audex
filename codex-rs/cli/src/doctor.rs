@@ -1124,7 +1124,7 @@ fn config_check(config: &Config) -> DoctorCheck {
     details
         .push("configuration scope: invocation config, including cloud-managed policy".to_string());
     details.push("active thread overrides: not inspected".to_string());
-    details.push(format!("CODEX_HOME: {}", config.codex_home.display()));
+    details.push(format!("AUDEX_HOME: {}", config.codex_home.display()));
     details.push(format!("cwd: {}", config.cwd.display()));
     details.push(format!(
         "model: {}",
@@ -2136,7 +2136,7 @@ fn terminal_size_issues(inputs: &TerminalCheckInputs) -> Vec<DoctorIssue> {
 
 async fn state_check(config: &Config, command: &DoctorCommand) -> DoctorCheck {
     let mut details = Vec::new();
-    path_readiness(&mut details, "CODEX_HOME", &config.codex_home);
+    path_readiness(&mut details, "AUDEX_HOME", &config.codex_home);
     path_readiness(&mut details, "log dir", &config.log_dir);
     path_readiness(&mut details, "sqlite home", config.sqlite_config().home());
 
@@ -2607,14 +2607,14 @@ fn fallback_state_check() -> DoctorCheck {
             "state.paths",
             "state",
             CheckStatus::Ok,
-            "CODEX_HOME was resolved without config",
+            "AUDEX_HOME was resolved without config",
         )
-        .detail(format!("CODEX_HOME: {}", path.display())),
+        .detail(format!("AUDEX_HOME: {}", path.display())),
         Err(err) => DoctorCheck::new(
             "state.paths",
             "state",
             CheckStatus::Warning,
-            "CODEX_HOME could not be resolved",
+            "AUDEX_HOME could not be resolved",
         )
         .detail(err.to_string()),
     }

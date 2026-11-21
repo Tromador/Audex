@@ -97,7 +97,7 @@ async fn elevated_local_tui_uses_embedded_without_starting_daemon() -> Result<()
     let home = tempfile::tempdir()?;
     for operation in ["start", "restart"] {
         let output = Command::new(&codex)
-            .env("CODEX_HOME", home.path())
+            .env("AUDEX_HOME", home.path())
             .args(["app-server", "daemon", operation])
             .output()?;
         ensure!(
@@ -158,7 +158,8 @@ async fn daemon_startup(command: &str) -> Result<()> {
     #[cfg(not(windows))]
     let elevated = false;
     let elevated_launch = command.starts_with("elevated");
-    let codex = codex_utils_cargo_bin::cargo_bin("codex")?.canonicalize()?;
+    let binary = if command == "start" { "audex" } else { "codex" };
+    let codex = codex_utils_cargo_bin::cargo_bin(binary)?.canonicalize()?;
     let workspace = tempfile::tempdir()?;
     let workspace_path = workspace.path().canonicalize()?;
     #[cfg(unix)]
@@ -175,7 +176,7 @@ async fn daemon_startup(command: &str) -> Result<()> {
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     anyhow::ensure!(
         Command::new(&codex)
-            .env("CODEX_HOME", home.path())
+            .env("AUDEX_HOME", home.path())
             .arg("--version")
             .output()?
             .status
@@ -232,10 +233,13 @@ async fn daemon_startup(command: &str) -> Result<()> {
     ] {
         env.remove(key);
     }
-    env.insert("CODEX_HOME".into(), home.path().display().to_string());
+    env.insert("AUDEX_HOME".into(), home.path().display().to_string());
+    let upstream_home = workspace.path().join("upstream-home-must-remain-absent");
+    env.insert("CODEX_HOME".into(), upstream_home.display().to_string());
+    env.remove("AUDEX_SQLITE_HOME");
     env.insert(
         "CODEX_SQLITE_HOME".into(),
-        home.path().display().to_string(),
+        upstream_home.display().to_string(),
     );
     env.insert("TERM".into(), "xterm-256color".into());
     let mut args = vec!["--no-alt-screen".to_string()];
@@ -636,5 +640,6 @@ async fn daemon_startup(command: &str) -> Result<()> {
         "{}",
         String::from_utf8_lossy(&stopped.stderr)
     );
+    ensure!(!upstream_home.exists(), "inherited CODEX_HOME was used");
     Ok(())
 }

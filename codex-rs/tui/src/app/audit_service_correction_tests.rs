@@ -207,7 +207,7 @@ async fn s4_f2_two_conversations_schedule_one_comparison_even_after_reopening() 
         })
         .collect::<Vec<_>>();
     assert_eq!(comparisons.len(), 1);
-    assert!(comparisons[0].contains("Audex automatic completion comparison"));
+    assert!(comparisons[0].contains("Compare completed audit:"));
     // An older running response must not give a completed run another comparison owner.
     app.audit_opened(&session, b, run, false);
     answer_read(&mut app, &mut commands, &mut events, &complete).await;
@@ -300,4 +300,220 @@ pub(super) async fn assert_summary_error_visible(background: bool) {
         !std::iter::from_fn(|| ops.try_recv().ok())
             .any(|op| matches!(op, AppCommand::UserTurn { .. }))
     );
+}
+
+#[tokio::test]
+async fn bare_audit_reads_only_this_threads_selection_and_explicit_list_still_lists() {
+    use codex_app_server_protocol::ClientRequest;
+    let (mut app, mut events, mut ops) = crate::app::tests::make_test_app_with_channels().await;
+    let thread = ThreadId::new();
+    let other = ThreadId::new();
+    let (cloud, mut commands, _incoming) = CloudClient::channel(1);
+    let session = session(cloud);
+    display(&mut app, thread);
+    while ops.try_recv().is_ok() {}
+    let mut selected = super::tests::completed_fixture();
+    let other_run = selected.clone();
+    selected.run_id = "selected-historical-run".into();
+    app.audit_opened(&session, other, other_run, false);
+    for (args, has_selection) in [("", false), ("", true), ("list", true)] {
+        if has_selection {
+            app.audit_opened(&session, thread, selected.clone(), false);
+        }
+        history(&mut events);
+        app.audit_command(&session, thread, args.into());
+        let command = commands.recv().await.unwrap();
+        let CloudOperation::Request(request) = command.operation else {
+            panic!()
+        };
+        if has_selection && args.is_empty() {
+            let ClientRequest::AuditRead { params, .. } = *request else {
+                panic!()
+            };
+            assert_eq!(params.run_id, selected.run_id);
+            assert!(params.view.is_none());
+            command
+                .response
+                .send(Ok(Ok(json!({"run":selected,"data":null}))))
+                .unwrap();
+            assert!(
+                matches!(events.recv().await, Some(AppEvent::AuditMenuLoaded { thread_id, run })
+                if thread_id == thread && run.run_id == selected.run_id)
+            );
+        } else {
+            assert!(matches!(*request, ClientRequest::AuditList { .. }));
+            command
+                .response
+                .send(Ok(Ok(json!({"runs":[],"nextOffset":null,"presets":{}}))))
+                .unwrap();
+            assert!(
+                matches!(events.recv().await, Some(AppEvent::AuditListLoaded { thread_id, .. }) if thread_id == thread)
+            );
+        }
+        assert!(ops.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn partial_audit_proceed_displays_retained_findings_and_retry_still_compares() {
+    use crate::audit::{AuditAction, menu};
+    use codex_app_server_protocol::{AuditReadView, ClientRequest};
+    let (mut app, mut events, mut ops) = crate::app::tests::make_test_app_with_channels().await;
+    let thread = ThreadId::new();
+    let (cloud, mut commands, _incoming) = CloudClient::channel(1);
+    let session = session(cloud);
+    display(&mut app, thread);
+    while ops.try_recv().is_ok() {}
+    let mut run = super::tests::completed_fixture();
+    run.reviewers[0].finding_count = Some(1);
+    run.reviewers[1].state = "interrupted".into();
+    run.reviewers[1].finding_count = None;
+    app.audit_opened(&session, thread, run.clone(), true);
+    let initial = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        !initial
+            .iter()
+            .any(|e| matches!(e, AppEvent::AuditReport { .. }))
+    );
+    assert!(commands.try_recv().is_err() && ops.try_recv().is_err());
+    let proceed = menu::items(&run)
+        .into_iter()
+        .find(|i| matches!(i.action, AuditAction::Proceed(_)))
+        .unwrap();
+    app.run_audit_action(
+        &session,
+        thread,
+        Ok(proceed.action),
+        Some((run.run_id.clone(), proceed.attempt)),
+    );
+    let command = commands.recv().await.unwrap();
+    let CloudOperation::Request(request) = command.operation else {
+        panic!()
+    };
+    let ClientRequest::AuditRead { params, .. } = *request else {
+        panic!()
+    };
+    assert_eq!(params.view, Some(AuditReadView::Findings));
+    assert_eq!(params.reviewer.as_deref(), Some("reviewer-1"));
+    let data = json!({"items":[{"finding":{"title":"Retained finding", "path":"a.rs", "start_line":3, "end_line":5}}]});
+    command
+        .response
+        .send(Ok(Ok(json!({"run":run,"data":data}))))
+        .unwrap();
+    let Some(AppEvent::AuditReport { thread_id, report }) = events.recv().await else {
+        panic!()
+    };
+    assert_eq!(thread_id, thread);
+    assert!(report.markdown.contains("Retained finding — a.rs:3-5"));
+    assert!(
+        report.markdown.contains("reviewer-1")
+            && report
+                .markdown
+                .contains("reviewer-2 (native:fixture) — interrupted")
+    );
+    app.enqueue_audit_report(thread_id, report).await;
+    assert!(
+        history(&mut events)
+            .iter()
+            .any(|cell| cell.contains("Retained finding"))
+    );
+    assert!(ops.try_recv().is_err() && commands.try_recv().is_err());
+    assert!(app.audits.compared_runs.is_empty());
+    assert_eq!(app.audits.runs[&(thread, run.run_id.clone())], run);
+
+    let retry = menu::items(&run)
+        .into_iter()
+        .find(|i| matches!(i.action, AuditAction::Retry(_)))
+        .unwrap();
+    app.run_audit_action(
+        &session,
+        thread,
+        Ok(retry.action),
+        Some((run.run_id.clone(), retry.attempt)),
+    );
+    let command = commands.recv().await.unwrap();
+    assert!(
+        matches!(command.operation, CloudOperation::Request(r) if matches!(*r, ClientRequest::AuditRead { .. }))
+    );
+    command
+        .response
+        .send(Ok(Ok(json!({"run":run,"data":null}))))
+        .unwrap();
+    let command = commands.recv().await.unwrap();
+    let CloudOperation::Request(request) = command.operation else {
+        panic!()
+    };
+    let ClientRequest::AuditRetry { params, .. } = *request else {
+        panic!()
+    };
+    assert_eq!(
+        (params.run_id, params.reviewer),
+        (run.run_id.clone(), "reviewer-2".into())
+    );
+    assert!(ops.try_recv().is_err());
+    let mut second = run.reviewers[1].clone();
+    second.attempt += 1;
+    second.trigger = "operator_retry".into();
+    second.state = "succeeded".into();
+    run.reviewers.push(second);
+    command.response.send(Ok(Ok(json!({"run":run})))).unwrap();
+    let Some(AppEvent::AuditOpened {
+        thread_id,
+        run,
+        compare,
+    }) = events.recv().await
+    else {
+        panic!()
+    };
+    assert!(compare);
+    app.audit_opened(&session, thread_id, run.clone(), compare);
+    app.audit_updated(thread_id, &run, None);
+    assert_eq!(
+        std::iter::from_fn(|| ops.try_recv().ok())
+            .filter(|op| matches!(op, AppCommand::UserTurn { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn stale_retry_cannot_resubmit_a_newer_attempt_from_the_same_reviewer() {
+    use crate::audit::{AuditAction, menu};
+    use codex_app_server_protocol::ClientRequest;
+    let (mut app, mut events, mut ops) = crate::app::tests::make_test_app_with_channels().await;
+    let thread = ThreadId::new();
+    let (cloud, mut commands, _incoming) = CloudClient::channel(1);
+    let session = session(cloud);
+    display(&mut app, thread);
+    while ops.try_recv().is_ok() {}
+    let mut run = super::tests::completed_fixture();
+    run.reviewers[1].state = "failed".into();
+    app.audit_opened(&session, thread, run.clone(), false);
+    history(&mut events);
+    let item = menu::items(&run)
+        .into_iter()
+        .find(|i| matches!(i.action, AuditAction::Retry(_)))
+        .unwrap();
+    app.run_audit_action(
+        &session,
+        thread,
+        Ok(item.action),
+        Some((run.run_id.clone(), item.attempt)),
+    );
+    let command = commands.recv().await.unwrap();
+    assert!(
+        matches!(command.operation, CloudOperation::Request(r) if matches!(*r, ClientRequest::AuditRead { .. }))
+    );
+    let mut newer = run.reviewers[1].clone();
+    newer.attempt += 1;
+    run.reviewers.push(newer);
+    command
+        .response
+        .send(Ok(Ok(json!({"run":run,"data":null}))))
+        .unwrap();
+    assert!(
+        matches!(events.recv().await, Some(AppEvent::AuditError { thread_id, message })
+        if thread_id == thread && message.contains("has changed"))
+    );
+    assert!(commands.try_recv().is_err() && ops.try_recv().is_err());
 }

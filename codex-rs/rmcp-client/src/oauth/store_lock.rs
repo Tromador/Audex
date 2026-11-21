@@ -266,7 +266,7 @@ impl OAuthStoreLock {
 /// newer credential in File while a stale Secrets entry remains preferred.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum OAuthStoreLockFailure {
-    #[error("failed to resolve CODEX_HOME for MCP OAuth {store} aggregate-store lock")]
+    #[error("failed to resolve AUDEX_HOME for MCP OAuth {store} aggregate-store lock")]
     CodexHome {
         store: OAuthStore,
         #[source]

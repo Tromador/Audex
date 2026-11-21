@@ -59,6 +59,8 @@ export type { AsyncUserInputQuestion } from "./AsyncUserInputQuestion";
 export type { AttestationGenerateParams } from "./AttestationGenerateParams";
 export type { AttestationGenerateResponse } from "./AttestationGenerateResponse";
 export type { AuditCancelRequest } from "./AuditCancelRequest";
+export type { AuditDeleteRequest } from "./AuditDeleteRequest";
+export type { AuditDeleteResponse } from "./AuditDeleteResponse";
 export type { AuditInput } from "./AuditInput";
 export type { AuditListPage } from "./AuditListPage";
 export type { AuditListRequest } from "./AuditListRequest";

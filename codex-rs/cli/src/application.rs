@@ -25,16 +25,6 @@ pub const UPDATE_GUIDANCE: &str = "Audex uses local source packages. Rebuild wit
 pub fn initialise() -> anyhow::Result<()> {
     if IS_AUDEX {
         codex_install_context::initialise_audex_product();
-        if std::env::var_os("CODEX_HOME").is_none() {
-            let home = std::env::var_os("HOME")
-                .ok_or_else(|| anyhow::anyhow!("HOME is required for the Audex runtime home"))?;
-            let runtime_home = std::path::PathBuf::from(home).join(".chatgpt/Audex/codex-home");
-            std::fs::create_dir_all(&runtime_home)?;
-            // SAFETY: main calls this before creating threads or initialising libraries.
-            unsafe {
-                std::env::set_var("CODEX_HOME", runtime_home);
-            }
-        }
     }
     Ok(())
 }

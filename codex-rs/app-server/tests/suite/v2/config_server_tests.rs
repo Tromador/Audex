@@ -267,7 +267,7 @@ async fn stdin_token_startup(
         .await;
     let mut child = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
         .current_dir(home.path())
-        .env("CODEX_HOME", home.path())
+        .env("AUDEX_HOME", home.path())
         .env("CODEX_CA_CERTIFICATE", ca)
         .env("NO_PROXY", "127.0.0.1")
         .args(["-c", &format!("chatgpt_base_url={origin:?}")])

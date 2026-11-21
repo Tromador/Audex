@@ -50,7 +50,7 @@ impl TurnRequestProcessor {
                 .map_err(|e| invalid_request(format!("Retained audit: {e}")))?;
             let display = match &evidence {
                 Some(_) => format!(
-                    "/claude --model {model} --audit {} {}\nSource is live and may have changed since the review.",
+                    "/claude --model {model} --audit {} {}",
                     params.audit.as_deref().unwrap_or_default(),
                     params.message
                 ),

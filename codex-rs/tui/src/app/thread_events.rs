@@ -25,6 +25,7 @@ pub(super) enum ThreadBufferedEvent {
     HistoryEntryResponse(HistoryLookupResponse),
     FeedbackSubmission(FeedbackThreadEvent),
     AuditControlOutcome(std::result::Result<String, String>),
+    AuditReport(crate::audit::ReportPresentation),
 }
 
 pub(super) fn confirmed_user_message_ids<'a>(
@@ -137,7 +138,8 @@ impl ThreadEventStore {
         match event {
             ThreadBufferedEvent::Request(_)
             | ThreadBufferedEvent::FeedbackSubmission(_)
-            | ThreadBufferedEvent::AuditControlOutcome(_) => true,
+            | ThreadBufferedEvent::AuditControlOutcome(_)
+            | ThreadBufferedEvent::AuditReport(_) => true,
             ThreadBufferedEvent::Notification(notification) => matches!(
                 notification.as_ref(),
                 ServerNotification::HookStarted(_)
@@ -401,7 +403,8 @@ impl ThreadEventStore {
                 | ThreadBufferedEvent::Notification(_)
                 | ThreadBufferedEvent::HistoryEntryResponse(_)
                 | ThreadBufferedEvent::FeedbackSubmission(_)
-                | ThreadBufferedEvent::AuditControlOutcome(_) => None,
+                | ThreadBufferedEvent::AuditControlOutcome(_)
+                | ThreadBufferedEvent::AuditReport(_) => None,
             })
             .collect()
     }
@@ -431,7 +434,8 @@ impl ThreadEventStore {
                     ThreadBufferedEvent::Notification(_)
                     | ThreadBufferedEvent::HistoryEntryResponse(_)
                     | ThreadBufferedEvent::FeedbackSubmission(_)
-                    | ThreadBufferedEvent::AuditControlOutcome(_) => true,
+                    | ThreadBufferedEvent::AuditControlOutcome(_)
+                    | ThreadBufferedEvent::AuditReport(_) => true,
                 })
                 .cloned()
                 .collect(),

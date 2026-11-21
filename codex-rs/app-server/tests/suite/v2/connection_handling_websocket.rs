@@ -587,7 +587,7 @@ pub(super) async fn spawn_websocket_server_with_env(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .env("CODEX_HOME", codex_home)
+        .env("AUDEX_HOME", codex_home)
         .env("RUST_LOG", "warn")
         .env("OTEL_METRIC_EXPORT_INTERVAL", "200");
     for (key, value) in env_overrides {
@@ -728,7 +728,7 @@ async fn run_websocket_server_to_completion_with_args(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .env("CODEX_HOME", codex_home)
+        .env("AUDEX_HOME", codex_home)
         .env("RUST_LOG", "warn");
     timeout(DEFAULT_READ_TIMEOUT, cmd.output())
         .await

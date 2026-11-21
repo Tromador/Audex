@@ -15,7 +15,6 @@ Do not execute source, modify files, access the network or invent evidence.
 Do not seek or consume other reviewers' findings.
 Return the required structured JSON result with source paths and 1-based inclusive line ranges.
 Paths must be absolute or relative to the first working directory. An empty findings list is valid.
-The source is live and may change during review; say so wherever it matters.
 Every finding is an unverified model claim, not a proven defect.";
 
 pub(in crate::audex) struct PreparedNative {

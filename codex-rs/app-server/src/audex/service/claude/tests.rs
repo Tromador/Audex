@@ -679,6 +679,11 @@ async fn audit_conversation_launcher_exposes_results_and_live_source_without_leg
         let id = service.start(fixture.request(route, Input::Paths(fixture.sources.clone())))?;
         finished(&mut service, id).await?;
         let run_dir = service.run_directory(id);
+        let legacy_summary = format!(
+            "{}\nSource is live and may have changed since the review.\n",
+            fs::read_to_string(run_dir.join("summary.md"))?
+        );
+        fs::write(run_dir.join("summary.md"), &legacy_summary)?;
         let evidence = fixture.root().join("conversation");
         fs::create_dir(&evidence)?;
         fixture.script(
@@ -730,11 +735,20 @@ async fn audit_conversation_launcher_exposes_results_and_live_source_without_leg
             json!(attempt.join("result.json"))
         );
         assert_eq!(content["retained_run"], json!(run_dir.join("run.json")));
+        assert!(content.get("source_notice").is_none());
+        assert!(!content.to_string().contains("may have changed"));
+        assert!(!CONVERSATION_RULES.contains("Source is live"));
+        assert!(!crate::audex::reviewer::native::RULES.contains("may change"));
+        assert!(CONVERSATION_RULES.contains("Agreement is not verification"));
         assert!(
-            content["source_notice"]
+            content["retained_summary"]
                 .as_str()
                 .unwrap()
-                .contains("may have changed since the review")
+                .contains("# Audit summary")
+        );
+        assert_eq!(
+            fs::read_to_string(run_dir.join("summary.md"))?,
+            legacy_summary
         );
         assert_eq!(content["discussion"], json!(["prior discussion"]));
         fixture.cleaned()?;

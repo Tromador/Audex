@@ -226,7 +226,7 @@ async fn explicit_remote_control_startup_fails_when_disabled_by_requirements() -
         .join("app-server.sock");
     let transport =
         AppServerTransport::from_listen_url(&format!("unix://{}", socket_path.display()))?;
-    let _codex_home_guard = EnvVarGuard::set("CODEX_HOME", codex_home.path().as_os_str());
+    let _codex_home_guard = EnvVarGuard::set("AUDEX_HOME", codex_home.path().as_os_str());
 
     let result = timeout(
         STARTUP_TIMEOUT,
@@ -549,7 +549,7 @@ async fn stdio_eof_releases_thread_writer_with_pending_remote_control_enable() -
         .with_codex_home(codex_home.path())
         .without_auto_env()
         .with_env_overrides(&[(
-            "CODEX_SQLITE_HOME",
+            "AUDEX_SQLITE_HOME",
             Some(secondary_sqlite_home_path.as_ref()),
         )])
         .build_initialized()

@@ -96,7 +96,7 @@ impl SlashCommand {
     /// User-visible description shown in the popup.
     pub fn description(self) -> &'static str {
         match self {
-            SlashCommand::Audit => "start or retrieve a durable isolated source audit",
+            SlashCommand::Audit => "open active audit controls or start an isolated source audit",
             SlashCommand::Claude => "talk to Claude in this conversation; optionally --model MODEL",
             SlashCommand::Config => "configure Codex preferences",
             SlashCommand::Feedback => "send logs to maintainers or save a ZIP",

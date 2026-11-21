@@ -231,7 +231,6 @@ impl App {
         };
         match event {
             AppEvent::AuditCommand { thread_id, args } => self.audit_command(app_server, thread_id, args),
-            AppEvent::AuditPrompt => self.chat_widget.show_audit_prompt(),
             AppEvent::AuditConfirm { thread_id, params, decision } => {
                 if self.current_displayed_thread_id() == Some(thread_id) && self.audit_available(app_server) {
                     self.chat_widget.confirm_audit(params, decision);
@@ -239,8 +238,41 @@ impl App {
                     let _ = decision.send(false);
                 }
             }
+            AppEvent::AuditMenuLoaded { thread_id, run } => {
+                if self.current_displayed_thread_id() == Some(thread_id)
+                    && self.audits.reports.active_id(thread_id) == Some(run.run_id.as_str())
+                {
+                    let current = self.audits.runs.get(&(thread_id, run.run_id.clone()));
+                    let run = super::audit::merge_read(current, &run);
+                    self.chat_widget.show_active_audit(thread_id, &run);
+                }
+            }
+            AppEvent::AuditMenuAction { thread_id, run_id, action, attempt } => {
+                self.run_audit_action(app_server, thread_id, Ok(action), Some((run_id, attempt)));
+            }
+            AppEvent::AuditReport { thread_id, report } => self.enqueue_audit_report(thread_id, report).await,
             AppEvent::AuditListLoaded { thread_id, page } => {
-                if self.current_displayed_thread_id() == Some(thread_id) { self.chat_widget.show_audit_list(page); }
+                if self.current_displayed_thread_id() == Some(thread_id) {
+                    self.chat_widget.show_audit_list(page, self.audits.reports.active_id(thread_id));
+                }
+            }
+            AppEvent::AuditDeleteRequested { thread_id, run } => {
+                if self.current_displayed_thread_id() == Some(thread_id) {
+                    self.chat_widget.confirm_audit_delete(run);
+                }
+            }
+            AppEvent::AuditDeleteConfirmed { thread_id, run_id } => {
+                if self.current_displayed_thread_id() == Some(thread_id) {
+                    self.chat_widget.close_audit_history();
+                }
+                self.delete_audit(app_server, thread_id, run_id);
+            }
+            AppEvent::AuditDeleted { thread_id, run_id } => {
+                self.forget_audit(&run_id);
+                if self.current_displayed_thread_id() == Some(thread_id) {
+                    self.chat_widget.add_info_message("Audit deleted.".into(), None);
+                    self.audit_command(app_server, thread_id, "list".into());
+                }
             }
             AppEvent::AuditOpened { thread_id, run, compare } => self.audit_opened(app_server, thread_id, run, compare),
             AppEvent::AuditUpdated { thread_id, run, error } => self.audit_updated(thread_id, &run, error),

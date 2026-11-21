@@ -112,8 +112,8 @@ async fn project_markers_and_local_layers_prevent_projectless_classification() -
         (".git", "", ""),
         (".git", "", "nested"),
         (".git", "project_root_markers = []", "nested"),
-        (".codex", "", ""),
-        (".codex", "project_root_markers = ['.codex']", "nested"),
+        (".audex", "", ""),
+        (".audex", "project_root_markers = ['.codex']", "nested"),
         (
             ".company-root",
             "project_root_markers = ['.company-root']",
@@ -144,7 +144,7 @@ async fn project_markers_and_local_layers_prevent_projectless_classification() -
 #[tokio::test]
 async fn user_codex_home_is_not_a_project_layer() -> anyhow::Result<()> {
     let mut fixture = Fixture::new()?;
-    fixture.home = fixture.cwd.join(".codex");
+    fixture.home = fixture.cwd.join(".audex");
     std::fs::create_dir(&fixture.home)?;
     std::fs::write(fixture.home.join("config.toml"), "model = 'user-model'\n")?;
     assert!(fixture.load().await?.is_projectless());

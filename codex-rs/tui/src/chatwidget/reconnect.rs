@@ -45,6 +45,9 @@ impl ChatWidget {
                 self.restore_user_message_to_composer(message);
             }
         }
+        // Reconnect is a separate display phase; preserve the turn's elapsed time.
+        self.bottom_pane
+            .set_status_timer_origin(Some(Instant::now()));
         self.bottom_pane.ensure_status_indicator();
         self.bottom_pane
             .set_interrupt_hint_visible(/*visible*/ false);

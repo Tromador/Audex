@@ -63,7 +63,7 @@ impl ExecServerProcess {
     async fn start_command(mut command: Command, codex_home: TempDir) -> Result<Self> {
         let mut child = command
             .args(["exec-server", "--listen", "ws://127.0.0.1:0"])
-            .env("CODEX_HOME", codex_home.path())
+            .env("AUDEX_HOME", codex_home.path())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

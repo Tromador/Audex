@@ -1701,6 +1701,33 @@
       "title": "AuditCancelRequest",
       "type": "object"
     },
+    "AuditDeleteRequest": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "title": "AuditDeleteRequest",
+      "type": "object"
+    },
+    "AuditDeleteResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "title": "AuditDeleteResponse",
+      "type": "object"
+    },
     "AuditInput": {
       "oneOf": [
         {
@@ -1929,7 +1956,8 @@
         "findings",
         "finding",
         "output",
-        "diagnostics"
+        "diagnostics",
+        "report"
       ],
       "type": "string"
     },
@@ -2096,6 +2124,13 @@
         },
         "guidance": {
           "description": "Operator-named UTF-8 guidance file, read once at start.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guidanceText": {
+          "description": "Literal operator guidance, mutually exclusive with the guidance file.",
           "type": [
             "string",
             "null"
@@ -2648,6 +2683,30 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "description": "Request from the client to the server.",
       "oneOf": [
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "audit/delete"
+              ],
+              "title": "Audit/deleteRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AuditDeleteRequest"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Audit/deleteRequest",
+          "type": "object"
+        },
         {
           "properties": {
             "id": {

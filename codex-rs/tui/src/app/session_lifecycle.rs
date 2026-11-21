@@ -519,7 +519,13 @@ impl App {
                 store
                     .buffer
                     .iter()
-                    .filter(|event| matches!(event, ThreadBufferedEvent::AuditControlOutcome(_)))
+                    .filter(|event| {
+                        matches!(
+                            event,
+                            ThreadBufferedEvent::AuditControlOutcome(_)
+                                | ThreadBufferedEvent::AuditReport(_)
+                        )
+                    })
                     .cloned(),
             );
             if let Some(input) = store.input_state.clone() {
@@ -1212,6 +1218,7 @@ impl App {
                     }
                     ThreadBufferedEvent::HistoryEntryResponse(_)
                     | ThreadBufferedEvent::AuditControlOutcome(_)
+                    | ThreadBufferedEvent::AuditReport(_)
                     | ThreadBufferedEvent::FeedbackSubmission(_) => true,
                 });
                 let previous_pending = std::mem::take(&mut self.pending_app_server_requests);

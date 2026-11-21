@@ -91,7 +91,7 @@ async fn recommended_plugins_after_external_login(feature: RecommendationFeature
         .without_managed_config()
         .with_args(&["-c", "features.apps=true", "-c", "features.plugins=true"])
         .with_args(feature_args)
-        .with_env_overrides(&[("CODEX_SQLITE_HOME", Some(sqlite_home.as_ref()))])
+        .with_env_overrides(&[("AUDEX_SQLITE_HOME", Some(sqlite_home.as_ref()))])
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, app_server.initialize()).await??;

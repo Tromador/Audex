@@ -9,7 +9,7 @@ use tempfile::TempDir;
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
     let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
-    cmd.env("CODEX_HOME", codex_home)
+    cmd.env("AUDEX_HOME", codex_home)
         .env_remove("CODEX_ACCESS_TOKEN")
         .env_remove("CODEX_API_KEY")
         .env_remove("OPENAI_API_KEY")
@@ -160,7 +160,7 @@ fn app_server_keeps_sqlite_logs_in_overridden_sqlite_home() -> Result<()> {
     )?;
 
     codex_command(home.path())?
-        .env("CODEX_SQLITE_HOME", sqlite_home.path())
+        .env("AUDEX_SQLITE_HOME", sqlite_home.path())
         .env(
             "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
             home.path().join("managed_config.toml"),
@@ -174,6 +174,38 @@ fn app_server_keeps_sqlite_logs_in_overridden_sqlite_home() -> Result<()> {
     assert!(std::fs::metadata(sqlite_home.path().join("logs_2.sqlite"))?.len() > 0);
     assert!(!home.path().join("logs_2.sqlite").exists());
     assert!(!home.path().join("log/logs_2.sqlite").exists());
+    Ok(())
+}
+
+#[test]
+fn app_server_ignores_inherited_codex_sqlite_home() -> Result<()> {
+    for audex_override in [false, true] {
+        let home = TempDir::new()?;
+        let selected = TempDir::new()?;
+        let upstream = home.path().join("upstream-must-not-exist");
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[features]\nplugins = false\n",
+        )?;
+        let mut command = codex_command(home.path())?;
+        command
+            .env_remove("AUDEX_SQLITE_HOME")
+            .env("CODEX_SQLITE_HOME", &upstream)
+            .arg("app-server")
+            .write_stdin("");
+        if audex_override {
+            command.env("AUDEX_SQLITE_HOME", selected.path());
+        }
+        command.assert().success();
+        let expected = if audex_override {
+            selected.path()
+        } else {
+            home.path()
+        };
+        assert!(expected.join("state_5.sqlite").is_file());
+        assert!(expected.join("logs_2.sqlite").is_file());
+        assert!(!upstream.exists());
+    }
     Ok(())
 }
 
@@ -191,7 +223,7 @@ fn app_server_preserves_the_existing_sqlite_logs_symlink() -> Result<()> {
     )?;
 
     codex_command(home.path())?
-        .env_remove("CODEX_SQLITE_HOME")
+        .env_remove("AUDEX_SQLITE_HOME")
         .env(
             "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
             home.path().join("managed_config.toml"),
@@ -219,10 +251,10 @@ fn print_startup_config_preserves_project_login_restrictions() -> Result<()> {
         format!("[projects.{project_key}]\ntrust_level = \"trusted\"\n"),
     )?;
     std::fs::create_dir(project.path().join(".git"))?;
-    std::fs::create_dir(project.path().join(".codex"))?;
+    std::fs::create_dir(project.path().join(".audex"))?;
     for method in ["chatgpt", "api"] {
         std::fs::write(
-            project.path().join(".codex/config.toml"),
+            project.path().join(".audex/config.toml"),
             format!("forced_login_method = '{method}'\n"),
         )?;
         for sign_out in [None, Some("--startup-sign-out")] {
@@ -238,6 +270,65 @@ fn print_startup_config_preserves_project_login_restrictions() -> Result<()> {
                 json!([method])
             );
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn project_codex_configuration_is_ignored_and_audex_configuration_is_loaded() -> Result<()> {
+    let home = TempDir::new()?;
+    let project = TempDir::new()?;
+    let nested = project.path().join("nested");
+    let project_key =
+        serde_json::to_string(&codex_config::loader::project_trust_key(project.path()))?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!("forced_login_method = 'api'\n[projects.{project_key}]\ntrust_level = 'trusted'\n"),
+    )?;
+    std::fs::create_dir(project.path().join(".git"))?;
+    std::fs::write(project.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
+    std::fs::create_dir(&nested)?;
+    for directory in [project.path(), nested.as_path()] {
+        std::fs::create_dir(directory.join(".codex"))?;
+        std::fs::write(
+            directory.join(".codex/config.toml"),
+            "forced_login_method = 'chatgpt'\n",
+        )?;
+    }
+    let check = |expected: &str| -> Result<()> {
+        let mut command = codex_command(home.path())?;
+        command
+            .current_dir(&nested)
+            .args(["app-server", "--print-startup-config"]);
+        let output = command.assert().success();
+        let value: serde_json::Value = serde_json::from_slice(&output.get_output().stdout)?;
+        assert_eq!(
+            value["configRequirements"]["requirements"]["allowedLoginMethods"],
+            json!([expected])
+        );
+        Ok(())
+    };
+    check("api")?;
+    // Even malformed upstream configuration must never be parsed.
+    for directory in [project.path(), nested.as_path()] {
+        std::fs::write(
+            directory.join(".codex/config.toml"),
+            "[invalid upstream config",
+        )?;
+    }
+    check("api")?;
+    std::fs::create_dir(nested.join(".audex"))?;
+    std::fs::write(
+        nested.join(".audex/config.toml"),
+        "forced_login_method = 'chatgpt'\n",
+    )?;
+    check("chatgpt")?;
+    for directory in [project.path(), nested.as_path()] {
+        assert_eq!(
+            std::fs::read_to_string(directory.join(".codex/config.toml"))?,
+            "[invalid upstream config"
+        );
+        assert_eq!(std::fs::read_dir(directory.join(".codex"))?.count(), 1);
     }
     Ok(())
 }
@@ -314,8 +405,8 @@ async fn print_startup_config_is_independent_of_a_locked_history_database() -> R
     let binary = codex_utils_cargo_bin::cargo_bin("codex")?;
     let mut command = Command::new(&binary);
     command
-        .env("CODEX_HOME", home.path())
-        .env("CODEX_SQLITE_HOME", sqlite.path())
+        .env("AUDEX_HOME", home.path())
+        .env("AUDEX_SQLITE_HOME", sqlite.path())
         .env_remove("CODEX_ACCESS_TOKEN")
         .env_remove("CODEX_API_KEY")
         .env_remove("OPENAI_API_KEY")

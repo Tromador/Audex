@@ -23,7 +23,7 @@ fn compiled_identity_default_home_explicit_home_completion_and_update_fences() -
         let out = Command::new(executable("audex")?)
             .args(&command)
             .env("HOME", home.path())
-            .env_remove("CODEX_HOME")
+            .env_remove("AUDEX_HOME")
             .output()?;
         ensure!(
             out.status.success(),
@@ -37,21 +37,22 @@ fn compiled_identity_default_home_explicit_home_completion_and_update_fences() -
             command
         );
     }
-    ensure!(home.path().join(".chatgpt/Audex/codex-home").is_dir());
+    ensure!(home.path().join(".audex").is_dir());
+    ensure!(!home.path().join(".chatgpt").exists());
     ensure!(!home.path().join(".codex").exists());
     let explicit = home.path().join("explicit");
     std::fs::create_dir(&explicit)?;
     let out = Command::new(executable("audex")?)
         .arg("--version")
         .env("HOME", home.path())
-        .env("CODEX_HOME", &explicit)
+        .env("AUDEX_HOME", &explicit)
         .output()?;
     ensure!(out.status.success());
     for command in [vec!["update"], vec!["app-server", "daemon", "update"]] {
         let out = Command::new(executable("audex")?)
             .args(command)
             .env("HOME", home.path())
-            .env("CODEX_HOME", &explicit)
+            .env("AUDEX_HOME", &explicit)
             .output()?;
         ensure!(!out.status.success());
         ensure!(String::from_utf8_lossy(&out.stderr).contains("local source packages"));
@@ -61,18 +62,128 @@ fn compiled_identity_default_home_explicit_home_completion_and_update_fences() -
     let out = Command::new(&renamed)
         .arg("--version")
         .env("HOME", home.path())
-        .env("CODEX_HOME", &explicit)
+        .env("AUDEX_HOME", &explicit)
         .output()?;
     ensure!(String::from_utf8_lossy(&out.stdout).starts_with("audex "));
     let compatibility_home = tempfile::tempdir()?;
     let out = Command::new(executable("codex")?)
         .arg("--version")
         .env("HOME", compatibility_home.path())
-        .env_remove("CODEX_HOME")
+        .env_remove("AUDEX_HOME")
         .output()?;
     ensure!(out.status.success());
     ensure!(String::from_utf8_lossy(&out.stdout).starts_with("codex-cli "));
     ensure!(!compatibility_home.path().join(".chatgpt").exists());
+    Ok(())
+}
+
+#[test]
+fn audex_home_separates_configuration_and_authentication() -> Result<()> {
+    for (audex_set, codex_set) in [(false, false), (true, false), (false, true), (true, true)] {
+        let profile = tempfile::tempdir()?;
+        let selected = profile
+            .path()
+            .join(if audex_set { "selected" } else { ".audex" });
+        let upstream = profile.path().join(".codex");
+        std::fs::create_dir(&selected)?;
+        std::fs::create_dir(&upstream)?;
+        let poison = b"model = [invalid config";
+        std::fs::write(upstream.join("config.toml"), poison)?;
+        std::fs::write(
+            selected.join("config.toml"),
+            format!(
+                "cli_auth_credentials_store = 'file'\nforced_login_method = 'api'\n[projects.'{}']\ntrust_level = 'trusted'\n",
+                profile.path().display()
+            ),
+        )?;
+        std::fs::write(
+            selected.join("auth.json"),
+            r#"{"OPENAI_API_KEY":"sk-home-isolation-test"}"#,
+        )?;
+        // Home selection must remain fixed while arg0 loads the selected .env.
+        std::fs::write(
+            selected.join(".env"),
+            format!("AUDEX_HOME={}\n", upstream.display()),
+        )?;
+        let command = || -> Result<Command> {
+            let mut cmd = Command::new(executable("audex")?);
+            cmd.current_dir(profile.path())
+                .env("HOME", profile.path())
+                .env_remove("AUDEX_HOME")
+                .env_remove("CODEX_HOME")
+                .env_remove("AUDEX_SQLITE_HOME")
+                .env("CODEX_SQLITE_HOME", &upstream)
+                .env_remove("CODEX_ACCESS_TOKEN")
+                .env_remove("CODEX_API_KEY")
+                .env_remove("OPENAI_API_KEY")
+                .env_remove("OPENAI_FEDERATION_RULE_ID")
+                .env_remove("OPENAI_IDENTITY_TOKEN_FILE")
+                .env_remove("OPENAI_WORKLOAD_IDENTITY_CONTEXT");
+            if audex_set {
+                cmd.env("AUDEX_HOME", &selected);
+            }
+            if codex_set {
+                cmd.env("CODEX_HOME", &upstream);
+            }
+            Ok(cmd)
+        };
+        let out = command()?
+            .args(["app-server", "--print-startup-config"])
+            .output()?;
+        ensure!(
+            out.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let config: Value = serde_json::from_slice(&out.stdout)?;
+        ensure!(
+            config["configRequirements"]["requirements"]["allowedLoginMethods"] == json!(["api"])
+        );
+        let out = command()?.args(["login", "status"]).output()?;
+        ensure!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        ensure!(String::from_utf8_lossy(&out.stderr).contains("API key configured"));
+        ensure!(std::fs::read(upstream.join("config.toml"))? == poison);
+        ensure!(
+            std::fs::read_dir(&upstream)?.count() == 1,
+            "CODEX_HOME was modified"
+        );
+        ensure!(!profile.path().join(".chatgpt").exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn invalid_audex_home_does_not_fall_back_to_codex_home() -> Result<()> {
+    let profile = tempfile::tempdir()?;
+    let file = profile.path().join("file");
+    std::fs::write(&file, "not a directory")?;
+    for (invalid, reason) in [
+        (profile.path().join("missing"), "does not exist"),
+        (file, "not a directory"),
+    ] {
+        let output = Command::new(executable("audex")?)
+            .args(["app-server", "--print-startup-config"])
+            .env("HOME", profile.path())
+            .env("AUDEX_HOME", invalid)
+            .env("CODEX_HOME", profile.path())
+            .output()?;
+        ensure!(!output.status.success());
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        ensure!(
+            text.contains("AUDEX_HOME") && text.contains(reason),
+            "{text}"
+        );
+        ensure!(!text.contains("CODEX_HOME"), "{text}");
+    }
     Ok(())
 }
 
@@ -170,7 +281,7 @@ plugin_discovery_prefetch=false
         );
         let identity = Command::new(selected.join("bin/codex"))
             .arg("--version")
-            .env("CODEX_HOME", daemon.home.path())
+            .env("AUDEX_HOME", daemon.home.path())
             .output()?;
         ensure!(String::from_utf8_lossy(&identity.stdout).starts_with("audex "));
         let audit = daemon.command().args(["audit", "list"]).output()?;
@@ -196,7 +307,7 @@ plugin_discovery_prefetch=false
             "PATH",
             format!("{}:/usr/bin:/bin", package.join("bin").display()),
         )
-        .env("CODEX_HOME", daemon.home.path())
+        .env("AUDEX_HOME", daemon.home.path())
         .output()?;
     ensure!(fresh_shell.status.success());
     ensure!(
@@ -234,7 +345,7 @@ finally:
     let tui = Command::new("python3")
         .arg(script)
         .arg(&daemon.codex)
-        .env("CODEX_HOME", daemon.home.path())
+        .env("AUDEX_HOME", daemon.home.path())
         .output()?;
     ensure!(
         tui.status.success(),

@@ -67,7 +67,7 @@ pub(super) enum UserMessageSource {
     DirectEnter,
     QuestionAnswer,
     /// Application follow-up that must not dismiss the operator's pending questions.
-    InternalFollowUp,
+    InternalFollowUp(Option<uuid::Uuid>),
     SafetyRecourse,
 }
 

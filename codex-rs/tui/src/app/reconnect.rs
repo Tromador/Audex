@@ -538,6 +538,7 @@ impl App {
                     event,
                     ThreadBufferedEvent::Notification(_)
                         | ThreadBufferedEvent::AuditControlOutcome(_)
+                        | ThreadBufferedEvent::AuditReport(_)
                 )
             });
             if let Some(input) = store.input_state.as_mut() {
@@ -590,7 +591,13 @@ impl App {
                     .await
                     .buffer
                     .iter()
-                    .filter(|event| matches!(event, ThreadBufferedEvent::AuditControlOutcome(_)))
+                    .filter(|event| {
+                        matches!(
+                            event,
+                            ThreadBufferedEvent::AuditControlOutcome(_)
+                                | ThreadBufferedEvent::AuditReport(_)
+                        )
+                    })
                     .cloned()
                     .collect::<Vec<_>>()
             } else {

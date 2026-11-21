@@ -382,12 +382,12 @@ Review carefully."""
 
 #[test]
 fn subagent_target_preserves_dotted_file_stem() {
-    let target_agents = Path::new("/repo/.codex/agents");
+    let target_agents = Path::new("/repo/.audex/agents");
     let source_file = source_path("agents/security.audit.md");
 
     assert_eq!(
         subagent_target_file(&source_file, target_agents),
-        Some(PathBuf::from("/repo/.codex/agents/security.audit.toml"))
+        Some(PathBuf::from("/repo/.audex/agents/security.audit.toml"))
     );
 }
 
@@ -733,7 +733,7 @@ fn hook_script_copy_keeps_existing_target_scripts() {
     let root = tempfile::TempDir::new().expect("tempdir");
     let source_external_agent_dir = root.path().join(external_agent_config_dir());
     let source_hooks = source_external_agent_dir.join(EXTERNAL_AGENT_HOOKS_SUBDIR);
-    let target_config_dir = root.path().join(".codex");
+    let target_config_dir = root.path().join(".audex");
     let target_hooks = target_config_dir.join(EXTERNAL_AGENT_MIGRATED_HOOKS_SUBDIR);
     fs::create_dir_all(&source_hooks).expect("create source hooks");
     fs::create_dir_all(&target_hooks).expect("create target hooks");

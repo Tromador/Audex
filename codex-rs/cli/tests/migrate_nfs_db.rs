@@ -15,7 +15,7 @@ async fn migration_requires_consent_and_preserves_shared_database_mode() -> Resu
     let sqlite = SqliteConfig::new_for_testing(home.path().to_path_buf().try_into()?);
     let mut empty = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
     let empty = empty
-        .env("CODEX_HOME", home.path())
+        .env("AUDEX_HOME", home.path())
         .env(codex_state::SQLITE_HOME_ENV, home.path())
         .arg("migrate-nfs-db")
         .write_stdin("y\n")
@@ -38,7 +38,7 @@ async fn migration_requires_consent_and_preserves_shared_database_mode() -> Resu
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(/*mode*/ 0o600))?;
     let mut command = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
     let declined = command
-        .env("CODEX_HOME", home.path())
+        .env("AUDEX_HOME", home.path())
         .env(codex_state::SQLITE_HOME_ENV, home.path())
         .arg("migrate-nfs-db")
         .write_stdin("n\n")
@@ -60,7 +60,7 @@ async fn migration_requires_consent_and_preserves_shared_database_mode() -> Resu
 
     let mut command = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
     command
-        .env("CODEX_HOME", home.path())
+        .env("AUDEX_HOME", home.path())
         .env(codex_state::SQLITE_HOME_ENV, home.path())
         .arg("migrate-nfs-db")
         .write_stdin("n\n")
@@ -74,7 +74,7 @@ async fn migration_requires_consent_and_preserves_shared_database_mode() -> Resu
     std::fs::write(sqlite.logs_db_path(), b"corrupt SQLite database")?;
     let mut partial = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
     let partial = partial
-        .env("CODEX_HOME", home.path())
+        .env("AUDEX_HOME", home.path())
         .env(codex_state::SQLITE_HOME_ENV, home.path())
         .arg("migrate-nfs-db")
         .write_stdin("y\n")
@@ -101,7 +101,7 @@ async fn migration_requires_consent_and_preserves_shared_database_mode() -> Resu
 
     let mut command = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
     command
-        .env("CODEX_HOME", home.path())
+        .env("AUDEX_HOME", home.path())
         .env(codex_state::SQLITE_HOME_ENV, home.path())
         .arg("migrate-nfs-db")
         .write_stdin("y\n")

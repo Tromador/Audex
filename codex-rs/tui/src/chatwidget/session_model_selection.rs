@@ -84,6 +84,7 @@ impl ChatWidget {
         let sparkle_thread = self.sparkle_thread_for_picker_action(&model);
         let scoped = self.scope_model_picker_event();
         Some(SelectionSecondaryAction {
+            keep_open: false,
             key,
             footer_hint: hints.into(),
             action: Box::new(move |tx| {

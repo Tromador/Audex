@@ -15,7 +15,7 @@ impl UserVerificationKeyNamespace {
     pub fn new(account_user_id: &str) -> Self {
         let identity = URL_SAFE_NO_PAD.encode(Sha256::digest(account_user_id.as_bytes()));
         Self {
-            label: format!("com.openai.codex.user-verification.plugin-service.v1.{identity}"),
+            label: format!("com.openai.audex.user-verification.plugin-service.v1.{identity}"),
         }
     }
 }

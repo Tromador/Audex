@@ -148,7 +148,7 @@ async fn selected_executor_discovers_browser_mcp_with_executor_only_bearer_token
         .args(["exec-server", "--listen", "ws://127.0.0.1:0"])
         .stdout(Stdio::piped())
         .kill_on_drop(true)
-        .env("CODEX_HOME", executor_home.path())
+        .env("AUDEX_HOME", executor_home.path())
         .env(PROJECT_MCP_BEARER_ENV_NAME, PROJECT_MCP_BEARER_TOKEN)
         .env("HTTP_PROXY", format!("http://{http_addr}"))
         .spawn()?;
@@ -318,7 +318,7 @@ async fn legacy_executor_blocks_plugin_host_credentials_and_keeps_host_owned_mcp
         .args(["exec-server", "--listen", "ws://127.0.0.1:0"])
         .stdout(Stdio::piped())
         .kill_on_drop(true)
-        .env("CODEX_HOME", executor_home.path())
+        .env("AUDEX_HOME", executor_home.path())
         .env(TOKEN_ENV, EXECUTOR_TOKEN)
         .spawn()?;
     let stdout = executor.stdout.take().expect("executor stdout is piped");
@@ -575,7 +575,7 @@ async fn cached_executor_mcp_cannot_read_host_token_after_capability_downgrade()
         .args(["exec-server", "--listen", "ws://127.0.0.1:0"])
         .stdout(Stdio::piped())
         .kill_on_drop(true)
-        .env("CODEX_HOME", executor_home.path())
+        .env("AUDEX_HOME", executor_home.path())
         .env(TOKEN_ENV, EXECUTOR_TOKEN)
         .spawn()?;
     let mut lines = BufReader::new(executor.stdout.take().expect("executor stdout")).lines();
@@ -1089,7 +1089,7 @@ async fn selected_executor_plugin_exposes_its_mcps_only_to_that_thread() -> Resu
         .args(["exec-server", "--listen", "ws://127.0.0.1:0"])
         .stdout(Stdio::piped())
         .kill_on_drop(true)
-        .env("CODEX_HOME", executor_home.path())
+        .env("AUDEX_HOME", executor_home.path())
         .env(EXECUTOR_ENV_NAME, EXECUTOR_ENV_VALUE)
         .env(EXECUTOR_HTTP_AUTH_ENV_NAME, EXECUTOR_HTTP_AUTH_ENV_VALUE)
         .env("HTTP_PROXY", format!("http://{http_addr}"))

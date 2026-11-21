@@ -138,11 +138,11 @@ impl ResumeCwdMode {
 #[serde(rename_all = "lowercase")]
 pub enum AuthCredentialsStoreMode {
     #[default]
-    /// Persist credentials in CODEX_HOME/auth.json.
+    /// Persist credentials in AUDEX_HOME/auth.json.
     File,
     /// Persist credentials in the keyring. Fail if unavailable.
     Keyring,
-    /// Use keyring when available; otherwise, fall back to a file in CODEX_HOME.
+    /// Use keyring when available; otherwise, fall back to a file in AUDEX_HOME.
     Auto,
     /// Store credentials in memory only for the current process.
     Ephemeral,
@@ -158,7 +158,7 @@ pub enum OAuthCredentialsStoreMode {
     /// Credentials stored in the keyring will only be readable by Codex unless the user explicitly grants access via OS-level keyring access.
     #[default]
     Auto,
-    /// CODEX_HOME/.credentials.json
+    /// AUDEX_HOME/.credentials.json
     /// This file will be readable to Codex and other applications running as the same user.
     File,
     /// Keyring when available, otherwise fail.
@@ -220,7 +220,7 @@ pub enum UriBasedFileOpener {
     None,
 }
 
-/// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
+/// Settings that govern if and what will be written to `~/.audex/history.jsonl`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[serde(default)]
 #[schemars(deny_unknown_fields)]
@@ -639,7 +639,7 @@ pub enum OtelExporterKind {
 #[schemars(deny_unknown_fields)]
 pub struct OtelConfigToml {
     /// Command that prints a JSON object of HTTP headers for explicit OTLP HTTP exporters.
-    /// Runs from CODEX_HOME. Repository-local configuration cannot set OTel options.
+    /// Runs from AUDEX_HOME. Repository-local configuration cannot set OTel options.
     pub headers_helper: Option<String>,
     /// Interval between helper executions in milliseconds. Defaults to 29 minutes.
     pub headers_helper_refresh_interval_ms: Option<NonZeroU64>,
@@ -1039,13 +1039,13 @@ pub struct Tui {
     /// Syntax highlighting theme name (kebab-case).
     ///
     /// When set, overrides automatic light/dark theme detection.
-    /// Use `/theme` in the TUI or see `$CODEX_HOME/themes` for custom themes.
+    /// Use `/theme` in the TUI or see `$AUDEX_HOME/themes` for custom themes.
     #[serde(default)]
     pub theme: Option<String>,
 
     /// Pet id to preselect in the terminal pet picker.
     ///
-    /// Custom pet ids resolve against CODEX_HOME/pets/<pet-id>/pet.json.
+    /// Custom pet ids resolve against AUDEX_HOME/pets/<pet-id>/pet.json.
     #[serde(default)]
     pub pet: Option<String>,
 

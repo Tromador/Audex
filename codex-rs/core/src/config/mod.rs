@@ -1026,14 +1026,14 @@ pub struct Config {
     /// Memories subsystem settings.
     pub memories: MemoriesConfig,
 
-    /// Directory containing all Codex state (defaults to `~/.codex` but can be
-    /// overridden by the `CODEX_HOME` environment variable).
+    /// Directory containing all Codex state (defaults to `~/.audex` but can be
+    /// overridden by the `AUDEX_HOME` environment variable).
     pub codex_home: AbsolutePathBuf,
 
     /// Resolved configuration shared by all Codex SQLite databases.
     pub sqlite: codex_state::SqliteConfig,
 
-    /// Directory for log files (defaults to `$CODEX_HOME/log`).
+    /// Directory for log files (defaults to `$AUDEX_HOME/log`).
     /// SQLite logs use this directory only when `log_dir` is explicitly configured
     /// and no managed `sqlite_home` requirement applies.
     pub log_dir: PathBuf,
@@ -5419,13 +5419,13 @@ fn normalize_guardian_policy_config(value: Option<&str>) -> Option<String> {
     })
 }
 
-/// Returns the path to the Codex configuration directory, which can be
-/// specified by the `CODEX_HOME` environment variable. If not set, defaults to
-/// `~/.codex`.
+/// Returns the path to the Audex configuration directory, which can be
+/// specified by the `AUDEX_HOME` environment variable. If not set, defaults to
+/// `~/.audex`.
 ///
-/// - If `CODEX_HOME` is set, the value must exist and be a directory. The
+/// - If `AUDEX_HOME` is set, the value must exist and be a directory. The
 ///   value will be canonicalized and this function will Err otherwise.
-/// - If `CODEX_HOME` is not set, this function does not verify that the
+/// - If `AUDEX_HOME` is not set, this function does not verify that the
 ///   directory exists.
 pub fn find_codex_home() -> std::io::Result<AbsolutePathBuf> {
     codex_utils_home_dir::find_codex_home()

@@ -336,7 +336,7 @@ async fn reduce_with_recording_binary(
     bundle: &Path,
 ) -> Result<RolloutTrace> {
     let reduced = tokio::process::Command::new(codex)
-        .env("CODEX_HOME", home)
+        .env("AUDEX_HOME", home)
         .args(["debug", "trace-reduce"])
         .arg(bundle)
         .output()

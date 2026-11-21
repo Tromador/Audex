@@ -185,6 +185,9 @@ def test_file_backed_audit_contract_round_trips_all_read_views():
         payload = {"runId": "run", "view": view, "reviewer": "1", "offset": 2, "limit": 3}
         parsed = AuditReadRequest.model_validate(payload)
         assert parsed.model_dump(mode="json", by_alias=True, exclude_unset=True) == payload
+    report = {"runId": "run", "view": "report", "reviewer": "1", "attempt": 2}
+    parsed_report = AuditReadRequest.model_validate(report)
+    assert parsed_report.model_dump(mode="json", by_alias=True, exclude_unset=True) == report
     payload = {
         "input": {"type": "paths", "paths": ["first", "second/a.rs"]},
         "cwd": "/source",
@@ -192,5 +195,9 @@ def test_file_backed_audit_contract_round_trips_all_read_views():
         "reviewers": [{"route": "native", "model": "chosen", "effort": "high"}],
         "guidance": "AUDEX.md",
     }
+    parsed = AuditStartRequest.model_validate(payload)
+    assert parsed.model_dump(mode="json", by_alias=True, exclude_unset=True) == payload
+    del payload["guidance"]
+    payload["guidanceText"] = "Check filename handling"
     parsed = AuditStartRequest.model_validate(payload)
     assert parsed.model_dump(mode="json", by_alias=True, exclude_unset=True) == payload

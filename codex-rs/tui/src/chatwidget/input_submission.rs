@@ -314,7 +314,7 @@ impl ChatWidget {
                 CloudSubmissionIntent::StartOrSteer,
                 UserMessageSource::Prompt,
             ),
-            UserMessageSource::Prompt | UserMessageSource::InternalFollowUp => {
+            UserMessageSource::Prompt | UserMessageSource::InternalFollowUp(_) => {
                 (CloudSubmissionIntent::StartIfIdle, source)
             }
             UserMessageSource::QuestionAnswer => (
@@ -505,7 +505,7 @@ impl ChatWidget {
         });
         let service_tier = self.service_tier_update_for_core();
         let active_permission_profile = self.config.permissions.active_permission_profile();
-        let op = AppCommand::user_turn(
+        let mut op = AppCommand::user_turn(
             if source == UserMessageSource::SafetyRecourse {
                 "safety_recourse_follow_up"
             } else {
@@ -531,6 +531,13 @@ impl ChatWidget {
             text_elements,
             mention_bindings,
         };
+        if let UserMessageSource::InternalFollowUp(audit) = source
+            && let AppCommand::UserTurn {
+                audit_comparison, ..
+            } = &mut op
+        {
+            *audit_comparison = audit;
+        }
 
         // App-event submissions are handled serially, and turn/start can wait on remote work.
         // Queue the optimistic prompt first so the user's input is visible while that happens.
@@ -555,7 +562,7 @@ impl ChatWidget {
         }
         if !matches!(
             source,
-            UserMessageSource::QuestionAnswer | UserMessageSource::InternalFollowUp
+            UserMessageSource::QuestionAnswer | UserMessageSource::InternalFollowUp(_)
         ) {
             self.bottom_pane.clear_pending_questions();
         }

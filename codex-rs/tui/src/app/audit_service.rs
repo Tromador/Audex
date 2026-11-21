@@ -4,17 +4,65 @@ use codex_app_server_protocol::{AuditProgress, AuditRun};
 
 #[derive(Default)]
 pub(super) struct AuditUiState {
-    runs: HashMap<(ThreadId, String), AuditRun>,
+    pub(super) runs: HashMap<(ThreadId, String), AuditRun>,
     pub(super) reports: crate::audit::ReportContexts,
     awaiting_comparison: std::collections::HashSet<(ThreadId, String)>,
     compared_runs: std::collections::HashSet<String>,
+    // A read already in flight must not restore a deleted selection.
+    deleted_runs: std::collections::HashSet<String>,
     pending_errors: HashMap<(ThreadId, String), String>,
     ready_comparisons: HashMap<ThreadId, Vec<String>>,
     displayed: HashMap<(ThreadId, String), String>,
-    summaries: HashMap<(ThreadId, String), String>,
 }
 
 impl App {
+    pub(super) async fn enqueue_audit_report(
+        &mut self,
+        thread_id: ThreadId,
+        report: crate::audit::ReportPresentation,
+    ) {
+        let event = super::thread_events::ThreadBufferedEvent::AuditReport(report);
+        self.ensure_thread_channel(thread_id)
+            .store
+            .lock()
+            .await
+            .push_buffered_event(event.clone());
+        if self.current_displayed_thread_id() == Some(thread_id) {
+            self.handle_thread_event_now(event);
+        }
+    }
+    pub(super) fn delete_audit(
+        &self,
+        session: &AppServerSession,
+        thread_id: ThreadId,
+        run_id: String,
+    ) {
+        if self.current_displayed_thread_id() != Some(thread_id) || !self.audit_available(session) {
+            return;
+        }
+        let client = codex_app_server_client::audit::AuditClient::new(session.request_handle());
+        let events = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            match client.delete(run_id.clone()).await {
+                Ok(()) => events.send(AppEvent::AuditDeleted { thread_id, run_id }),
+                Err(error) => events.send(AppEvent::AuditError {
+                    thread_id,
+                    message: format!("Could not delete audit: {error}"),
+                }),
+            }
+        });
+    }
+    pub(super) fn forget_audit(&mut self, id: &str) {
+        self.audits.deleted_runs.insert(id.to_owned());
+        self.audits.reports.forget(id);
+        self.audits.runs.retain(|(_, run), _| run != id);
+        self.audits.awaiting_comparison.retain(|(_, run)| run != id);
+        self.audits.pending_errors.retain(|(_, run), _| run != id);
+        self.audits.displayed.retain(|(_, run), _| run != id);
+        for runs in self.audits.ready_comparisons.values_mut() {
+            runs.retain(|run| run != id);
+        }
+    }
     pub(super) fn audit_available(&self, session: &AppServerSession) -> bool {
         !session.uses_embedded_app_server()
             && !crate::uses_remote_workspace_or_environment(
@@ -28,7 +76,32 @@ impl App {
         thread_id: ThreadId,
         args: String,
     ) {
+        let action = if args.trim().is_empty() {
+            match self.audits.reports.active_id(thread_id) {
+                Some(id) => Ok(crate::audit::AuditAction::OpenMenu(id.to_owned())),
+                None => crate::audit::parse_command("list"),
+            }
+        } else {
+            crate::audit::parse_command(&args)
+        };
+        self.run_audit_action(session, thread_id, action, None);
+    }
+
+    pub(super) fn run_audit_action(
+        &mut self,
+        session: &AppServerSession,
+        thread_id: ThreadId,
+        action: Result<crate::audit::AuditAction, String>,
+        menu_selection: Option<(String, Option<u32>)>,
+    ) {
         if self.current_displayed_thread_id() != Some(thread_id) {
+            return;
+        }
+        if let Some((id, _)) = &menu_selection
+            && self.audits.reports.active_id(thread_id) != Some(id.as_str())
+        {
+            self.chat_widget
+                .add_error_message("The active audit has changed. Reopen /audit.".into());
             return;
         }
         if !self.audit_available(session) {
@@ -39,11 +112,17 @@ impl App {
         let events = self.app_event_tx.clone();
         tokio::spawn(async move {
             let result = async {
+                let action = action?;
+                if let Some((id, attempt)) = menu_selection {
+                    let client = codex_app_server_client::audit::AuditClient::new(handle.clone());
+                    crate::audit::menu::validate_control(&client, id, &action, attempt).await?;
+                }
                 crate::audit::execute(
                     handle,
                     thread_id,
-                    crate::audit::parse_command(&args)?,
+                    action,
                     events.clone(),
+                    crate::audit::AuditOrigin::Operator,
                 )
                 .await
             }
@@ -60,6 +139,9 @@ impl App {
         run: AuditRun,
         compare: bool,
     ) {
+        if self.audits.deleted_runs.contains(&run.run_id) {
+            return;
+        }
         let key = (thread, run.run_id.clone());
         if (compare || !run.complete)
             && !self.audits.compared_runs.contains(&run.run_id)
@@ -72,6 +154,7 @@ impl App {
             self.audits.awaiting_comparison.insert(key.clone());
         }
         // An explicit read/picker selection shows the current counts on demand.
+        self.audits.reports.stage(thread, &run);
         self.audits.displayed.remove(&key);
         self.audits.runs.insert(key, run.clone());
         self.audit_updated(thread, &run, None);
@@ -134,14 +217,25 @@ impl App {
         run: &AuditRun,
         error: Option<String>,
     ) {
+        if self.audits.deleted_runs.contains(&run.run_id) {
+            return;
+        }
         let key = (thread, run.run_id.clone());
         if let Some(error) = error {
             self.audits.pending_errors.insert(key.clone(), error);
         }
         let merged = merge_read(self.audits.runs.get(&key), run);
         let run = &merged;
+        let newly_complete = run.complete
+            && self
+                .audits
+                .runs
+                .get(&key)
+                .is_none_or(|previous| !previous.complete);
         self.audits.runs.insert(key.clone(), run.clone());
-        self.audits.reports.stage(thread, run);
+        if newly_complete {
+            self.audits.reports.stage(thread, run);
+        }
         if run.complete
             && self.audits.awaiting_comparison.remove(&key)
             && crate::audit::latest(run)
@@ -155,7 +249,7 @@ impl App {
                 .ready_comparisons
                 .entry(thread)
                 .or_default()
-                .push(crate::audit::comparison_prompt(run));
+                .push(run.run_id.clone());
         }
         if self.current_displayed_thread_id() != Some(thread) {
             return;
@@ -171,16 +265,6 @@ impl App {
             self.audits.displayed.insert(key.clone(), progress_key);
             self.chat_widget
                 .add_info_message(crate::audit::progress(run), None);
-        }
-        if let Some(summary) = &run.summary
-            && self.audits.summaries.get(&key) != Some(summary)
-        {
-            self.audits.summaries.insert(key.clone(), summary.clone());
-            let mut lines = Vec::new();
-            crate::markdown::append_markdown(summary, None, None, &mut lines);
-            self.chat_widget.add_plain_history_lines(lines);
-            self.chat_widget
-                .add_info_message(run.source_notice.clone(), None);
         }
         if let Some(error) = self.audits.pending_errors.remove(&key) {
             self.chat_widget.add_error_message(error);
@@ -204,9 +288,18 @@ impl App {
         if self.current_displayed_thread_id() != Some(thread) {
             return;
         }
-        if let Some(prompts) = self.audits.ready_comparisons.remove(&thread) {
-            for prompt in prompts {
-                if !self.chat_widget.queue_internal_follow_up(prompt) {
+        if let Some(runs) = self.audits.ready_comparisons.remove(&thread) {
+            for id in runs {
+                let Some(run) = self.audits.runs.get(&(thread, id.clone())) else {
+                    continue;
+                };
+                let Ok(id) = uuid::Uuid::parse_str(&id) else {
+                    continue;
+                };
+                if !self.chat_widget.queue_internal_follow_up(
+                    format!("Compare completed audit: {}", crate::audit::label(run)),
+                    Some(id),
+                ) {
                     self.chat_widget.add_error_message("The automatic comparison could not be queued. Findings remain available through audit_read.".into());
                 }
             }
@@ -226,7 +319,7 @@ impl App {
 
 // Responses can overtake notifications. Never replace a known terminal attempt
 // with its earlier queued/running view, or lose an attempt started by operator retry.
-fn merge_read(current: Option<&AuditRun>, incoming: &AuditRun) -> AuditRun {
+pub(super) fn merge_read(current: Option<&AuditRun>, incoming: &AuditRun) -> AuditRun {
     let Some(current) = current else {
         return incoming.clone();
     };

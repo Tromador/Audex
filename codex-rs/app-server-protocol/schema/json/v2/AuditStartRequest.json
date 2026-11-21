@@ -93,6 +93,13 @@
         "null"
       ]
     },
+    "guidanceText": {
+      "description": "Literal operator guidance, mutually exclusive with the guidance file.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "input": {
       "$ref": "#/definitions/AuditInput"
     },

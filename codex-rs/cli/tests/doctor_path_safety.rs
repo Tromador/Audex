@@ -50,7 +50,7 @@ impl Fixture {
             // Translate the fixture before the timed diagnostic command.
             anyhow::ensure!(
                 std::process::Command::new(&program)
-                    .env("CODEX_HOME", &home)
+                    .env("AUDEX_HOME", &home)
                     .arg("--version")
                     .output()?
                     .status
@@ -119,7 +119,7 @@ wire_api = "responses"
         let mut command = assert_cmd::Command::new(&self.program);
         command
             .current_dir(&self.workspace)
-            .env("CODEX_HOME", &self.home)
+            .env("AUDEX_HOME", &self.home)
             .env("HOME", self.root.path())
             .env("PATH", &self.path)
             .env("CODEX_TEST_HELPER_MARKER", &self.marker)

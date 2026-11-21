@@ -383,7 +383,7 @@ fn registered_non_tty_cmd_forwards_env_output_and_exit() {
         crate::registered_core_requested(),
         "registered Core opt-in is required"
     );
-    let codex_home = PathBuf::from(std::env::var_os("CODEX_HOME").expect("fixture CODEX_HOME"));
+    let codex_home = PathBuf::from(std::env::var_os("AUDEX_HOME").expect("fixture CODEX_HOME"));
     assert!(
         crate::app_package::registered_setup_is_ready(&codex_home)
             .expect("validate the installed package and service receipt"),

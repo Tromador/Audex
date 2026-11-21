@@ -238,6 +238,18 @@
       ],
       "type": "object"
     },
+    "AuditDeleteRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "type": "object"
+    },
     "AuditInput": {
       "oneOf": [
         {
@@ -379,7 +391,8 @@
         "findings",
         "finding",
         "output",
-        "diagnostics"
+        "diagnostics",
+        "report"
       ],
       "type": "string"
     },
@@ -433,6 +446,13 @@
         },
         "guidance": {
           "description": "Operator-named UTF-8 guidance file, read once at start.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guidanceText": {
+          "description": "Literal operator guidance, mutually exclusive with the guidance file.",
           "type": [
             "string",
             "null"
@@ -6946,6 +6966,30 @@
   },
   "description": "Request from the client to the server.",
   "oneOf": [
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "audit/delete"
+          ],
+          "title": "Audit/deleteRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AuditDeleteRequest"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Audit/deleteRequest",
+      "type": "object"
+    },
     {
       "properties": {
         "id": {

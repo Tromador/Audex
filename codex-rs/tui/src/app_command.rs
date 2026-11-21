@@ -128,6 +128,7 @@ pub(crate) enum AppCommand {
     },
     ClaudeTurn {
         audit: Option<String>,
+        no_audit: bool,
         message: String,
         model: Option<String>,
     },
@@ -135,6 +136,8 @@ pub(crate) enum AppCommand {
         command: String,
     },
     UserTurn {
+        /// Retained evidence is attached privately at submission, never as visible input.
+        audit_comparison: Option<uuid::Uuid>,
         turn_trigger: &'static str,
         cloud_submission: CloudSubmissionIntent,
         client_user_message_id: String,
@@ -259,6 +262,7 @@ impl AppCommand {
         collaboration_mode: Option<CollaborationMode>,
     ) -> Self {
         Self::UserTurn {
+            audit_comparison: None,
             turn_trigger,
             cloud_submission,
             client_user_message_id,

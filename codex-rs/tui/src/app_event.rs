@@ -359,15 +359,40 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
         args: String,
     },
-    AuditPrompt,
+    AuditMenuLoaded {
+        thread_id: ThreadId,
+        run: codex_app_server_protocol::AuditRun,
+    },
+    AuditMenuAction {
+        thread_id: ThreadId,
+        run_id: String,
+        action: crate::audit::AuditAction,
+        attempt: Option<u32>,
+    },
     AuditConfirm {
         thread_id: ThreadId,
         params: codex_app_server_protocol::AuditStartRequest,
         decision: tokio::sync::oneshot::Sender<bool>,
     },
+    AuditReport {
+        thread_id: ThreadId,
+        report: crate::audit::ReportPresentation,
+    },
     AuditListLoaded {
         thread_id: ThreadId,
         page: codex_app_server_protocol::AuditListPage,
+    },
+    AuditDeleteRequested {
+        thread_id: ThreadId,
+        run: codex_app_server_protocol::AuditRun,
+    },
+    AuditDeleteConfirmed {
+        thread_id: ThreadId,
+        run_id: String,
+    },
+    AuditDeleted {
+        thread_id: ThreadId,
+        run_id: String,
     },
     AuditOpened {
         thread_id: ThreadId,

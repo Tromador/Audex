@@ -1,10 +1,11 @@
 //! Parse leading route options only; the message remains literal conversation text.
-pub(crate) const USAGE: &str = "Usage: /claude [--model MODEL] [--audit RUN_ID] <message> (default model: configured Claude model, initially claude-haiku-5-5; --audit RUN_ID applies only to the turn that explicitly names it)";
+pub(crate) const USAGE: &str = "Usage: /claude [--model MODEL] [--audit RUN_ID | --no-audit] <message> (uses the active audit when selected; --audit overrides it for this turn, --no-audit uses ordinary conversation)";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Request {
     pub model: Option<String>,
     pub audit: Option<String>,
+    pub no_audit: bool,
     pub message: String,
 }
 
@@ -12,12 +13,24 @@ pub(crate) fn parse(args: &str) -> Result<Request, String> {
     let mut message = args.trim();
     let mut model = None;
     let mut audit = None;
+    let mut no_audit = false;
     loop {
         let end = message.find(char::is_whitespace).unwrap_or(message.len());
         let token = &message[..end];
         let (flag, inline) = token
             .split_once('=')
             .map_or((token, None), |(k, v)| (k, Some(v)));
+        if flag == "--no-audit" {
+            if inline.is_some() || no_audit || audit.is_some() {
+                return Err(USAGE.into());
+            }
+            no_audit = true;
+            message = message[end..].trim_start();
+            continue;
+        }
+        if flag == "--audit" && no_audit {
+            return Err(USAGE.into());
+        }
         let target = match flag {
             "--model" => &mut model,
             "--audit" => &mut audit,
@@ -46,13 +59,55 @@ pub(crate) fn parse(args: &str) -> Result<Request, String> {
     Ok(Request {
         model,
         audit,
+        no_audit,
         message: message.to_owned(),
     })
+}
+
+pub(crate) fn audit_context(
+    explicit: Option<&str>,
+    no_audit: bool,
+    active: Option<&str>,
+) -> Option<String> {
+    if no_audit {
+        None
+    } else {
+        explicit.or(active).map(str::to_owned)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn active_context_default_model_override_explicit_and_opt_out() {
+        for (args, active, expected) in [
+            ("question", Some("a"), Some("a")),
+            ("--model chosen question", Some("a"), Some("a")),
+            ("question", Some("b"), Some("b")),
+            ("--audit c question", Some("a"), Some("c")),
+            ("--no-audit question", Some("a"), None),
+            ("question", None, None),
+        ] {
+            let request = parse(args).unwrap();
+            assert_eq!(
+                audit_context(request.audit.as_deref(), request.no_audit, active).as_deref(),
+                expected
+            );
+            assert_eq!(request.message, "question");
+            if args.starts_with("--model") {
+                assert_eq!(request.model.as_deref(), Some("chosen"));
+            }
+        }
+        for args in [
+            "--audit a --no-audit question",
+            "--no-audit --audit a question",
+            "--no-audit --no-audit question",
+            "--no-audit=x question",
+        ] {
+            assert!(parse(args).is_err(), "{args}");
+        }
+    }
     #[test]
     fn retains_literal_message_and_model() {
         let r = parse("Isn't Codex's answer wrong?\n  Check `x`.").unwrap();
@@ -75,7 +130,7 @@ mod tests {
         }
     }
     #[test]
-    fn s4_f6_usage_describes_explicit_turn_scope_and_ordinary_parse_has_no_audit() {
+    fn usage_describes_active_context_and_explicit_turn_overrides() {
         assert_eq!(
             parse("--audit run-a inspect finding")
                 .unwrap()
@@ -85,7 +140,7 @@ mod tests {
         );
         assert_eq!(parse("continue the discussion").unwrap().audit, None);
         let usage = parse("").unwrap_err();
-        assert!(usage.contains("applies only to the turn that explicitly names it"));
+        assert!(usage.contains("uses the active audit when selected"));
         assert!(!usage.contains("continues in this thread"));
     }
 
@@ -100,6 +155,7 @@ mod tests {
                 Request {
                     model: Some("claude-sonnet-5-5".into()),
                     audit: Some("run-a".into()),
+                    no_audit: false,
                     message: "check --audit literal".into()
                 }
             );

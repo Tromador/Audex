@@ -526,6 +526,7 @@ fn missing_read_only_subpath_uses_empty_file_bind_data() {
     assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".git"));
     assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".agents"));
     assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".codex"));
+    assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".audex"));
     assert_eq!(args.preserved_files.len(), 2);
     assert_bind_data_uses_distinct_preserved_fds(&args);
     assert_eq!(
@@ -536,6 +537,7 @@ fn missing_read_only_subpath_uses_empty_file_bind_data() {
             workspace.join(".git"),
             workspace.join(".agents"),
             workspace.join(".codex"),
+            workspace.join(".audex"),
             workspace.join(".aws"),
         ]
     );
@@ -568,12 +570,14 @@ fn transient_empty_preserved_file_uses_empty_file_bind_data() {
     assert_empty_file_bound_without_perms(&args.args, &dot_git);
     assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".agents"));
     assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".codex"));
+    assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".audex"));
     assert_eq!(
         synthetic_mount_target_paths(&args),
         vec![
             dot_git.clone(),
             workspace.join(".agents"),
             workspace.join(".codex"),
+            workspace.join(".audex"),
             workspace.join(".aws"),
         ]
     );
@@ -614,10 +618,12 @@ fn missing_child_git_under_parent_repo_is_mounted_read_only() {
     assert_empty_directory_mounted_read_only(&args.args, &dot_git);
     assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".agents"));
     assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".codex"));
+    assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".audex"));
     assert_eq!(
         synthetic_mount_target_paths(&args),
         vec![
             workspace.join(".codex"),
+            workspace.join(".audex"),
             dot_git,
             workspace.join(".agents"),
             workspace.join(".aws"),
@@ -652,10 +658,12 @@ fn symlinked_missing_child_git_under_parent_repo_mounts_effective_path_read_only
     assert_empty_directory_mounted_read_only(&args.args, &dot_git);
     assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".agents"));
     assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".codex"));
+    assert_empty_directory_mounted_read_only(&args.args, &workspace.join(".audex"));
     assert_eq!(
         synthetic_mount_target_paths(&args),
         vec![
             workspace.join(".codex"),
+            workspace.join(".audex"),
             dot_git,
             workspace.join(".agents"),
             workspace.join(".aws"),
@@ -735,6 +743,13 @@ fn missing_project_root_metadata_carveouts_use_metadata_path_masks() {
             access: FileSystemAccessMode::Read,
             missing_path_behavior: None,
         },
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::project_roots(Some(".audex".into())),
+            },
+            access: FileSystemAccessMode::Read,
+            missing_path_behavior: None,
+        },
     ]);
 
     let args = create_filesystem_args(&policy, temp_dir.path(), BwrapOptions::default())
@@ -742,15 +757,18 @@ fn missing_project_root_metadata_carveouts_use_metadata_path_masks() {
     let dot_git = path_to_string(&temp_dir.path().join(".git"));
     let dot_agents = path_to_string(&temp_dir.path().join(".agents"));
     let dot_codex = path_to_string(&temp_dir.path().join(".codex"));
+    let dot_audex = path_to_string(&temp_dir.path().join(".audex"));
 
     assert_empty_directory_mounted_read_only(&args.args, Path::new(&dot_git));
     assert_empty_directory_mounted_read_only(&args.args, Path::new(&dot_agents));
     assert_empty_directory_mounted_read_only(&args.args, Path::new(&dot_codex));
+    assert_empty_directory_mounted_read_only(&args.args, Path::new(&dot_audex));
     assert!(args.preserved_files.is_empty());
     let synthetic_targets = synthetic_mount_target_paths(&args);
     assert!(synthetic_targets.contains(&PathBuf::from(&dot_git)));
     assert!(synthetic_targets.contains(&PathBuf::from(&dot_agents)));
     assert!(synthetic_targets.contains(&PathBuf::from(&dot_codex)));
+    assert!(synthetic_targets.contains(&PathBuf::from(&dot_audex)));
 }
 
 #[test]
@@ -814,9 +832,11 @@ fn mounts_dev_before_writable_dev_binds() {
             PathBuf::from("/.git"),
             PathBuf::from("/.agents"),
             PathBuf::from("/.codex"),
+            PathBuf::from("/.audex"),
             PathBuf::from("/dev/.git"),
             PathBuf::from("/dev/.agents"),
             PathBuf::from("/dev/.codex"),
+            PathBuf::from("/dev/.audex"),
             PathBuf::from("/dev/.aws"),
         ]
     );
@@ -1039,7 +1059,7 @@ fn split_policy_reenables_nested_writable_subpaths_after_read_only_parent() {
         FileSystemSandboxEntry::new(docs.clone().into(), FileSystemAccessMode::Read),
         FileSystemSandboxEntry::new(docs_public.clone().into(), FileSystemAccessMode::Write),
     ];
-    for name in [".git", ".agents", ".codex", ".aws"] {
+    for name in [".git", ".agents", ".codex", ".audex", ".aws"] {
         entries.push(FileSystemSandboxEntry::skip_missing_path(
             docs_public.join(name).into(),
             FileSystemAccessMode::Read,
@@ -1067,7 +1087,7 @@ fn split_policy_reenables_nested_writable_subpaths_after_read_only_parent() {
         "expected read-only parent remount before nested writable bind: {:#?}",
         args.args
     );
-    for name in [".git", ".agents", ".codex", ".aws"] {
+    for name in [".git", ".agents", ".codex", ".audex", ".aws"] {
         let metadata_path = path_to_string(docs_public.join(name).as_path());
         let mount_indices = args
             .args

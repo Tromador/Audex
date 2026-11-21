@@ -137,7 +137,7 @@ async fn file_backed_two_reviewer_rpc_and_claude_audit_followup() -> anyhow::Res
         root.join("client/stdout.bin"),
         format!(
             "{}\n",
-            json!({"type":"result","subtype":"success","is_error":false,"result":"Claude follow-up: source may have changed"})
+            json!({"type":"result","subtype":"success","is_error":false,"result":"Claude follow-up: retained evidence discussed"})
         ),
     )?;
     let turn: ThreadClaudeResponse = client
@@ -188,11 +188,51 @@ async fn file_backed_two_reviewer_rpc_and_claude_audit_followup() -> anyhow::Res
     assert!(args.contains(&json!("Read,Grep,Glob")));
     assert!(!args.contains(&json!("--mcp-config")));
     assert!(
-        calls[1]["prompt"]
+        !calls[1]["prompt"]
             .as_str()
             .unwrap()
             .contains("may have changed")
     );
     assert!(calls[1]["prompt"].as_str().unwrap().contains("result.json"));
+    assert!(!serde_json::to_string(&conversation)?.contains("may have changed"));
+    for reviewer in ["1", "2"] {
+        let report: codex_app_server_protocol::AuditReadResult = client
+            .request(|id| ClientRequest::AuditRead {
+                request_id: id,
+                params: serde_json::from_value(
+                    json!({"runId":run_id,"view":"report","reviewer":reviewer}),
+                )
+                .unwrap(),
+            })
+            .await?;
+        let markdown = report.data.unwrap()["markdown"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(markdown.starts_with("# Review — reviewer-"));
+        assert!(markdown.contains("## Summary"));
+        assert!(!markdown.contains("Source is live"));
+    }
+    let deleted: codex_app_server_protocol::AuditDeleteResponse = client
+        .request(|id| ClientRequest::AuditDelete {
+            request_id: id,
+            params: codex_app_server_protocol::AuditDeleteRequest {
+                run_id: run_id.clone(),
+            },
+        })
+        .await?;
+    assert_eq!(deleted.run_id, run_id);
+    assert!(!root.join("audex/runs").join(&run_id).exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("source/example.rs"))?,
+        "fn example() {}\n"
+    );
+    let page: AuditListPage = client
+        .request(|id| ClientRequest::AuditList {
+            request_id: id,
+            params: serde_json::from_value(json!({})).unwrap(),
+        })
+        .await?;
+    assert!(page.runs.is_empty());
     Ok(())
 }

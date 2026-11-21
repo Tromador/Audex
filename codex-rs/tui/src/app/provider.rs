@@ -290,6 +290,7 @@ fn list(
                 let name = provider.name.clone();
                 let dismissed = dismissed.clone();
                 SelectionSecondaryAction {
+                    keep_open: false,
                     key: key_hint::plain(KeyCode::Char(' ')),
                     footer_hint: provider_hint(keymap, /*select*/ true),
                     action: Box::new(move |tx| {

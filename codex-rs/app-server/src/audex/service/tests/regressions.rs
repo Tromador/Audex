@@ -130,7 +130,7 @@ async fn reviewer_markdown_renders_literally_in_all_report_fields() -> Result<()
         assert!(!html.contains("<ol>"));
         assert!(!html.contains("<blockquote>") && !html.contains("<hr />"));
         assert!(!html.contains("<a href=") && !html.contains("<h1>Forged HTML</h1>"));
-        assert!(html.contains("<p>Source is live and may have changed since the review.</p>"));
+        assert!(!html.contains("Source is live and may have changed since the review."));
         assert_eq!(
             html.matches("<pre><code>").count(),
             if structured { 5 } else { 4 }

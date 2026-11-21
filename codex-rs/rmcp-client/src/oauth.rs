@@ -14,7 +14,7 @@
 //! keystore that always encrypts secrets when they are transferred across the bus. If DBus isn't installed the keystore will fall back to the json
 //! file because we don't use the "vendored" feature.
 //!
-//! If the keyring is not available or fails, we fall back to CODEX_HOME/.credentials.json which is consistent with other coding CLI agents.
+//! If the keyring is not available or fails, we fall back to AUDEX_HOME/.credentials.json which is consistent with other coding CLI agents.
 
 mod credential_store;
 mod ema_identity;
@@ -102,7 +102,7 @@ use self::resolved_store::try_resolve_oauth_tokens_from_store_policy;
 pub(crate) use self::runtime::OAuthRuntime;
 pub(crate) use self::transport::OAuthStreamableHttpClient;
 
-const KEYRING_SERVICE: &str = "Codex MCP Credentials";
+const KEYRING_SERVICE: &str = "Audex MCP Credentials";
 const MCP_OAUTH_SECRET_PREFIX: &str = "MCP_OAUTH";
 const REFRESH_SKEW_MILLIS: u64 = 30_000;
 
@@ -1387,6 +1387,61 @@ mod tests {
                 AuthKeyringBackendKind::Direct,
             )?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn audex_keyring_never_reads_or_modifies_codex_credentials() -> Result<()> {
+        // The shared mock keys only on account; model both OS keyring coordinates.
+        #[derive(Debug)]
+        struct NamespacedKeyring(MockKeyringStore);
+        impl KeyringStore for NamespacedKeyring {
+            fn load(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> std::result::Result<Option<String>, codex_keyring_store::CredentialStoreError>
+            {
+                self.0.load(service, &format!("{service}:{account}"))
+            }
+            fn save(
+                &self,
+                service: &str,
+                account: &str,
+                value: &str,
+            ) -> std::result::Result<(), codex_keyring_store::CredentialStoreError> {
+                self.0.save(service, &format!("{service}:{account}"), value)
+            }
+            fn delete(
+                &self,
+                service: &str,
+                account: &str,
+            ) -> std::result::Result<bool, codex_keyring_store::CredentialStoreError> {
+                self.0.delete(service, &format!("{service}:{account}"))
+            }
+        }
+        let store = NamespacedKeyring(MockKeyringStore::default());
+        let tokens = sample_tokens();
+        let key = compute_store_key(&tokens.server_name, &tokens.url)?;
+        let upstream = serde_json::to_string(&tokens)?;
+        store.save("Codex MCP Credentials", &key, &upstream)?;
+        assert!(
+            load_oauth_tokens_from_direct_keyring(&store, &tokens.server_name, &tokens.url)?
+                .is_none()
+        );
+        save_oauth_tokens_to_direct_keyring(&store, &tokens.server_name, &tokens)?;
+        assert_tokens_match_without_expiry(
+            &load_oauth_tokens_from_direct_keyring(&store, &tokens.server_name, &tokens.url)?
+                .unwrap(),
+            &tokens,
+        );
+        assert!(delete_oauth_tokens_from_direct_keyring(
+            &store,
+            &tokens.server_name,
+            &tokens.url
+        )?);
+        assert!(store.load("Audex MCP Credentials", &key)?.is_none());
+        assert_eq!(store.load("Codex MCP Credentials", &key)?, Some(upstream));
         Ok(())
     }
 

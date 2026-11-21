@@ -252,7 +252,7 @@ async fn setup_gcp_validates_the_auth_override_relative_to_the_startup_directory
         .with_codex_home(startup.path())
         .with_env_overrides(CLEARED_AUTH_ENV)
         .with_env_overrides(&[(
-            "CODEX_HOME",
+            "AUDEX_HOME",
             Some(home.path().to_str().context("non-UTF-8 CODEX_HOME")?),
         )])
         .with_args(&["-c", &format!("model_providers.gcp.auth={auth}")])

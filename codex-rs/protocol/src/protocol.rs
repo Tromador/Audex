@@ -5690,6 +5690,11 @@ mod tests {
                 (
                     canonical_cwd,
                     vec![
+                        expected_dot_codex
+                            .parent()
+                            .unwrap()
+                            .join(".audex")
+                            .to_path_buf(),
                         expected_dot_codex.to_path_buf(),
                         expected_docs.to_path_buf()
                     ],

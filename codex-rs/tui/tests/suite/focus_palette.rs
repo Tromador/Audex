@@ -389,7 +389,7 @@ impl PtyCodex {
             .env_remove(codex_protocol::shell_environment::OPENAI_FEDERATION_RULE_ID_ENV_VAR)
             .env_remove(codex_protocol::shell_environment::OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR)
             .env("OPENAI_API_KEY", "focus-palette-test")
-            .env("CODEX_HOME", codex_home.path())
+            .env("AUDEX_HOME", codex_home.path())
             .stdin(stdin)
             .stdout(stdout)
             .stderr(slave.try_clone()?)

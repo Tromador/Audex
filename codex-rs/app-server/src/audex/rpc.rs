@@ -114,6 +114,14 @@ impl AuditRpc {
             .as_mut()
             .map_err(|error| anyhow::anyhow!("{error:#}"))?;
         match request {
+            ClientRequest::AuditDelete { params, .. } => {
+                let id = uuid::Uuid::parse_str(&params.run_id)?;
+                service.delete(id)?;
+                Ok(AuditDeleteResponse {
+                    run_id: id.to_string(),
+                }
+                .into())
+            }
             ClientRequest::AuditStart { params, .. } => {
                 ensure!(
                     !self.stopped.load(Ordering::SeqCst),
@@ -127,16 +135,19 @@ impl AuditRpc {
                     }
                     AuditInput::Snippet { name, text } => service::Input::Snippet { name, text },
                 };
-                let guidance = params
-                    .guidance
-                    .map(|path| {
-                        std::fs::read_to_string(
+                let guidance = match (params.guidance, params.guidance_text) {
+                    (Some(_), Some(_)) => {
+                        anyhow::bail!("Supply only one of guidance and guidanceText")
+                    }
+                    (Some(path), None) => {
+                        let path =
                             codex_utils_absolute_path::AbsolutePathBuf::resolve_path_against_base(
                                 path, cwd,
-                            ),
-                        )
-                    })
-                    .transpose()?;
+                            );
+                        Some(std::fs::read_to_string(path)?)
+                    }
+                    (None, text) => text,
+                };
                 let brief = params.brief;
                 let reviewers = params
                     .reviewers

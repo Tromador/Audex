@@ -14,16 +14,9 @@ fn junction_name_for_path(path: &Path) -> String {
     format!("{:x}", hasher.finish())
 }
 
-fn junction_root_for_userprofile(userprofile: &str) -> PathBuf {
-    PathBuf::from(userprofile)
-        .join(".codex")
-        .join(".sandbox")
-        .join("cwd")
-}
-
 pub fn create_cwd_junction(requested_cwd: &Path, log_dir: Option<&Path>) -> Option<PathBuf> {
-    let userprofile = std::env::var("USERPROFILE").ok()?;
-    let junction_root = junction_root_for_userprofile(&userprofile);
+    // The runner receives the resolved application home as its log directory.
+    let junction_root = log_dir?.join(".sandbox").join("cwd");
     if let Err(err) = std::fs::create_dir_all(&junction_root) {
         log_note(
             &format!(
