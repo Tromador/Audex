@@ -229,6 +229,10 @@ impl App {
         self.begin_reconnect_inner(/*preserve_startup_input*/ true)
     }
 
+    pub(super) fn reconnect_thread_id(&self) -> Option<ThreadId> {
+        self.current_displayed_thread_id()
+    }
+
     fn begin_reconnect_inner(&mut self, preserve_startup_input: bool) -> bool {
         if matches!(self.app_server_target, AppServerTarget::Embedded) {
             return false;
@@ -250,6 +254,8 @@ impl App {
                 pane.opening = None;
             }
             self.reconnect.offline = true;
+            self.chat_widget.config_panel_reasoning_summary = None;
+            self.chat_widget.refresh_config_panel(/*notice*/ None);
             self.account_email_request_id = None;
             // Cached blank sessions are usable only while this connection owns a subscription.
             self.agents_overview.blank_sessions.retain(|id, _| {
@@ -294,6 +300,7 @@ impl App {
                 }
                 self.agents_overview.active_refresh = None;
                 self.agents_overview.refresh_show_more = false;
+                self.agents_overview.active_refresh_recent = false;
                 self.agents_overview.active_refresh_thread_ids.clear();
                 self.agents_overview.pending_refresh_backends.clear();
                 self.agents_overview.refresh_notifications.clear();
@@ -359,6 +366,7 @@ impl App {
     ) {
         self.chat_widget.snapshot_local_images = self.app_server_target.uses_remote_workspace();
         self.chat_widget.thread_params_mode = app_server.thread_params_mode();
+        self.chat_widget.app_server_path_convention = app_server.path_convention();
         self.chat_widget.pending_cloud_turn_settings = app_server.pending_cloud_turn_settings();
         self.chat_widget.set_local_worktree_operations(
             !crate::uses_remote_workspace_or_environment(
@@ -405,7 +413,7 @@ impl App {
             .chat_widget
             .selected_index_for_present_view(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
             .and_then(|index| self.agents_overview.visible_thread_ids.get(index).copied());
-        let displayed = self.current_displayed_thread_id();
+        let displayed = self.reconnect_thread_id();
         let mut input = self.chat_widget.capture_thread_input_state();
         if let Some(input) = input.as_mut() {
             input.reconnect_pending = true;
@@ -417,11 +425,18 @@ impl App {
         self.app_event_tx = AppEventSender::new(tx);
         self.app_server_backend_id = Some(session.backend_id());
         *app_event_rx = rx;
-        for pane in self.sidebars.values_mut() {
+        self.pending_thread_switch_resets = 0;
+        for (parent, pane) in &mut self.sidebars {
             pane.focus_document_request = None;
             pane.agents.pending_link = None;
-            for doc in pane.documents.values_mut() {
-                doc.connection_replaced();
+            for (tab, doc) in &mut pane.documents {
+                if let Some(parent) = parent
+                    && doc.backend == session.backend_id()
+                {
+                    doc.subscribe(*tab, *parent, &session, self.app_event_tx.clone());
+                } else {
+                    doc.connection_replaced();
+                }
             }
             if let Some(files) = &mut pane.files {
                 files.connection_replaced();
@@ -686,6 +701,10 @@ impl App {
             server.reconnect(app_server.request_handle(), self.app_event_tx.clone());
         }
         self.reconnect.offline = false;
+        if self.chat_widget.refresh_config_panel(/*notice*/ None) {
+            self.app_event_tx
+                .send(AppEvent::RefreshConfigReasoningSummary);
+        }
         if self.reconnect.presentation == ReconnectPresentation::Overview {
             self.refresh_agents_overview_threads(app_server);
         }
@@ -728,6 +747,7 @@ impl App {
         if let Some((notice, key)) = crate::status::remote_connection::pending_server_version_notice(
             &self.local_settings.tui,
             &self.app_server_target,
+            self.config.features.enabled(Feature::DaemonUpdates),
             app_server.server_codex_home(),
             client_version,
             app_server.server_version(),

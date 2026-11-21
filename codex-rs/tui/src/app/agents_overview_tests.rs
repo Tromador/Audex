@@ -332,9 +332,12 @@ async fn late_overview_page_only_refills_its_own_backend() {
     );
     app.remove_agents_overview_thread(id);
 
-    for owner in [other, displayed] {
+    // The displayed backend's next history page contains the restored task.
+    for (owner, replacement) in [(other, ThreadId::new()), (displayed, id)] {
         let request_id = Uuid::new_v4();
-        let replacement = ThreadId::new();
+        let mut discovery =
+            crate::app::agents_overview_discovery::AgentsOverviewDiscovery::default();
+        discovery.fresh_cloud_page_ids.push(replacement);
         let row = overview_thread(
             replacement,
             /*parent_thread_id*/ None,
@@ -350,7 +353,7 @@ async fn late_overview_page_only_refills_its_own_backend() {
                 threads: HashMap::from([(replacement, Some((row, false, None)))]),
                 last_messages: HashMap::new(),
                 recent_seed_complete: true,
-                discovery: None,
+                discovery: Some(discovery),
                 pinned_thread_ids: None,
             }),
         );
@@ -384,7 +387,20 @@ async fn queued_overview_page_survives_a_focus_change() {
     app.show_more_agents_overview(&session);
 
     app.app_server_backend_id = Some(other);
+    app.chat_widget
+        .dismiss_provider_view(AGENTS_OVERVIEW_VIEW_ID);
     app.agents_overview.active_refresh = None;
+    app.handle_polled_backend_event(
+        &session,
+        other,
+        &mut HashMap::new(),
+        crate::app_server_session::AppServerSessionEvent {
+            backend_id: owner,
+            event: AppServerEvent::CloudInventoryChanged(None),
+        },
+    )
+    .await;
+    assert!(app.agents_overview.refresh_recent_backends.contains(&owner));
     app.drain_agents_overview_refresh_queue();
     assert_eq!(
         app.agents_overview.pending_refresh_backends.front(),
@@ -394,12 +410,64 @@ async fn queued_overview_page_survives_a_focus_change() {
 
     app.app_server_backend_id = Some(owner);
     app.open_agents_overview(&session);
-    assert_eq!(
-        app.agents_overview.active_refresh.map(|(_, id)| id),
-        Some(owner)
-    );
-    assert!(app.agents_overview.pending_refresh_backends.is_empty());
+    let (page, page_owner) = app.agents_overview.active_refresh.unwrap();
+    assert_eq!(page_owner, owner);
     assert!(app.agents_overview.refresh_show_more);
+    assert!(!app.agents_overview.active_refresh_recent);
+    assert!(app.agents_overview.refresh_recent_backends.contains(&owner));
+    app.agents_overview.refresh_task.take().unwrap().abort();
+    app.agents_overview.show_more_backends.insert(owner);
+    app.agents_overview.refill_by_backend.insert(owner, 1);
+    app.apply_agents_overview_thread_refresh(&session, page, Err("temporary page failure".into()));
+    let (recent, recent_owner) = app.agents_overview.active_refresh.unwrap();
+    assert_eq!(recent_owner, owner);
+    assert!(app.agents_overview.active_refresh_recent);
+    assert!(app.agents_overview.show_more_backends.contains(&owner));
+    let id = ThreadId::new();
+    for (method, archived) in [("thread/archived", true), ("thread/unarchived", false)] {
+        let lifecycle = serde_json::from_value(
+            serde_json::json!({"method": method, "params": {"threadId": id.to_string()}}),
+        )
+        .unwrap();
+        app.handle_app_server_event(
+            &session,
+            AppServerEvent::CloudInventoryChanged(Some(Box::new(lifecycle))),
+        )
+        .await;
+        assert_eq!(app.agents_overview.removed_threads.contains(&id), archived);
+    }
+    app.poll_cloud_inventory(&session, /*attached*/ true);
+    assert_eq!(app.agents_overview.active_refresh, Some((recent, owner)));
+    assert!(app.agents_overview.cloud_inventory_dirty.contains(&owner));
+    app.cancel_agents_overview_refresh(owner);
+}
+
+#[tokio::test]
+async fn cloud_inventory_polls_when_visible_and_detached() {
+    let mut app = make_test_app().await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.app_event_tx = AppEventSender::new(tx);
+    let owner = BackendId::new();
+    let (session, _commands, _events) = overview_session_stub(owner, ThreadParamsMode::Cloud);
+    app.backend_registry.connect(&session);
+    app.app_server_backend_id = Some(owner);
+    app.agents_overview.initialized.insert(owner);
+    app.poll_cloud_inventory(&session, /*attached*/ false);
+    assert!(app.agents_overview.active_refresh.is_none());
+
+    let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    app.poll_cloud_inventory(&session, /*attached*/ true);
+    assert!(app.agents_overview.active_refresh.is_none());
+    app.poll_cloud_inventory(&session, /*attached*/ false);
+    assert!(app.agents_overview.active_refresh_recent);
+    app.agents_overview.view_state.lock().unwrap().has_more = true;
+    app.chat_widget.handle_key_event(KeyCode::Down.into());
+    app.chat_widget.handle_key_event(KeyCode::Enter.into());
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::ShowMoreAgentsOverview))
+    );
     app.cancel_agents_overview_refresh(owner);
 }
 
@@ -704,6 +772,7 @@ pub(in crate::app) fn overview_thread(
         extra: None,
         project_id: None,
         daybreak_enabled: None,
+        daybreak_program_propagation_enrolled: None,
         session_id: parent_thread_id.unwrap_or(thread_id).to_string(),
         forked_from_id: None,
         attached_to_thread_id: None,
@@ -721,7 +790,7 @@ pub(in crate::app) fn overview_thread(
         recency_at: Some(*OVERVIEW_TIMESTAMP),
         status,
         path: None,
-        cwd: test_path_buf("/tmp/project").abs(),
+        cwd: test_path_buf("/tmp/project").abs().into(),
         cli_version: "0.0.0".to_string(),
         source: parent_thread_id.map_or(SessionSource::Cli, |parent_thread_id| {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -815,6 +884,9 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
     );
     // A successful read supersedes registration; queued notifications supersede the read.
     retained_thread.preview = "Fresh preview from the read".to_string();
+    let mut discovery = crate::app::agents_overview_discovery::AgentsOverviewDiscovery::default();
+    discovery.fresh_cloud_page_ids = vec![archived, deleted];
+    app.agents_overview.active_refresh_recent = true;
     app.apply_agents_overview_thread_refresh(
         &app_server,
         request_id,
@@ -827,7 +899,7 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
                 (deleted, Some((deleted_thread, false, None))),
             ]),
             recent_seed_complete: true,
-            discovery: None,
+            discovery: Some(discovery),
             pinned_thread_ids: None,
         }),
     );
@@ -838,6 +910,7 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
         (created, Some(created_thread)),
     ]);
     assert_eq!(app.agents_overview.threads, expected);
+    assert_eq!(app.agents_overview.refill_count(app_server.backend_id()), 0);
 
     let request_id = Uuid::new_v4();
     app.agents_overview.active_refresh = Some((request_id, app_server.backend_id()));
@@ -1740,7 +1813,7 @@ async fn worktrees_overview_groups_by_project_or_directory() {
             title,
             ThreadStatus::Idle,
         );
-        thread.cwd = AbsolutePathBuf::from_absolute_path(cwd).unwrap();
+        thread.cwd = AbsolutePathBuf::from_absolute_path(cwd).unwrap().into();
         thread
     })
     .collect::<Vec<_>>();
@@ -2041,9 +2114,11 @@ async fn shared_overview_shows_only_root_sessions() {
             }
             candidate.updated_at = index;
             candidate.cwd = if index == 0 {
-                test_path_buf("/tmp/project-selected").abs()
+                test_path_buf("/tmp/project-selected").abs().into()
             } else {
-                test_path_buf(&format!("/tmp/project-{}", index % 3)).abs()
+                test_path_buf(&format!("/tmp/project-{}", index % 3))
+                    .abs()
+                    .into()
             };
             candidate
         })
@@ -2663,7 +2738,7 @@ async fn overview_cold_resume_honors_working_directory_selection() -> Result<()>
         .session;
         assert_eq!(
             (app.config.cwd.clone(), observed.cwd),
-            (expected_cwd.clone(), expected_cwd),
+            (expected_cwd.clone(), expected_cwd.into()),
         );
         app_server.shutdown().await?;
     }
@@ -3934,7 +4009,7 @@ async fn command_center_new_actions_use_selection_and_leave_metadata_text_alone(
     );
     let owner = BackendId::new();
     app.backend_registry.observe(owner, id);
-    target.cwd = test_path_buf("/tmp/checkout/subdir").abs();
+    target.cwd = test_path_buf("/tmp/checkout/subdir").abs().into();
     app.agents_overview.pins_by_backend =
         [(crate::backend_id::BackendId::new(), Some(Vec::new()))].into();
     let mut view = app.agents_overview_view(vec![target.clone()], Some(id));
@@ -3945,11 +4020,11 @@ async fn command_center_new_actions_use_selection_and_leave_metadata_text_alone(
     for grouping_index in 0..3 {
         view.handle_key_event(KeyCode::Char('n').into());
         assert!(
-            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewSession { backend_id: Some(id), cwd: Some(cwd) }) if id == owner && cwd == target.cwd)
+            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewSession { backend_id: Some(id), cwd: Some(cwd) }) if id == owner && cwd.as_path() == target.cwd.as_path())
         );
         view.handle_key_event(KeyCode::Char('w').into());
         assert!(
-            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewWorktree { backend_id: Some(id), cwd: Some(cwd) }) if id == owner && cwd == target.cwd)
+            matches!(rx.try_recv(), Ok(AppEvent::NewAgentsOverviewWorktree { backend_id: Some(id), cwd: Some(cwd) }) if id == owner && cwd.as_path() == target.cwd.as_path())
         );
         view.handle_key_event(KeyCode::Char('g').into());
         if grouping_index == 0 {

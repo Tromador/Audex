@@ -25,7 +25,7 @@ async fn remote_environment_reads_projected_executor_config() -> anyhow::Result<
     let config_file = codex_home.join(CONFIG_TOML_FILE);
     let project = codex_home.join("project");
     let nested = project.join("nested");
-    let dot_codex = project.join(".codex");
+    let dot_codex = project.join(".audex");
     tokio::fs::create_dir_all(dot_codex.as_path()).await?;
     tokio::fs::write(project.join(".project-root").as_path(), "").await?;
     let project_key = toml::Value::String(project_trust_key(project.as_path())).to_string();

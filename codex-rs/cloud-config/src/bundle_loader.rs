@@ -1,7 +1,6 @@
 use crate::backend::BackendBundleClient;
 use crate::chatgpt::ChatGptSource;
 use crate::chatgpt::plan_requires_managed_config;
-use crate::config_server::config_server_http_client_factory;
 use crate::config_source::BundleSource;
 use crate::service::CLOUD_CONFIG_BUNDLE_TIMEOUT;
 use crate::service::CloudConfigBundleService;
@@ -22,15 +21,15 @@ use tokio::task::JoinHandle;
 const CONFIG_SERVER_LOGIN_FAILURE: &str =
     "Config server sign-in failed. Check config_server.oauth and the credential store.";
 
-pub fn managed_config_auth_manager(
+pub async fn managed_config_auth_manager(
     auth: AuthConfig,
     requirements: &ConfigRequirementsToml,
 ) -> std::io::Result<Option<OAuthSessionManager>> {
     let Some(service_config) = requirements.config_server.as_ref() else {
         return Ok(None);
     };
-    let factory = config_server_http_client_factory(service_config, &auth.auth_route_config);
-    crate::config_server_auth_manager(service_config, auth.codex_home, &factory)
+    crate::config_server_auth_manager(service_config, auth.codex_home, &auth.auth_route_config)
+        .await
 }
 
 /// How to sign in when the config server has no saved OAuth grant.
@@ -45,7 +44,7 @@ pub async fn ensure_config_server_login(
     requirements: &ConfigRequirementsToml,
     method: ConfigServerLoginMethod,
 ) -> std::io::Result<()> {
-    let Some(manager) = managed_config_auth_manager(auth, requirements)? else {
+    let Some(manager) = managed_config_auth_manager(auth, requirements).await? else {
         return Ok(());
     };
     ensure_config_server_login_with_manager(&manager, method).await
@@ -77,7 +76,7 @@ pub(crate) async fn ensure_config_server_login_with_manager(
     }
 }
 
-pub fn managed_config_bundle_loader(
+pub async fn managed_config_bundle_loader(
     auth_manager: Arc<AuthManager>,
     chatgpt_base_url: String,
     codex_home: PathBuf,
@@ -85,11 +84,12 @@ pub fn managed_config_bundle_loader(
     requirements: &ConfigRequirementsToml,
 ) -> CloudConfigBundleLoader {
     if let Some(service_config) = requirements.config_server.as_ref() {
-        let factory = config_server_http_client_factory(
-            service_config,
+        return crate::config_server_bundle_loader(
+            service_config.clone(),
+            codex_home,
             &codex_login::AuthRouteConfig::from_http_client_factory(factory),
-        );
-        return crate::config_server_bundle_loader(service_config.clone(), codex_home, factory);
+        )
+        .await;
     }
     let endpoint = codex_backend_client::Client::new(chatgpt_base_url.clone(), factory.clone())
         .config_bundle_url();
@@ -111,13 +111,12 @@ pub async fn managed_config_bundle_loader_for_storage(
     enable_codex_api_key_env: bool,
 ) -> std::io::Result<CloudConfigBundleLoader> {
     if let Some(service_config) = requirements.config_server.as_ref() {
-        let factory =
-            config_server_http_client_factory(service_config, &auth_config.auth_route_config);
         return Ok(crate::config_server_bundle_loader(
             service_config.clone(),
             auth_config.codex_home,
-            factory,
-        ));
+            &auth_config.auth_route_config,
+        )
+        .await);
     }
     let service =
         chatgpt_config_bundle_service_for_storage(auth_config, enable_codex_api_key_env).await?;

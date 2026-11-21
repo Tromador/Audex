@@ -228,9 +228,9 @@ async fn skills_list_uses_each_cwds_bundled_skills_configuration() -> Result<()>
 
     for (cwd, enabled) in [(disabled_cwd.path(), false), (enabled_cwd.path(), true)] {
         std::fs::create_dir_all(cwd.join(".git"))?;
-        std::fs::create_dir_all(cwd.join(".codex"))?;
+        std::fs::create_dir_all(cwd.join(".audex"))?;
         std::fs::write(
-            cwd.join(".codex/config.toml"),
+            cwd.join(".audex/config.toml"),
             format!("[skills.bundled]\nenabled = {enabled}\n"),
         )?;
         set_project_trust_level(codex_home.path(), cwd, TrustLevel::Trusted)?;
@@ -832,9 +832,9 @@ enabled = false
         (third_cwd.path(), true, false),
     ] {
         std::fs::create_dir_all(cwd.join(".git"))?;
-        std::fs::create_dir_all(cwd.join(".codex"))?;
+        std::fs::create_dir_all(cwd.join(".audex"))?;
         std::fs::write(
-            cwd.join(".codex/config.toml"),
+            cwd.join(".audex/config.toml"),
             format!(
                 "[features]\nplugins = {plugins_enabled}\n[plugins.\"google-calendar@openai-api-curated\"]\nenabled = {plugin_enabled}\n"
             ),
@@ -1131,7 +1131,7 @@ async fn skills_list_uses_cached_result_after_session_default_writes_until_force
             .all(|skill| skill.name != "late-extra-skill")
     );
 
-    let skill_dir = cwd.path().join(".codex/skills/late-extra-skill");
+    let skill_dir = cwd.path().join(".audex/skills/late-extra-skill");
     std::fs::create_dir_all(&skill_dir)?;
     std::fs::write(
         skill_dir.join("SKILL.md"),
@@ -1397,6 +1397,7 @@ async fn skills_changed_notification_is_emitted_after_skill_change() -> Result<(
             thread_source: None,
             project_id: None,
             daybreak_enabled: None,
+            daybreak_program_propagation_enrolled: None,
             dynamic_tools: None,
             environments: None,
             selected_capability_roots: None,

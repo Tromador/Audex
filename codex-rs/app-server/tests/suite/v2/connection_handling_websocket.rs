@@ -122,7 +122,7 @@ async fn thread_start_routes_project_exec_policy_warning_to_requester() -> Resul
 
     let project = TempDir::new()?;
     std::fs::create_dir(project.path().join(".git"))?;
-    let rules_dir = project.path().join(".codex/rules");
+    let rules_dir = project.path().join(".audex/rules");
     std::fs::create_dir_all(&rules_dir)?;
     let rules_path = rules_dir.join("broken.rules");
     std::fs::write(&rules_path, "prefix_rule(")?;

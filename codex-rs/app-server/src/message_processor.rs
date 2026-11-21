@@ -422,7 +422,8 @@ impl MessageProcessor {
                     thread_state_manager.clone(),
                 )),
                 None,
-            );
+            )
+            .with_guardian_policy_loader(Arc::new(config_manager.clone()));
             match code_mode_session_provider {
                 Some(provider) => manager.with_code_mode_session_provider(provider),
                 None => manager,
@@ -580,6 +581,7 @@ impl MessageProcessor {
         );
         let turn_processor = TurnRequestProcessor::new(
             Arc::clone(&thread_manager),
+            Arc::clone(&thread_store),
             outgoing.clone(),
             analytics_events_client.clone(),
             Arc::clone(&config),
@@ -900,6 +902,7 @@ impl MessageProcessor {
         connection_id: ConnectionId,
         request_attestation: bool,
     ) {
+        self.outgoing.connection_initialized(connection_id).await;
         self.account_processor
             .notify_workspace_routing_to_connection(connection_id);
         self.thread_processor
@@ -967,6 +970,7 @@ impl MessageProcessor {
         session_state: &ConnectionSessionState,
     ) {
         session_state.disconnect.cancel();
+        self.outgoing.stop_connection_replays(connection_id).await;
         session_state.rpc_gate.close().await;
         self.account_processor
             .gateway_connection_closed(connection_id);
@@ -1393,11 +1397,18 @@ impl MessageProcessor {
             ClientRequest::EnvironmentStatus { params, .. } => {
                 self.environment_processor.environment_status(params).await
             }
-            ClientRequest::FsReadFile { params, .. } => self
-                .fs_processor
-                .read_file(params)
-                .await
-                .map(|response| Some(response.into())),
+            ClientRequest::FsReadFile { params, .. } => {
+                self.fs_processor.read_file(params).await.map(|file| {
+                    // Defer encoding to the stdio writer. Remote control serializes
+                    // for both segment sizing and transmission.
+                    let payload = if session.origin == crate::transport::ConnectionOrigin::Stdio {
+                        ClientResponsePayload::FsReadFileBytes(file)
+                    } else {
+                        ClientResponsePayload::FsReadFile(file.into())
+                    };
+                    Some(payload)
+                })
+            }
             ClientRequest::FsWriteFile { params, .. } => self
                 .fs_processor
                 .write_file(params)

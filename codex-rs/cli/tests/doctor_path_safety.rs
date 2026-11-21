@@ -352,7 +352,7 @@ fn doctor_reports_only_safe_config_error_metadata() -> Result<()> {
     // macOS temp directories can use a symlinked path; trust the canonical workspace.
     let project_key = toml::Value::String(project_trust_key(&fixture.workspace));
     let original = format!("{original}\n[projects.{project_key}]\ntrust_level = \"trusted\"\n");
-    let project_config_dir = fixture.workspace.join(".codex");
+    let project_config_dir = fixture.workspace.join(".audex");
     std::fs::create_dir(&project_config_dir)?;
     for (snapshot_name, config_file, config) in [
         (
@@ -514,7 +514,7 @@ fn filesystem_probe_does_not_load_configuration() -> Result<()> {
 #[tokio::test]
 async fn interactive_tmux_startup_does_not_execute_workspace_helpers() -> Result<()> {
     let fixture = Fixture::new()?;
-    std::fs::create_dir(fixture.workspace.join(".codex"))?;
+    std::fs::create_dir(fixture.workspace.join(".audex"))?;
     let command = fixture.command()?;
     let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
     for (key, value) in command.get_envs() {

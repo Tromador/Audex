@@ -175,6 +175,7 @@ async fn daybreak_refusal_offers_enable_for_the_next_turn() {
     let mut model = crate::test_support::TEST_MODEL_PRESETS[0].clone();
     model.model = "gpt-5.6-sol".into();
     model.available_access_programs = Some(codex_protocol::openai_models::ModelAccessPrograms {
+        daybreak_availability: Default::default(),
         cyber: vec![codex_protocol::turn_input::CyberAccessProgram::DaybreakBlue],
     });
     chat.model_catalog = std::sync::Arc::new(ModelCatalog::new(vec![model]));
@@ -279,6 +280,7 @@ async fn daybreak_refusal_offers_enable_for_the_next_turn() {
     let mut daybreak = crate::test_support::TEST_MODEL_PRESETS[0].clone();
     daybreak.model = "gpt-5.6-sol".into();
     daybreak.available_access_programs = Some(codex_protocol::openai_models::ModelAccessPrograms {
+        daybreak_availability: Default::default(),
         cyber: vec![codex_protocol::turn_input::CyberAccessProgram::DaybreakBlue],
     });
     chat.model_catalog = std::sync::Arc::new(ModelCatalog::new(vec![daybreak.clone()]));
@@ -326,6 +328,7 @@ async fn daybreak_refusal_offers_enable_for_the_next_turn() {
     let mut astra = crate::test_support::TEST_MODEL_PRESETS[0].clone();
     astra.model = "gpt-6-astra".into();
     astra.available_access_programs = Some(codex_protocol::openai_models::ModelAccessPrograms {
+        daybreak_availability: Default::default(),
         cyber: vec![codex_protocol::turn_input::CyberAccessProgram::Standard],
     });
     chat.model_catalog = std::sync::Arc::new(ModelCatalog::new(vec![astra]));
@@ -4821,7 +4824,7 @@ async fn session_configured_clears_goal_status_footer() {
         approvals_reviewer: ApprovalsReviewer::User,
         permission_profile: PermissionProfile::read_only(),
         active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
+        cwd: test_path_buf("/home/user/project").abs().into(),
         runtime_workspace_roots: Vec::new(),
         instruction_source_paths: Vec::new(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -5551,6 +5554,25 @@ async fn blocked_and_failed_hooks_render_feedback_and_errors() {
                 kind: codex_app_server_protocol::HookOutputEntryKind::Error,
                 text: "hook exited with code 7".to_string(),
             }],
+        ),
+    );
+
+    handle_hook_completed(
+        &mut chat,
+        hook_completed_run(
+            "pre-tool-use:2:/tmp/hooks.json",
+            codex_app_server_protocol::HookEventName::PreToolUse,
+            codex_app_server_protocol::HookRunStatus::Blocked,
+            vec![
+                codex_app_server_protocol::HookOutputEntry {
+                    kind: codex_app_server_protocol::HookOutputEntryKind::Error,
+                    text: "hook exited with code 7".to_string(),
+                },
+                codex_app_server_protocol::HookOutputEntry {
+                    kind: codex_app_server_protocol::HookOutputEntryKind::Feedback,
+                    text: "PreToolUse hook failed. This hook is configured to block continuation on failure.".to_string(),
+                },
+            ],
         ),
     );
 

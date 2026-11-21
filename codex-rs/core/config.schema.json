@@ -237,6 +237,14 @@
           ],
           "description": "Approval mode for this tool."
         },
+        "approvals_reviewer": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ApprovalsReviewer"
+            }
+          ],
+          "description": "Reviewer for this tool's approval prompts, overriding link-level and app-level settings."
+        },
         "enabled": {
           "description": "Whether this tool is enabled. `Some(true)` explicitly allows this tool.",
           "type": "boolean"
@@ -968,6 +976,9 @@
             "concurrent_reasoning_summaries": {
               "type": "boolean"
             },
+            "connector_tool_result_passthrough": {
+              "type": "boolean"
+            },
             "connectors": {
               "type": "boolean"
             },
@@ -990,6 +1001,9 @@
               "type": "boolean"
             },
             "daemon_auto_start": {
+              "type": "boolean"
+            },
+            "daemon_updates": {
               "type": "boolean"
             },
             "daybreak_program_propagation": {
@@ -1110,9 +1124,6 @@
               "$ref": "#/definitions/FeatureToml_for_GuardianV3ConfigToml"
             },
             "hooks": {
-              "type": "boolean"
-            },
-            "hosted_search_policy": {
               "type": "boolean"
             },
             "image_detail_original": {
@@ -1284,6 +1295,9 @@
               "type": "boolean"
             },
             "realtime_conversation": {
+              "type": "boolean"
+            },
+            "realtime_frames_local": {
               "type": "boolean"
             },
             "reasoning_effort_override": {
@@ -1514,6 +1528,9 @@
             "web_search_cached": {
               "type": "boolean"
             },
+            "web_search_indexed_default": {
+              "type": "boolean"
+            },
             "web_search_request": {
               "type": "boolean"
             },
@@ -1702,6 +1719,11 @@
       "required": [
         "command"
       ],
+      "type": "object"
+    },
+    "CredentialPermissionsToml": {
+      "additionalProperties": false,
+      "description": "In `requirements.toml`, `[permissions.credentials]` sets shared credential policy and `[permissions.<profile>.credentials]` sets policy for a named profile. Omit the shared table until it contains a supported policy setting. In `config.toml`, credentials use the named-profile form alongside filesystem and network.",
       "type": "object"
     },
     "CredentialProviderConfig": {
@@ -2492,6 +2514,48 @@
       "properties": {
         "enabled": {
           "type": "boolean"
+        },
+        "housekeeper": {
+          "$ref": "#/definitions/GuardianV3HousekeeperConfigToml"
+        },
+        "max_instruction_tokens": {
+          "description": "Maximum estimated tokens per custom routing or retrieval prompt. Unset means uncapped. Ignored in project config.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "message_board_in_memory": {
+          "description": "Keep each fresh root's Guardian board in memory until the runtime closes. Defaults to false.",
+          "type": "boolean"
+        },
+        "reviewer": {
+          "$ref": "#/definitions/GuardianV3ReviewerConfigToml"
+        }
+      },
+      "type": "object"
+    },
+    "GuardianV3HousekeeperConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "batch_timeout_ms": {
+          "description": "Time budget for routing one batch, in milliseconds. Defaults to 90,000.",
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "routing_instructions": {
+          "description": "Guidance for grouping originals into channels and describing their topics. Ignored in project config.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "GuardianV3ReviewerConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "retrieval_instructions": {
+          "description": "Guidance for searching the Guardian board and managing channel subscriptions. Ignored in project config.",
+          "type": "string"
         }
       },
       "type": "object"
@@ -2537,6 +2601,13 @@
         }
       ]
     },
+    "HookFailurePolicy": {
+      "enum": [
+        "continue",
+        "block"
+      ],
+      "type": "string"
+    },
     "HookHandlerConfig": {
       "oneOf": [
         {
@@ -2557,6 +2628,14 @@
             "commandWindows": {
               "default": null,
               "type": "string"
+            },
+            "onFailure": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HookFailurePolicy"
+                }
+              ],
+              "description": "Failure policy for synchronous hooks that support blocking. Defaults to continue; block applies the event's blocking behavior on failure."
             },
             "statusMessage": {
               "default": null,
@@ -2587,6 +2666,14 @@
               "additionalProperties": true,
               "default": {},
               "type": "object"
+            },
+            "onFailure": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HookFailurePolicy"
+                }
+              ],
+              "description": "Failure policy for MCP hooks that support blocking. Defaults to continue; block applies the event's blocking behavior on failure."
             },
             "server": {
               "type": "string"
@@ -4200,6 +4287,9 @@
     "PermissionProfileToml": {
       "additionalProperties": false,
       "properties": {
+        "credentials": {
+          "$ref": "#/definitions/CredentialPermissionsToml"
+        },
         "description": {
           "type": "string"
         },
@@ -5343,14 +5433,6 @@
     "ToolsToml": {
       "additionalProperties": false,
       "properties": {
-        "client_search_provider": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/WebSearchProvider"
-            }
-          ],
-          "description": "Client provider preference when the model does not select a provider."
-        },
         "experimental_request_user_input": {
           "$ref": "#/definitions/ExperimentalRequestUserInput"
         },
@@ -7878,14 +7960,6 @@
       ],
       "type": "string"
     },
-    "WebSearchProvider": {
-      "description": "Provider preference selected by the resolved model catalog entry.",
-      "enum": [
-        "standalone",
-        "search_mcp"
-      ],
-      "type": "string"
-    },
     "WebSearchToolConfig": {
       "additionalProperties": false,
       "properties": {
@@ -8280,6 +8354,9 @@
         "concurrent_reasoning_summaries": {
           "type": "boolean"
         },
+        "connector_tool_result_passthrough": {
+          "type": "boolean"
+        },
         "connectors": {
           "type": "boolean"
         },
@@ -8302,6 +8379,9 @@
           "type": "boolean"
         },
         "daemon_auto_start": {
+          "type": "boolean"
+        },
+        "daemon_updates": {
           "type": "boolean"
         },
         "daybreak_program_propagation": {
@@ -8422,9 +8502,6 @@
           "$ref": "#/definitions/FeatureToml_for_GuardianV3ConfigToml"
         },
         "hooks": {
-          "type": "boolean"
-        },
-        "hosted_search_policy": {
           "type": "boolean"
         },
         "image_detail_original": {
@@ -8596,6 +8673,9 @@
           "type": "boolean"
         },
         "realtime_conversation": {
+          "type": "boolean"
+        },
+        "realtime_frames_local": {
           "type": "boolean"
         },
         "reasoning_effort_override": {
@@ -8824,6 +8904,9 @@
           "type": "boolean"
         },
         "web_search_cached": {
+          "type": "boolean"
+        },
+        "web_search_indexed_default": {
           "type": "boolean"
         },
         "web_search_request": {

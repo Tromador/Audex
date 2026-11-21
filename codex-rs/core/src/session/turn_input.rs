@@ -8,13 +8,16 @@
 //! Persistent thread settings apply on Started and Steered. Turn start
 //! options only update turn context on Started; input provenance follows each request.
 //! Host shutdown admission is checked before reserving or starting a new turn.
-//! Parent-delegated subagent input bypasses drain; automatic starts remain gated.
+//! Parent-delegated input and native child results finish admitted work during drain.
+//! Other automatic starts remain gated.
 //! Realtime drain refusals are returned to the fanout for ordered session teardown.
 //! Sender evidence is read without the active-turn lock and bound to the accepted turn.
 
 use super::TurnInput;
 use super::UserInputMetadata;
 use super::inject::validate_injected_response_item;
+use super::input_queue::InputQueueEntry;
+use super::input_queue::SubmittedAdditionalContext;
 use super::session::Session;
 use super::session::SessionConfiguration;
 use super::session::SessionSettingsUpdate;
@@ -63,6 +66,13 @@ mod agent;
 #[cfg(test)]
 #[path = "turn_input_tests.rs"]
 mod tests;
+
+/// Keeps automatic wake admission alive until the reserved turn is registered.
+pub(crate) struct PendingWorkTurnReservation {
+    pub(crate) turn_state: Arc<tokio::sync::Mutex<TurnState>>,
+    pub(crate) previous_options: TurnStartOptions,
+    pub(crate) admission: Option<Box<dyn Send>>,
+}
 
 /// Why input is starting a turn; shared by admission and input delivery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -243,19 +253,53 @@ impl PreparedTurnInputSettings {
     }
 }
 
-#[tracing::instrument(
-    name = "codex.turn_input",
-    level = "trace",
-    skip_all,
-    fields(conversation.id = %session.thread_id, turn.id)
-)]
 pub(super) async fn handle(
     session: &Arc<Session>,
     request: impl Into<WithTurnExtensionData<TurnInputRequest>>,
     mode: TurnInputMode,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
-    let request = request.into();
+    handle_inner(
+        session,
+        request.into(),
+        mode,
+        submission_id,
+        /*realtime_handoff_id*/ None,
+    )
+    .await
+}
+
+pub(super) async fn handle_realtime_handoff(
+    session: &Arc<Session>,
+    request: TurnInputRequest,
+    mode: TurnInputMode,
+    submission_id: String,
+    handoff_id: uuid::Uuid,
+) -> CodexResult<TurnInputSubmission> {
+    handle_inner(
+        session,
+        request.into(),
+        mode,
+        submission_id,
+        Some(handoff_id),
+    )
+    .await
+}
+
+#[tracing::instrument(
+    name = "codex.turn_input",
+    level = "trace",
+    skip_all,
+    fields(conversation.id = %session.thread_id, turn.id)
+)]
+async fn handle_inner(
+    session: &Arc<Session>,
+    request: WithTurnExtensionData<TurnInputRequest>,
+    mode: TurnInputMode,
+    submission_id: String,
+    realtime_handoff_id: Option<uuid::Uuid>,
+) -> CodexResult<TurnInputSubmission> {
+    session.conversation.check_history_recovery()?;
     if request.request.start.service_tier.is_some()
         && crate::agent::host::host_child_uses_shared_service_tier(session)
     {
@@ -280,12 +324,15 @@ pub(super) async fn handle(
         request
             .request
             .additional_context
-            .values()
+            .iter()
+            .flat_map(BTreeMap::values)
             .try_for_each(AdditionalContextEntry::validate)
             .map_err(|message| CodexErr::InvalidRequest(message.to_owned()))?;
     }
     let result = match mode {
-        TurnInputMode::StartOrSteer => start_or_steer(session, request, submission_id).await,
+        TurnInputMode::StartOrSteer => {
+            start_or_steer(session, request, submission_id, realtime_handoff_id).await
+        }
         TurnInputMode::StartIfIdle => {
             let kind = match &request.request.input {
                 SubmittedTurnInput::UserInput { content, .. } if !content.is_empty() => {
@@ -302,6 +349,7 @@ pub(super) async fn handle(
                 submission_id,
                 kind,
                 /*expected_previous_turn_id*/ None,
+                realtime_handoff_id,
                 None,
             )
             .await
@@ -330,12 +378,20 @@ pub(super) async fn handle(
                 submission_id,
                 TurnStartKind::Recovery,
                 Some(expected_previous_turn_id),
+                realtime_handoff_id,
                 None,
             )
             .await
         }
         TurnInputMode::Steer { expected_turn_id } => {
-            steer(session, request, expected_turn_id, submission_id).await
+            steer(
+                session,
+                request,
+                expected_turn_id,
+                submission_id,
+                realtime_handoff_id,
+            )
+            .await
         }
     };
     // Link this request's trace to the accepted turn, which may have an older trace.
@@ -360,6 +416,7 @@ pub(super) async fn handle_recovery(
     start_options: TurnStartOptions,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
+    session.conversation.check_history_recovery()?;
     let WithTurnExtensionData {
         request: thread_settings,
         turn_extension_init,
@@ -376,6 +433,7 @@ pub(super) async fn handle_recovery(
         submission_id,
         TurnStartKind::Recovery,
         /*expected_previous_turn_id*/ None,
+        /*realtime_handoff_id*/ None,
         None,
     )
     .await;
@@ -397,12 +455,16 @@ pub(super) async fn handle_external(
         submission_id,
         TurnStartKind::User,
         None,
+        /*realtime_handoff_id*/ None,
         Some(crate::tasks::external_conversation::ExternalConversationTask::new(execution)),
     )
     .await
 }
 
-fn user_input_metadata(request: &mut TurnInputRequest) -> UserInputMetadata {
+fn user_input_metadata(
+    request: &mut TurnInputRequest,
+    realtime_handoff_id: Option<uuid::Uuid>,
+) -> UserInputMetadata {
     const DICTATION_KEY: &str = "codex_app_used_dictation";
     // Capture provenance on this input before applying mutable turn metadata.
     let metadata = &mut request.responsesapi_client_metadata;
@@ -418,15 +480,17 @@ fn user_input_metadata(request: &mut TurnInputRequest) -> UserInputMetadata {
         used_dictation: patch.or(replacement).and_then(|value| value.parse().ok()),
         origin: UserInputOrigin::from_turn_trigger(request.start.turn_trigger.as_deref()),
         response_item_uuid: request.user_item_uuid,
+        realtime_handoff_id,
         extension_data: request.user_input_extension_data.clone(),
         ..Default::default()
     }
 }
 
-async fn start_or_steer(
+pub(super) async fn start_or_steer(
     session: &Arc<Session>,
     request: WithTurnExtensionData<TurnInputRequest>,
     submission_id: String,
+    realtime_handoff_id: Option<uuid::Uuid>,
 ) -> CodexResult<TurnInputSubmission> {
     if matches!(
         request.request.input,
@@ -438,12 +502,12 @@ async fn start_or_steer(
         mut request,
         turn_extension_init,
     } = request;
-    let input_metadata = user_input_metadata(&mut request);
+    let input_metadata = user_input_metadata(&mut request, realtime_handoff_id);
     let TurnInputRequest {
         mut input,
         thread_settings,
         start,
-        additional_context,
+        mut additional_context,
         responsesapi_client_metadata,
         ..
     } = request;
@@ -478,7 +542,7 @@ async fn start_or_steer(
         .steer_input(
             &mut input,
             sender_messages.as_ref(),
-            additional_context.clone(),
+            &mut additional_context,
             /*expected_turn_id*/ None,
             settings.required_active_final_output_json_schema(),
             responsesapi_client_metadata.clone(),
@@ -528,8 +592,12 @@ async fn start_or_steer(
             session
                 .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
                 .await;
-            let mut task_input =
-                merge_additional_context_input(session, &turn_context, additional_context).await;
+            if let Some(context) = additional_context {
+                turn_context
+                    .extension_data
+                    .insert(SubmittedAdditionalContext(context));
+            }
+            let mut task_input = Vec::new();
             if has_explicit_input {
                 task_input.push(
                     pending_turn_input(
@@ -560,13 +628,14 @@ async fn start_if_idle(
     submission_id: String,
     kind: TurnStartKind,
     expected_previous_turn_id: Option<String>,
+    realtime_handoff_id: Option<uuid::Uuid>,
     external: Option<crate::tasks::external_conversation::ExternalConversationTask>,
 ) -> CodexResult<TurnInputSubmission> {
     let WithTurnExtensionData {
         mut request,
         turn_extension_init,
     } = request;
-    let input_metadata = user_input_metadata(&mut request);
+    let input_metadata = user_input_metadata(&mut request, realtime_handoff_id);
     let TurnInputRequest {
         mut input,
         thread_settings,
@@ -688,8 +757,8 @@ async fn start_if_idle(
         .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
         .await;
 
-    let mut task_input =
-        merge_additional_context_input(session, &turn_context, additional_context).await;
+    let mut additional_context = additional_context.map(SubmittedAdditionalContext);
+    let mut task_input = Vec::new();
     let sender_messages = capture_sender_user_messages(session, &mut input).await;
     match kind {
         TurnStartKind::User => {
@@ -708,27 +777,30 @@ async fn start_if_idle(
         TurnStartKind::Automatic | TurnStartKind::Recovery => {
             // Empty automatic user input resumes sampling without a new message.
             if !matches!(&input, SubmittedTurnInput::UserInput { .. }) {
-                task_input.push(
-                    pending_turn_input(
-                        session,
-                        input,
-                        sender_messages.as_ref(),
-                        &turn_context.sub_id,
-                        input_metadata,
-                    )
-                    .await,
-                );
                 // Automatic turns drain their queued input before sampling. Keep the
                 // context and the input it describes together for the first request.
                 session
                     .input_queue
                     .extend_pending_input_for_turn_state(
                         turn_state.as_ref(),
-                        std::mem::take(&mut task_input),
+                        vec![InputQueueEntry {
+                            input: pending_turn_input(
+                                session,
+                                input,
+                                sender_messages.as_ref(),
+                                &turn_context.sub_id,
+                                input_metadata,
+                            )
+                            .await,
+                            additional_context: additional_context.take(),
+                        }],
                     )
                     .await;
             }
         }
+    }
+    if let Some(context) = additional_context {
+        turn_context.extension_data.insert(context);
     }
     if let Some(task) = external {
         Ok(session.start_task(turn_context, task_input, task).await)
@@ -744,17 +816,18 @@ async fn steer(
     request: WithTurnExtensionData<TurnInputRequest>,
     expected_turn_id: String,
     submission_id: String,
+    realtime_handoff_id: Option<uuid::Uuid>,
 ) -> CodexResult<TurnInputSubmission> {
     let WithTurnExtensionData {
         mut request,
         turn_extension_init,
     } = request;
-    let input_metadata = user_input_metadata(&mut request);
+    let input_metadata = user_input_metadata(&mut request, realtime_handoff_id);
     let TurnInputRequest {
         mut input,
         thread_settings,
         start,
-        additional_context,
+        mut additional_context,
         responsesapi_client_metadata,
         ..
     } = request;
@@ -776,7 +849,7 @@ async fn steer(
         .steer_input(
             &mut input,
             /*sender_messages*/ None,
-            additional_context,
+            &mut additional_context,
             Some(expected_turn_id.as_str()),
             settings.required_active_final_output_json_schema(),
             responsesapi_client_metadata,
@@ -824,7 +897,7 @@ impl Session {
             )]),
             self.additional_context_format(),
             &task.turn_context.session_telemetry,
-            &self.item_id_generator,
+            &self.context_ids,
         );
         if !input.is_empty() {
             self.input_queue
@@ -836,7 +909,7 @@ impl Session {
         }
     }
 
-    fn additional_context_format(&self) -> AdditionalContextFormat {
+    pub(super) fn additional_context_format(&self) -> AdditionalContextFormat {
         if self.enabled(Feature::UntrustedAsToolOutput) {
             AdditionalContextFormat::ToolOutputs
         } else {
@@ -861,9 +934,7 @@ impl Session {
         clippy::await_holding_invalid_type,
         reason = "The admission lock keeps the previous turn stable while capturing its attribution."
     )]
-    pub(crate) async fn reserve_pending_work_turn(
-        &self,
-    ) -> Option<(Arc<tokio::sync::Mutex<TurnState>>, TurnStartOptions)> {
+    pub(crate) async fn reserve_pending_work_turn(&self) -> Option<PendingWorkTurnReservation> {
         let mut active_turn = self.active_turn.lock().await;
         if active_turn.is_some() || self.turn_starts_closed() {
             return None;
@@ -881,13 +952,29 @@ impl Session {
             tracing::debug!(%error, "rollout budget stopped a pending-work wake");
             return None;
         }
+        // Explicit follow-ups and native child results finish already-admitted work.
+        // Injected mail has no terminal-result receipt and still respects drain.
+        let admission = if has_trigger_turn
+            || self
+                .input_queue
+                .has_mailbox_items_matching(crate::PendingAgentMessage::is_terminal_result)
+                .await
+        {
+            None
+        } else {
+            Some(self.services.extensions.admit_turn_start()?)
+        };
         let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
         let previous_options = if has_trigger_turn {
             Default::default()
         } else {
             self.agent_message_wake_options().await
         };
-        Some((Arc::clone(&active_turn.turn_state), previous_options))
+        Some(PendingWorkTurnReservation {
+            turn_state: Arc::clone(&active_turn.turn_state),
+            previous_options,
+            admission,
+        })
     }
 
     async fn agent_message_wake_options(&self) -> TurnStartOptions {
@@ -924,10 +1011,15 @@ impl Session {
         let has_trigger_turn = self.input_queue.has_trigger_turn_mailbox_items().await;
         let state = self.state.lock().await;
         let configuration = &state.session_configuration;
-        if !has_trigger_turn
+        if (self.enabled(Feature::WakeOnAgentMessages)
+            && !has_trigger_turn
             && !self.has_outstanding_durable_sleep()
             && !TurnStartKind::Automatic
-                .permits_mode(configuration.step_settings.collaboration_mode.mode)
+                .permits_mode(configuration.step_settings.collaboration_mode.mode))
+            || configuration
+                .step_settings
+                .validate(&configuration.step_settings_constraints(&configuration.environments))
+                .is_err()
         {
             *active = None;
             return None;
@@ -971,7 +1063,7 @@ impl Session {
         &self,
         input: &mut SubmittedTurnInput,
         sender_messages: Option<&GuardianSenderMessages>,
-        additional_context: BTreeMap<String, AdditionalContextEntry>,
+        additional_context: &mut Option<BTreeMap<String, AdditionalContextEntry>>,
         expected_turn_id: Option<&str>,
         required_final_output_json_schema: Option<&Value>,
         responsesapi_client_metadata: ResponsesApiClientMetadataUpdate,
@@ -1045,10 +1137,6 @@ impl Session {
         {
             return Err(NotSubmittedReason::ActiveTurnOutputSchemaMismatch);
         }
-        let mut pending_input =
-            merge_additional_context_input(self, &active_task.turn_context, additional_context)
-                .await;
-
         active_task
             .turn_context
             .turn_metadata_state
@@ -1074,11 +1162,15 @@ impl Session {
                 .await
             }
         };
-        pending_input.push(input);
+        self.bind_realtime_handoffs_to_turn(std::slice::from_ref(&input), active_turn_id)
+            .await;
         self.input_queue
             .extend_pending_input_and_notify_for_turn_state(
                 active_turn.turn_state.as_ref(),
-                pending_input,
+                vec![InputQueueEntry {
+                    input,
+                    additional_context: additional_context.take().map(SubmittedAdditionalContext),
+                }],
             )
             .await;
         Ok((
@@ -1086,28 +1178,6 @@ impl Session {
             active_task.turn_context.root_turn_id(),
         ))
     }
-}
-
-async fn merge_additional_context_input(
-    session: &Session,
-    turn_context: &TurnContext,
-    additional_context: BTreeMap<String, AdditionalContextEntry>,
-) -> Vec<TurnInput> {
-    let format = session.additional_context_format();
-    let additional_context_input = {
-        let mut state = session.state.lock().await;
-        state.additional_context.merge(
-            additional_context,
-            format,
-            &turn_context.session_telemetry,
-            &session.item_id_generator,
-        )
-    };
-    additional_context_input
-        .into_iter()
-        .map(|item| session.annotate_client_response_item(item))
-        .map(TurnInput::ResponseItem)
-        .collect()
 }
 
 async fn capture_sender_user_messages(
@@ -1158,10 +1228,22 @@ async fn pending_turn_input(
             ) =>
         {
             let mut metadata = if let Some(fragment) = sender_messages {
+                let config = session.get_config().await;
+                let text = if let Some(budget) = &config.guardian_sync_elastic_budget {
+                    fragment.render_elastic(budget)
+                } else {
+                    const FIXED_SENDER_CONTEXT_BYTES: usize = 3_600;
+                    let text = fragment.render().into_text().unwrap_or_default();
+                    if text.len() <= FIXED_SENDER_CONTEXT_BYTES {
+                        text
+                    } else {
+                        "Host: Sender context exceeds the evidence budget. Do not infer permission from missing evidence.\n".to_owned()
+                    }
+                };
                 let mut messages = SenderUserMessages {
                     receiver_turn_id: turn_id.to_owned(),
                     receiver_message_id: fragment.delivery.clone(),
-                    text: fragment.render().into_text().unwrap_or_default(),
+                    text,
                 };
                 messages.bound();
                 Some(CodexHarnessMetadata {

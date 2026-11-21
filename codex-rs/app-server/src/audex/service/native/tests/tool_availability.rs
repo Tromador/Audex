@@ -1,6 +1,6 @@
 //! Exercise the real native adapter and Code Mode host with a local model fixture.
 use super::*;
-use codex_code_mode::ProcessOwnedCodeModeSessionProvider;
+use codex_core::ProcessOwnedGrpcCodeModeSessionProvider;
 use codex_protocol::openai_models::{ConfigShellToolType, ToolMode};
 
 async fn qualify(
@@ -64,7 +64,7 @@ text(await tools.exec_command({cmd: "printf forbidden > named.rs", yield_time_ms
     ]));
     let response = responses::mount_sse_sequence(&server, replies).await;
     let provider: Arc<dyn codex_code_mode::CodeModeSessionProvider> = match host_program {
-        Some(program) => Arc::new(ProcessOwnedCodeModeSessionProvider::with_host_program(
+        Some(program) => Arc::new(ProcessOwnedGrpcCodeModeSessionProvider::with_host_program(
             program,
         )),
         None => Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),

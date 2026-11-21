@@ -259,9 +259,9 @@ async fn command_center_new_reads_server_defaults_for_actual_destination() -> Re
                 }
             ),
         )?;
-        std::fs::create_dir(destination.path().join(".codex"))?;
+        std::fs::create_dir(destination.path().join(".audex"))?;
         std::fs::write(
-            destination.path().join(".codex/config.toml"),
+            destination.path().join(".audex/config.toml"),
             "model = \"destination-model\"\nservice_tier = \"flex\"\n",
         )?;
         for home in [client_home.path(), server_home.path()] {
@@ -363,7 +363,7 @@ async fn command_center_new_reads_server_defaults_for_actual_destination() -> Re
         app.new_agents_overview_session(
             &mut tui,
             &mut server,
-            explicit_cwd.then(|| destination.path().to_path_buf().abs()),
+            explicit_cwd.then(|| destination.path().to_path_buf()),
         )
         .await?;
         assert_eq!(
@@ -1191,11 +1191,8 @@ async fn command_center_new_checkout_and_worktree_preserve_source_and_default_br
         .await?;
         let mut tui = make_test_tui()?;
         tui.pause_events();
-        let new_session = app.new_agents_overview_session(
-            &mut tui,
-            &mut server,
-            Some(selected.cwd.clone().abs()),
-        );
+        let new_session =
+            app.new_agents_overview_session(&mut tui, &mut server, Some(selected.cwd.clone()));
         let size = std::mem::size_of_val(&new_session);
         assert!(
             size < 64 * 1024,
@@ -1304,7 +1301,7 @@ async fn command_center_new_checkout_and_worktree_preserve_source_and_default_br
             app.start_agents_overview_session(
                 &mut tui,
                 &mut failed_server,
-                Some(unused.cwd.clone().abs()),
+                Some(unused.cwd.clone()),
                 Some((manager.clone(), unused.clone())),
                 /*startup_draft*/ None,
             )

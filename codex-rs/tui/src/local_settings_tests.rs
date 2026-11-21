@@ -161,9 +161,9 @@ fast_default_opt_out = true
         std::fs::write(home.path().join("config.toml"), config_text)?;
         let project = tempfile::tempdir()?;
         let project_cwd = AbsolutePathBuf::from_absolute_path(project.path())?;
-        std::fs::create_dir(project.path().join(".codex"))?;
+        std::fs::create_dir(project.path().join(".audex"))?;
         std::fs::write(
-            project.path().join(".codex/config.toml"),
+            project.path().join(".audex/config.toml"),
             "[tui]\ntheme = 'project-theme'\nstatus_line_provider = { server = 'project', tool = 'usage' }\n[tui.default_hosts.project_a]\nuser_a = 'project-override'\nuser_b = 'project-only'\n",
         )?;
         crate::legacy_core::config::set_project_trust_level(
@@ -242,7 +242,7 @@ async fn malformed_status_line_provider_uses_project_and_user_validation_rules()
 
     let home = tempfile::tempdir()?;
     let project = tempfile::tempdir()?;
-    let project_config = project.path().join(".codex");
+    let project_config = project.path().join(".audex");
     std::fs::create_dir(&project_config)?;
     let malformed = "[tui]\nstatus_line_provider = 42\n";
     std::fs::write(

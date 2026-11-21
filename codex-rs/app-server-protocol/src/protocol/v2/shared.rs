@@ -78,6 +78,9 @@ pub enum CodexErrorInfo {
     ContextWindowExceeded,
     SessionBudgetExceeded,
     UsageLimitExceeded,
+    ApiKeySpendLimitExceeded,
+    ProjectSpendLimitExceeded,
+    OrganizationSpendLimitExceeded,
     RateLimitExceeded,
     FlexUnavailable,
     ServerOverloaded,
@@ -158,6 +161,15 @@ impl From<CoreCodexErrorInfo> for CodexErrorInfo {
         match value {
             CoreCodexErrorInfo::ContextWindowExceeded => CodexErrorInfo::ContextWindowExceeded,
             CoreCodexErrorInfo::SessionBudgetExceeded => CodexErrorInfo::SessionBudgetExceeded,
+            CoreCodexErrorInfo::ApiKeySpendLimitExceeded => {
+                CodexErrorInfo::ApiKeySpendLimitExceeded
+            }
+            CoreCodexErrorInfo::ProjectSpendLimitExceeded => {
+                CodexErrorInfo::ProjectSpendLimitExceeded
+            }
+            CoreCodexErrorInfo::OrganizationSpendLimitExceeded => {
+                CodexErrorInfo::OrganizationSpendLimitExceeded
+            }
             CoreCodexErrorInfo::UsageLimitExceeded => CodexErrorInfo::UsageLimitExceeded,
             CoreCodexErrorInfo::RateLimitExceeded => CodexErrorInfo::RateLimitExceeded,
             CoreCodexErrorInfo::FlexUnavailable => CodexErrorInfo::FlexUnavailable,

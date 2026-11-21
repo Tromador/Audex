@@ -151,7 +151,7 @@ async fn startup_reloads_the_callers_selected_project() -> anyhow::Result<()> {
     let home = root.join("home");
     let selected = root.join("selected");
     std::fs::create_dir(&home)?;
-    std::fs::create_dir_all(selected.join(".codex"))?;
+    std::fs::create_dir_all(selected.join(".audex"))?;
     std::fs::create_dir(selected.join(".git"))?;
     set_project_trust_level(&home, &selected, TrustLevel::Trusted)?;
     let selected_url = "https://selected.example/backend-api/";
@@ -161,7 +161,7 @@ async fn startup_reloads_the_callers_selected_project() -> anyhow::Result<()> {
         &user_config,
         format!("chatgpt_base_url = '{selected_url}'\n{trust}"),
     )?;
-    let project_config = selected.join(".codex/config.toml");
+    let project_config = selected.join(".audex/config.toml");
     std::fs::write(&project_config, "model = 'selected-model'")?;
     let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
     let mut config = Arc::new(

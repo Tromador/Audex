@@ -861,7 +861,7 @@ async fn plugin_list_omitted_cwds_excludes_server_project_config() -> Result<()>
     let project_marketplace = TempDir::new()?;
     std::fs::create_dir_all(codex_home.path().join(".agents/plugins"))?;
     std::fs::create_dir_all(codex_home.path().join(".git"))?;
-    std::fs::create_dir_all(codex_home.path().join(".codex"))?;
+    std::fs::create_dir_all(codex_home.path().join(".audex"))?;
     std::fs::create_dir_all(project_marketplace.path().join(".agents/plugins"))?;
     write_installed_plugin(&codex_home, "home-marketplace", "home-plugin")?;
     std::fs::write(
@@ -891,7 +891,7 @@ async fn plugin_list_omitted_cwds_excludes_server_project_config() -> Result<()>
     )?;
     let source = serde_json::to_string(&project_marketplace.path().to_string_lossy())?;
     std::fs::write(
-        codex_home.path().join(".codex/config.toml"),
+        codex_home.path().join(".audex/config.toml"),
         format!(
             "[marketplaces.project-marketplace]\nsource_type = \"local\"\nsource = {source}\n\n[plugins.\"home-plugin@home-marketplace\"]\nenabled = false\n"
         ),
@@ -1173,7 +1173,7 @@ async fn plugin_list_refreshes_plugins_from_each_cwd(
     };
     let versions = ["1.1.0", "2.0.0"];
     for ((repo, name), version) in repos.iter().zip(names).zip(versions) {
-        for directory in [".git", ".codex", ".agents/plugins", "sample/.codex-plugin"] {
+        for directory in [".git", ".audex", ".agents/plugins", "sample/.codex-plugin"] {
             std::fs::create_dir_all(repo.join(directory))?;
         }
         std::fs::write(
@@ -1194,7 +1194,7 @@ async fn plugin_list_refreshes_plugins_from_each_cwd(
             format!("[plugins.\"sample@{name}\"]\nenabled = true\n")
         };
         std::fs::write(
-            repo.join(".codex/config.toml"),
+            repo.join(".audex/config.toml"),
             format!("[features]\nplugins = true\n{plugin_config}"),
         )?;
         set_project_trust_level(codex_home.path(), repo, TrustLevel::Trusted)?;
@@ -1268,14 +1268,14 @@ async fn plugin_catalogs_skip_invalid_project_config_and_report_cwd_error() -> R
     let invalid_repo = workspace.path().join("invalid");
     let valid_repo = workspace.path().join("valid");
     for repo in [&invalid_repo, &valid_repo] {
-        for directory in [".git", ".codex", ".agents/plugins"] {
+        for directory in [".git", ".audex", ".agents/plugins"] {
             std::fs::create_dir_all(repo.join(directory))?;
         }
         set_project_trust_level(codex_home.path(), repo, TrustLevel::Trusted)?;
     }
-    std::fs::write(invalid_repo.join(".codex/config.toml"), "invalid = [\n")?;
+    std::fs::write(invalid_repo.join(".audex/config.toml"), "invalid = [\n")?;
     std::fs::write(
-        valid_repo.join(".codex/config.toml"),
+        valid_repo.join(".audex/config.toml"),
         "[plugins.\"sample@valid-marketplace\"]\nenabled = true\n",
     )?;
     std::fs::write(
@@ -1898,14 +1898,14 @@ enabled = true
     let later_repo = TempDir::new()?;
     let mut cwds = vec![AbsolutePathBuf::try_from(repo_root.path())?];
     if configured_in_later_cwd {
-        for directory in [".git", ".codex", ".agents/plugins"] {
+        for directory in [".git", ".audex", ".agents/plugins"] {
             std::fs::create_dir_all(later_repo.path().join(directory))?;
         }
         std::fs::copy(
             repo_root.path().join(".agents/plugins/marketplace.json"),
             later_repo.path().join(".agents/plugins/marketplace.json"),
         )?;
-        std::fs::write(later_repo.path().join(".codex/config.toml"), plugin_config)?;
+        std::fs::write(later_repo.path().join(".audex/config.toml"), plugin_config)?;
         set_project_trust_level(codex_home.path(), later_repo.path(), TrustLevel::Trusted)?;
         cwds.push(AbsolutePathBuf::try_from(later_repo.path())?);
     }
@@ -2204,7 +2204,7 @@ async fn plugin_list_includes_remote_marketplaces_when_remote_plugin_enabled(
 
     let repo = TempDir::new()?;
     let cwds = if project_configuration != ProjectPluginConfiguration::None {
-        for directory in [".git", ".codex", ".agents/plugins"] {
+        for directory in [".git", ".audex", ".agents/plugins"] {
             std::fs::create_dir_all(repo.path().join(directory))?;
         }
         let config = if project_configuration == ProjectPluginConfiguration::Invalid {
@@ -2212,7 +2212,7 @@ async fn plugin_list_includes_remote_marketplaces_when_remote_plugin_enabled(
         } else {
             "[features]\nplugins = false\n[plugins.\"sample@disabled-local\"]\nenabled = true\n"
         };
-        std::fs::write(repo.path().join(".codex/config.toml"), config)?;
+        std::fs::write(repo.path().join(".audex/config.toml"), config)?;
         std::fs::write(
             repo.path().join(".agents/plugins/marketplace.json"),
             r#"{"name":"disabled-local","plugins":[{"name":"sample","source":{"source":"local","path":"./sample"}}]}"#,
@@ -4617,11 +4617,11 @@ remote_plugin = true
     )?;
 
     let repo = TempDir::new()?;
-    for directory in [".git", ".codex", ".agents/plugins"] {
+    for directory in [".git", ".audex", ".agents/plugins"] {
         std::fs::create_dir_all(repo.path().join(directory))?;
     }
     std::fs::write(
-        repo.path().join(".codex/config.toml"),
+        repo.path().join(".audex/config.toml"),
         "[features]\nplugins = true\n[plugins.\"sample@local\"]\nenabled = true\n",
     )?;
     std::fs::write(

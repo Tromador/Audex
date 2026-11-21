@@ -282,9 +282,9 @@ trust_level = "trusted"
             ),
         )?;
         // Cloud authentication must use the project selected by --cd.
-        std::fs::create_dir(workspace.path().join(".codex"))?;
+        std::fs::create_dir(workspace.path().join(".audex"))?;
         std::fs::write(
-            workspace.path().join(".codex/config.toml"),
+            workspace.path().join(".audex/config.toml"),
             "cli_auth_credentials_store = \"file\"\n",
         )?;
         write_chatgpt_auth(

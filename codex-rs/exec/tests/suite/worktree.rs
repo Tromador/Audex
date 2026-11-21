@@ -114,8 +114,8 @@ async fn worktree_start_and_fork_use_host_pool_and_preserve_legacy_resume() -> a
     seed_mock.single_request();
     legacy_manager.bind_thread(&legacy.root, &legacy_id)?;
     fs::write(source.join("AGENTS.md"), "uncommitted source instructions")?;
-    fs::create_dir(source.join(".codex"))?;
-    fs::write(source.join(".codex/config.toml"), "[invalid source config")?;
+    fs::create_dir(source.join(".audex"))?;
+    fs::write(source.join(".audex/config.toml"), "[invalid source config")?;
 
     let launcher = tempfile::tempdir()?;
     fs::create_dir(launcher.path().join("extra"))?;
@@ -295,13 +295,13 @@ async fn worktree_start_and_fork_use_host_pool_and_preserve_legacy_resume() -> a
     for args in [vec!["prompt"], vec!["fork", legacy_id.as_str(), "prompt"]] {
         let request_count = if args.first() == Some(&"fork") {
             // The saved checkout can choose file auth even when the launcher does not.
-            fs::remove_file(source.join(".codex/config.toml"))?;
-            fs::create_dir_all(legacy.cwd.join(".codex"))?;
+            fs::remove_file(source.join(".audex/config.toml"))?;
+            fs::create_dir_all(legacy.cwd.join(".audex"))?;
             fs::write(
-                legacy.cwd.join(".codex/config.toml"),
+                legacy.cwd.join(".audex/config.toml"),
                 "cli_auth_credentials_store=\"file\"\n",
             )?;
-            git(&legacy.cwd, &["add", ".codex/config.toml"])?;
+            git(&legacy.cwd, &["add", ".audex/config.toml"])?;
             git(
                 &legacy.cwd,
                 &["commit", "--quiet", "--no-gpg-sign", "-m", "file auth"],

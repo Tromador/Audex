@@ -50,8 +50,9 @@ impl SessionTask for ExternalConversationTask {
             .ok_or_else(|| CodexErr::Fatal("External conversation was already started".into()))?;
         session.emit_turn_started(&ctx, self.kind()).await;
         // Record only the admitted operator input, without executing prompt hooks.
+        let mut input_error = None;
         for item in input {
-            crate::hook_runtime::record_pending_input(
+            if let Err(error) = crate::hook_runtime::record_pending_input(
                 &session,
                 &ctx,
                 ctx.model_info(),
@@ -59,7 +60,15 @@ impl SessionTask for ExternalConversationTask {
                 Vec::new(),
                 PersistContext::Standard,
             )
-            .await;
+            .await
+            {
+                input_error.get_or_insert(error);
+            }
+        }
+        // Don't release the external host when the operator input is missing from history.
+        if let Some(error) = input_error {
+            session.conversation.stop_for_history_recovery().await;
+            return Err(CodexErr::Io(error));
         }
         session
             .flush_rollout()

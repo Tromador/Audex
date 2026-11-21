@@ -1019,6 +1019,7 @@ async fn mcp_server_status_list_waits_for_live_stdio_metadata_before_using_cache
     let pid_file = codex_home.path().join("mcp.pid");
     std::fs::write(&barrier_file, "ready")?;
     mock_responses_config(&server.uri())
+        .disable_feature(Feature::McpConnectionSharing)
         .with_extra_config(&format!(
             r#"[mcp_servers.cached-stdio]
 command = {}
@@ -1092,6 +1093,7 @@ async fn dormant_thread_status_returns_live_inventory_without_waking_the_thread(
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     mock_responses_config(&server.uri())
+        .disable_feature(Feature::McpConnectionSharing)
         .enable_feature(Feature::McpLazyStdioStartup)
         .with_extra_config(&format!(
             "[mcp_servers.memo]\ncommand = {}\nenabled_tools = [\"echo\"]",
@@ -1185,7 +1187,7 @@ async fn mcp_server_status_list_uses_thread_project_local_config() -> Result<()>
         })
         .await?;
 
-    let project_config_dir = workspace.path().join(".codex");
+    let project_config_dir = workspace.path().join(".audex");
     std::fs::create_dir_all(&project_config_dir)?;
     std::fs::write(
         project_config_dir.join("config.toml"),
@@ -1765,7 +1767,7 @@ async fn mcp_server_status_keeps_same_named_environment_inventory_separate() -> 
         )?;
         let home_value = toml::Value::String(home.path().to_string_lossy().into_owned());
         environment_config.push_str(&format!(
-            "\n[[environments]]\nid = \"{id}\"\nprogram = {program}\nargs = [\"exec-server\", \"--listen\", \"stdio\"]\n[environments.env]\nCODEX_HOME = {home_value}\n"
+            "\n[[environments]]\nid = \"{id}\"\nprogram = {program}\nargs = [\"exec-server\", \"--listen\", \"stdio\"]\n[environments.env]\nAUDEX_HOME = {home_value}\n"
         ));
         environments.push(TurnEnvironmentParams {
             environment_id: (*id).to_string(),

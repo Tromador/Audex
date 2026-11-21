@@ -701,6 +701,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
                     realtime_session_id: "voice".to_string(),
                     observed_at_ms: None,
                     content: RealtimeItemContent::RealtimeSessionClosed {
+                        final_frame_sequence: None,
                         outcome: RealtimeSessionOutcome::Ended,
                     },
                 }),
@@ -814,6 +815,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
             multi_agent_version: None,
             history_mode: ThreadHistoryMode::Legacy,
             history_base: None,
+            inherited_history_visibility: Default::default(),
             subagent_history_start_ordinal: None,
             initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
@@ -3166,6 +3168,7 @@ async fn create_paginated_subagent_thread(
             multi_agent_version: None,
             history_mode: ThreadHistoryMode::Paginated,
             history_base,
+            inherited_history_visibility: Default::default(),
             subagent_history_start_ordinal,
             initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,

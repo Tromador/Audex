@@ -288,7 +288,7 @@ pub(crate) async fn execute(
                 .map_err(|e| e.to_string())?;
             let params = AuditStartRequest {
                 input: args.input,
-                cwd: thread.thread.cwd.display().to_string(),
+                cwd: thread.thread.cwd.to_string(),
                 brief: args.brief,
                 reviewers,
                 guidance: args.guidance,

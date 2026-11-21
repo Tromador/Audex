@@ -30,6 +30,8 @@ pub use feature_configs::GuardianV2ReviewScopeConfigToml;
 pub use feature_configs::GuardianV2TranscriptConfigToml;
 pub use feature_configs::GuardianV2TranscriptSource;
 pub use feature_configs::GuardianV3ConfigToml;
+pub use feature_configs::GuardianV3HousekeeperConfigToml;
+pub use feature_configs::GuardianV3ReviewerConfigToml;
 pub use feature_configs::MultiAgentV2ConfigToml;
 pub use feature_configs::NetworkProxyConfigToml;
 pub use feature_configs::NetworkProxyDomainPermissionToml;
@@ -147,6 +149,8 @@ pub enum Feature {
     UntrustedAsToolOutput,
     /// Record model-attempted tool calls in internal Responses metadata.
     ExecutedToolCallMetadata,
+    /// Record executed tool calls and attach eligible connector results to their metadata.
+    ConnectorToolResultPassthrough,
     /// Enable JavaScript code mode backed by the standalone host process.
     CodeMode,
     /// Expose ranked tool discovery inside JavaScript code mode.
@@ -155,7 +159,7 @@ pub enum Feature {
     CodeModeBufferedExec,
     /// Run JavaScript code mode in the standalone host process.
     CodeModeHost,
-    /// Use gRPC over stdio for the process-owned code-mode host.
+    /// Removed compatibility flag. The local code-mode host always uses gRPC over stdio.
     CodeModeHostGrpc,
     /// Truncate output in the process-owned code-mode host before sending it to Core.
     CodeModeHostOutputTruncation,
@@ -199,10 +203,10 @@ pub enum Feature {
     /// Allow the model to request web searches that fetch cached content.
     /// Takes precedence over `WebSearchRequest`.
     WebSearchCached,
+    /// Prefer indexed search when the implicit cached default can be upgraded.
+    WebSearchIndexedDefault,
     /// Expose the extension-backed standalone web search tool.
     StandaloneWebSearch,
-    /// Let the host authorize MCP search independently of native search through per-turn policy.
-    HostedSearchPolicy,
     /// Request the legacy Landlock mode of the Linux sandbox.
     UseLegacyLandlock,
     /// Experimental shell snapshotting.
@@ -234,6 +238,8 @@ pub enum Feature {
     LocalThreadStoreSharedCompression,
     /// Migrate legacy local rollout files to paginated history in the background.
     BackgroundPaginatedRolloutMigration,
+    /// Enroll paginated local threads in canonical realtime frame history.
+    RealtimeFramesLocal,
     /// Enable the Chronicle sidecar for passive screen-context memories.
     Chronicle,
     /// Compress request bodies (zstd) when sending streaming requests to codex-backend.
@@ -377,6 +383,10 @@ pub enum Feature {
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
     InAppUpdates,
+    /// Allow automatic and explicit daemon updates.
+    ///
+    /// Requirements-only gate: this should be set from requirements, not user config.
+    DaemonUpdates,
     /// Allow Browser Use agent integration in desktop apps.
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
@@ -768,6 +778,13 @@ impl Features {
                     );
                     continue;
                 }
+                "code_mode_host_grpc" => {
+                    self.record_legacy_usage_force(
+                        "features.code_mode_host_grpc",
+                        Feature::CodeModeHostGrpc,
+                    );
+                    continue;
+                }
                 "transcript_v2" => {
                     self.record_legacy_usage_force("features.transcript_v2", Feature::TranscriptV2);
                     continue;
@@ -890,6 +907,10 @@ fn legacy_usage_notice(alias: &str, feature: Feature) -> (String, Option<String>
         Feature::GuardianThreadContext => (
             "`[features.guardianv2].thread_context` is deprecated and ignored.".to_string(),
             Some("Thread-owned Guardian context is always enabled. Remove `thread_context` from [features.guardianv2] in config.toml, including profile overrides.".to_string()),
+        ),
+        Feature::CodeModeHostGrpc => (
+            "`[features].code_mode_host_grpc` is deprecated and ignored.".to_string(),
+            Some("The local code-mode host always uses gRPC over stdio. Remove this setting from your configuration.".to_string()),
         ),
         Feature::TranscriptV2 => (
             "`[features].transcript_v2` is deprecated and ignored.".to_string(),
@@ -1022,6 +1043,7 @@ impl Features {
 impl FeaturesToml {
     pub fn entries(&self) -> BTreeMap<String, bool> {
         let mut entries = self.entries.clone();
+        entries.remove(Feature::DaemonUpdates.key());
         if let Some(enabled) = self
             .async_compaction
             .as_ref()
@@ -1173,7 +1195,11 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::TuiExtensionsStatusLine,
         key: "tui_extensions_statusline",
-        stage: Stage::UnderDevelopment,
+        stage: Stage::Experimental {
+            name: "Custom status line",
+            menu_description: "Restart the TUI, then use /statusline.",
+            announcement: "",
+        },
         default_enabled: false,
     },
     FeatureSpec {
@@ -1320,6 +1346,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::ConnectorToolResultPassthrough,
+        key: "connector_tool_result_passthrough",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::StableEnvironmentTools,
         key: "stable_environment_tools",
         stage: Stage::Removed,
@@ -1352,8 +1384,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::CodeModeHostGrpc,
         key: "code_mode_host_grpc",
-        stage: Stage::Stable,
-        default_enabled: true,
+        stage: Stage::Removed,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::CodeModeHostOutputTruncation,
@@ -1434,14 +1466,14 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
-        id: Feature::StandaloneWebSearch,
-        key: "standalone_web_search",
-        stage: Stage::UnderDevelopment,
+        id: Feature::WebSearchIndexedDefault,
+        key: "web_search_indexed_default",
+        stage: Stage::Stable,
         default_enabled: false,
     },
     FeatureSpec {
-        id: Feature::HostedSearchPolicy,
-        key: "hosted_search_policy",
+        id: Feature::StandaloneWebSearch,
+        key: "standalone_web_search",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1502,6 +1534,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::BackgroundPaginatedRolloutMigration,
         key: "background_paginated_rollout_migration",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::RealtimeFramesLocal,
+        key: "realtime_frames_local",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1786,8 +1824,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::McpConnectionSharing,
         key: "mcp_connection_sharing",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::McpSharedReplCwd,
@@ -1798,8 +1836,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::McpLazyStdioStartup,
         key: "mcp_lazy_stdio_startup",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::MultiEnvironmentMcp,
@@ -2000,6 +2038,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::DaemonUpdates,
+        key: "daemon_updates",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
         id: Feature::BrowserUse,
         key: "browser_use",
         stage: Stage::Stable,
@@ -2104,8 +2148,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ConcurrentReasoningSummaries,
         key: "concurrent_reasoning_summaries",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::OutputTokenReplay,

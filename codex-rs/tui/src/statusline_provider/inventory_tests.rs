@@ -24,7 +24,7 @@ async fn global_inventory_ignores_the_startup_projects_overrides() -> Result<()>
     std::fs::create_dir_all(&home)?;
     std::fs::create_dir_all(project.join(".git"))?;
     std::fs::write(project.join(".git/HEAD"), "ref: refs/heads/main\n")?;
-    std::fs::create_dir(project.join(".codex"))?;
+    std::fs::create_dir(project.join(".audex"))?;
     let package = home.join("plugins/cache/local/daily/local");
     std::fs::create_dir_all(package.join(".codex-plugin"))?;
     std::fs::write(
@@ -64,7 +64,7 @@ command = {command}
         ),
     )?;
     std::fs::write(
-        project.join(".codex/config.toml"),
+        project.join(".audex/config.toml"),
         format!(
             r#"
 [mcp_servers.calendar]

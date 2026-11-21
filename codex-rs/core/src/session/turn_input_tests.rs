@@ -238,7 +238,7 @@ async fn start_only_rejects_active_turn_without_injecting() {
         submission
     );
     assert_eq!(
-        Vec::<TurnInput>::new(),
+        Vec::<InputQueueEntry>::new(),
         session
             .input_queue
             .get_pending_input(&session.active_turn)
@@ -325,7 +325,7 @@ async fn recovery_rejects_active_turn_without_injecting_or_applying_settings() {
             .get_pending_input(&session.active_turn)
             .await
             .0,
-        Vec::<TurnInput>::new()
+        Vec::<InputQueueEntry>::new()
     );
 
     session.abort_all_tasks(TurnAbortReason::Interrupted).await;
@@ -399,7 +399,7 @@ async fn start_only_rejects_current_plan_before_validating_settings() {
     assert_eq!(session.thread_settings_snapshot().await, desired_settings);
     assert!(session.active_turn.lock().await.is_none());
     assert_eq!(
-        Vec::<TurnInput>::new(),
+        Vec::<InputQueueEntry>::new(),
         session
             .input_queue
             .get_pending_input(&session.active_turn)
@@ -673,7 +673,7 @@ async fn automatic_admission_rechecks_plan_mode_without_committing_sparse_settin
             .get_pending_input(&session.active_turn)
             .await
             .0,
-        Vec::<TurnInput>::new()
+        Vec::<InputQueueEntry>::new()
     );
 
     // The rejected candidate is valid and would have real runtime effects if
@@ -767,7 +767,7 @@ async fn admission_revalidates_constraints_before_committing(kind: TurnStartKind
             .get_pending_input(&session.active_turn)
             .await
             .0,
-        Vec::<TurnInput>::new()
+        Vec::<InputQueueEntry>::new()
     );
 }
 
@@ -1133,7 +1133,10 @@ async fn steer_preserves_request_origin(
         .input_queue
         .get_pending_input(&session.active_turn)
         .await
-        .0;
+        .0
+        .into_iter()
+        .map(|entry| entry.input)
+        .collect::<Vec<_>>();
     assert_eq!(
         pending,
         vec![TurnInput::UserInput {
@@ -1163,7 +1166,7 @@ fn dictation_metadata_is_captured_per_input_and_removed_from_responses() {
             "false".to_owned(),
         )])));
     assert_eq!(
-        user_input_metadata(&mut request).used_dictation,
+        user_input_metadata(&mut request, /*realtime_handoff_id*/ None).used_dictation,
         Some(false)
     );
     assert_eq!(
@@ -1218,7 +1221,7 @@ async fn scored_prompt_keeps_its_submission_item_id() {
             content,
             client_id,
             metadata,
-        } = input
+        } = input.input
         else {
             panic!("expected admitted user input");
         };
@@ -1231,7 +1234,8 @@ async fn scored_prompt_keeps_its_submission_item_id() {
                 metadata,
                 codex_thread_store::PersistContext::Standard,
             )
-            .await;
+            .await
+            .expect("record user input");
     }
     let history = session.clone_history().await;
     let ids: Vec<_> = history

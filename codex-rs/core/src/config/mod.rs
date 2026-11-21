@@ -80,6 +80,7 @@ use codex_features::FeatureOverrides;
 use codex_features::FeatureToml;
 use codex_features::Features;
 use codex_features::FeaturesToml;
+use codex_features::GuardianV3ConfigToml;
 use codex_features::MultiAgentV2ConfigToml;
 use codex_features::NetworkProxyConfigToml;
 use codex_features::RuntimeAuthMode;
@@ -245,7 +246,7 @@ pub use windows_sandbox_config::windows_mxc_allowed_by_config;
 
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_FILES: i64 = 10 * 1024 * 1024;
-const DEFAULT_ASYNC_COMPACTION_THRESHOLD_PERCENT: u8 = 65;
+pub(crate) const DEFAULT_ASYNC_COMPACTION_THRESHOLD_PERCENT: u8 = 65;
 
 /// Signals that a public config selected the retired `untrusted` approval policy.
 #[derive(Debug, thiserror::Error)]
@@ -637,6 +638,13 @@ pub enum ThreadStoreConfig {
     InMemory { id: String },
 }
 
+/// Provider resolved by the host for Guardian inference on this thread.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuardianInferenceProvider {
+    pub id: String,
+    pub info: ModelProviderInfo,
+}
+
 /// Application configuration loaded from disk and merged with overrides.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -689,6 +697,11 @@ pub struct Config {
 
     /// Info needed to make an API request to the model.
     pub model_provider: ModelProviderInfo,
+
+    /// Host-selected inference provider for Guardian. When set, Guardian keeps review
+    /// history independent of actor compaction and never reuses actor checkpoints.
+    /// When unset, Guardian inherits the actor's provider and existing history policy.
+    pub guardian_model_provider: Option<Arc<GuardianInferenceProvider>>,
 
     /// Deprecated: `friendly` and `pragmatic` no longer select a style.
     pub personality: Option<Personality>,
@@ -752,6 +765,8 @@ pub struct Config {
     pub guardian_policy_template: Option<String>,
     /// Transcript encoding shared by Guardian review and scoring.
     pub guardian_transcript_mode: codex_protocol::TranscriptFormat,
+    /// GV3 settings captured when the app-server installs the extension.
+    pub guardian_v3: Option<Arc<GuardianV3ConfigToml>>,
     /// Frozen section policy for sync Guardian; absence keeps fixed budgeting.
     pub guardian_sync_elastic_budget: Option<codex_guardian_context::ElasticBudgetConfig>,
     /// Frozen section policy for async Guardian; absence keeps fixed budgeting.
@@ -1160,6 +1175,10 @@ pub struct Config {
 
     /// Explicit or feature-derived web search mode.
     pub web_search_mode: Constrained<WebSearchMode>,
+
+    /// Whether this mode came from an accepted explicit `web_search` setting.
+    /// Kept with the session-static mode when user config layers are refreshed.
+    pub web_search_mode_was_explicit: bool,
 
     /// Additional parameters for the web search tool when it is enabled.
     pub web_search_config: Option<WebSearchConfig>,
@@ -1698,12 +1717,7 @@ async fn config_toml_from_layers(layers: &ConfigLayerStack) -> std::io::Result<C
     match ConfigToml::try_from(layers.effective_config()) {
         Ok(config_toml) => Ok(config_toml),
         Err(err) => {
-            if let Some(config_error) = codex_config::first_layer_config_error::<ConfigToml>(
-                layers,
-                codex_config::CONFIG_TOML_FILE,
-            )
-            .await
-            {
+            if let Some(config_error) = codex_config::first_layer_config_error(layers).await {
                 return Err(codex_config::io_error_from_config_error(
                     std::io::ErrorKind::InvalidData,
                     config_error,
@@ -1731,6 +1745,14 @@ impl Config {
         }
     }
 
+    /// A host-selected Guardian provider cannot reuse the actor's opaque checkpoints.
+    pub(crate) fn guardian_reuses_parent_compaction(&self) -> bool {
+        self.guardian_model_provider.is_none()
+            && self
+                .features
+                .enabled(Feature::GuardianReuseParentCompaction)
+    }
+
     /// Capture storage and sync preparation use one session-static rollout choice.
     pub(crate) fn guardian_context_budgeting(&self) -> codex_guardian_context::ContextBudgeting {
         if self.guardian_sync_elastic_budget.is_some() {
@@ -1738,6 +1760,22 @@ impl Config {
         } else {
             codex_guardian_context::ContextBudgeting::Fixed
         }
+    }
+
+    /// Resolves recorder limits from the Sync Elastic retained-instruction entry budget.
+    pub(crate) fn guardian_retention_policy(
+        &self,
+    ) -> Option<codex_protocol::protocol::GuardianRetentionPolicy> {
+        let entry_tokens = self
+            .guardian_sync_elastic_budget
+            .as_ref()?
+            .section_limits(codex_guardian_context::ElasticSection::RetainedUserInstructions)
+            .max_section_entry_tokens();
+        let record_bytes = codex_utils_output_truncation::approx_bytes_for_tokens(entry_tokens);
+        Some(codex_protocol::protocol::GuardianRetentionPolicy {
+            assistant_record_bytes: Some(record_bytes),
+            user_record_bytes: Some(record_bytes),
+        })
     }
 
     pub fn sqlite_config(&self) -> &codex_state::SqliteConfig {
@@ -1764,9 +1802,21 @@ impl Config {
         &'a self,
         model_messages: ResolvedModelMessages<'a>,
     ) -> &'a str {
-        self.guardian_policy_config
+        let configured_policy = if self.guardian_model_provider.is_some() {
+            self.managed_guardian_policy()
+        } else {
+            self.guardian_policy_config.as_deref()
+        };
+        configured_policy.unwrap_or(model_messages.auto_review().policy)
+    }
+
+    pub(crate) fn managed_guardian_policy(&self) -> Option<&str> {
+        self.config_layer_stack
+            .requirements_toml()
+            .guardian_policy_config
             .as_deref()
-            .unwrap_or(model_messages.auto_review().policy)
+            .map(str::trim)
+            .filter(|policy| !policy.is_empty())
     }
 
     /// Native Guardian agent history requires the reviewed thread's OpenAI provider.
@@ -1880,6 +1930,14 @@ impl Config {
 
     /// Creates the HTTP client factory resolved from the effective feature configuration.
     pub fn http_client_factory(&self) -> HttpClientFactory {
+        self.http_client_factory_for_provider(&self.model_provider)
+    }
+
+    /// Applies the thread's network settings and the selected provider's header policy.
+    pub(crate) fn http_client_factory_for_provider(
+        &self,
+        provider: &ModelProviderInfo,
+    ) -> HttpClientFactory {
         let outbound_proxy_policy = if self.respect_system_proxy {
             OutboundProxyPolicy::RespectSystemProxy
         } else {
@@ -1887,8 +1945,7 @@ impl Config {
         };
         let mut factory = HttpClientFactory::new(outbound_proxy_policy)
             .with_network_policy(self.application_network_policy.clone());
-        if self
-            .model_provider
+        if provider
             .gateway_oauth
             .as_ref()
             .is_some_and(GatewayOAuthConfig::uses_credential_export)
@@ -2042,6 +2099,7 @@ impl Config {
         }
 
         McpConfig {
+            executor_discovery_v2: None,
             client: McpClientConfig {
                 chatgpt_base_url: self.chatgpt_base_url.clone(),
                 requires_read_only_mcp_tools: false,
@@ -2846,18 +2904,30 @@ pub fn resolve_oss_provider(
     }
 }
 
-/// Resolve the web search mode from explicit config and feature flags.
-fn resolve_web_search_mode(config_toml: &ConfigToml, features: &Features) -> Option<WebSearchMode> {
+/// Resolve the configured preference, or select an allowed implicit default.
+fn resolve_web_search_mode(
+    config_toml: &ConfigToml,
+    features: &Features,
+    constrained_default: &Constrained<WebSearchMode>,
+) -> WebSearchMode {
     if let Some(mode) = config_toml.web_search {
-        return Some(mode);
+        return mode;
     }
     if features.enabled(Feature::WebSearchCached) {
-        return Some(WebSearchMode::Cached);
+        return WebSearchMode::Cached;
     }
     if features.enabled(Feature::WebSearchRequest) {
-        return Some(WebSearchMode::Live);
+        return WebSearchMode::Live;
     }
-    None
+    let default_mode = constrained_default.value();
+    if default_mode == WebSearchMode::Cached
+        && features.enabled(Feature::WebSearchIndexedDefault)
+        && constrained_default.can_set(&WebSearchMode::Indexed).is_ok()
+    {
+        WebSearchMode::Indexed
+    } else {
+        default_mode
+    }
 }
 
 fn resolve_web_search_config(config_toml: &ConfigToml) -> Option<WebSearchConfig> {
@@ -3186,6 +3256,44 @@ fn resolve_current_time_reminder_config(
     }))
 }
 
+fn resolve_guardian_v3_config(
+    feature: Option<FeatureToml<GuardianV3ConfigToml>>,
+) -> std::io::Result<Option<Arc<GuardianV3ConfigToml>>> {
+    let Some(FeatureToml::Config(settings)) = feature else {
+        return Ok(None);
+    };
+    if let Some(limit) = settings.max_instruction_tokens {
+        for (key, prompt) in [
+            (
+                "housekeeper.routing_instructions",
+                settings
+                    .housekeeper
+                    .as_ref()
+                    .and_then(|housekeeper| housekeeper.routing_instructions.as_deref()),
+            ),
+            (
+                "reviewer.retrieval_instructions",
+                settings
+                    .reviewer
+                    .as_ref()
+                    .and_then(|reviewer| reviewer.retrieval_instructions.as_deref()),
+            ),
+        ] {
+            let Some(prompt) = prompt else { continue };
+            let tokens = codex_utils_string::approx_token_count(prompt.trim());
+            if tokens > limit {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "features.guardianv3.{key} is {tokens} estimated tokens, exceeding max_instruction_tokens = {limit}"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(Some(Arc::new(settings)))
+}
+
 fn resolve_terminal_resize_reflow_config(config_toml: &ConfigToml) -> TerminalResizeReflowConfig {
     let Some(tui) = config_toml.tui.as_ref() else {
         return TerminalResizeReflowConfig::default();
@@ -3289,6 +3397,7 @@ pub fn resolve_bootstrap_http_client_factory(
 
 pub(crate) fn resolve_web_search_mode_for_turn(
     web_search_mode: &Constrained<WebSearchMode>,
+    web_search_mode_was_explicit: bool,
     permission_profile: &PermissionProfile,
     provider_capabilities: ProviderCapabilities,
 ) -> WebSearchMode {
@@ -3304,30 +3413,28 @@ pub(crate) fn resolve_web_search_mode_for_turn(
         provider_supports_mode && web_search_mode.can_set(&mode).is_ok()
     };
 
-    if matches!(permission_profile, PermissionProfile::Disabled)
-        && !matches!(preferred, WebSearchMode::Disabled | WebSearchMode::Indexed)
-    {
-        for mode in [
-            WebSearchMode::Live,
-            WebSearchMode::Cached,
-            WebSearchMode::Disabled,
-        ] {
-            if is_allowed(mode) {
-                return mode;
+    let full_access_promotes_to_live = matches!(permission_profile, PermissionProfile::Disabled)
+        && match preferred {
+            WebSearchMode::Cached | WebSearchMode::Live => true,
+            WebSearchMode::Indexed => {
+                !web_search_mode_was_explicit
+                    && web_search_mode.can_set(&WebSearchMode::Cached).is_ok()
             }
-        }
-    } else {
-        if is_allowed(preferred) {
-            return preferred;
-        }
-        for mode in [
-            WebSearchMode::Cached,
-            WebSearchMode::Live,
-            WebSearchMode::Disabled,
-        ] {
-            if is_allowed(mode) {
-                return mode;
-            }
+            WebSearchMode::Disabled => false,
+        };
+    if full_access_promotes_to_live && is_allowed(WebSearchMode::Live) {
+        return WebSearchMode::Live;
+    }
+    if is_allowed(preferred) {
+        return preferred;
+    }
+    for mode in [
+        WebSearchMode::Cached,
+        WebSearchMode::Live,
+        WebSearchMode::Disabled,
+    ] {
+        if is_allowed(mode) {
+            return mode;
         }
     }
 
@@ -4125,8 +4232,7 @@ impl Config {
             );
             approvals_reviewer = constrained_approvals_reviewer.value();
         }
-        let web_search_mode =
-            resolve_web_search_mode(&cfg, &features).unwrap_or(WebSearchMode::Cached);
+        let web_search_mode = resolve_web_search_mode(&cfg, &features, &constrained_web_search_mode);
         let web_search_config = resolve_web_search_config(&cfg);
         let experimental_request_user_input_enabled =
             resolve_experimental_request_user_input_enabled(&cfg);
@@ -4567,6 +4673,8 @@ impl Config {
             &mut constrained_web_search_mode,
             &mut startup_warnings,
         )?;
+        let web_search_mode_was_explicit =
+            cfg.web_search == Some(constrained_web_search_mode.value());
 
         let mcp_servers = constrain_mcp_servers(cfg.mcp_servers.clone(), mcp_servers.as_ref())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{e}")))?;
@@ -4709,6 +4817,7 @@ impl Config {
             async_compaction_threshold_percent,
             model_provider_id,
             model_provider,
+            guardian_model_provider: None,
             cwd: resolved_cwd,
             workspace_roots: workspace_roots.clone(),
             workspace_roots_explicit,
@@ -4836,6 +4945,7 @@ impl Config {
             guardian_extra_policy,
             guardian_policy_template: None,
             guardian_transcript_mode,
+            guardian_v3: resolve_guardian_v3_config(cfg.features.and_then(|features| features.guardianv3))?,
             guardian_sync_elastic_budget,
             guardian_async_elastic_budget,
             guardian_conversation_history_prompt,
@@ -4893,6 +5003,7 @@ impl Config {
             forced_chatgpt_workspace_id,
             forced_login_method,
             web_search_mode: constrained_web_search_mode.value,
+            web_search_mode_was_explicit,
             web_search_config,
             experimental_request_user_input_enabled,
             update_plan_enabled,

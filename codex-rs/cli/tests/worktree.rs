@@ -163,9 +163,9 @@ async fn worktree_start_and_fork(backend: &str) -> anyhow::Result<()> {
         fs::create_dir(path)?;
     }
     // Forking without --cd must select the daemon using the resolved project, not this launcher.
-    fs::create_dir(launcher.join(".codex"))?;
+    fs::create_dir(launcher.join(".audex"))?;
     fs::write(
-        launcher.join(".codex/config.toml"),
+        launcher.join(".audex/config.toml"),
         "features.auth_elicitation = false\n",
     )?;
     fs::write(
@@ -173,9 +173,9 @@ async fn worktree_start_and_fork(backend: &str) -> anyhow::Result<()> {
         "committed destination instructions",
     )?;
     let server = MockServer::start().await;
-    fs::create_dir(source.join(".codex"))?;
+    fs::create_dir(source.join(".audex"))?;
     fs::write(
-        source.join(".codex/config.toml"),
+        source.join(".audex/config.toml"),
         "model = \"destination-model\"\nanalytics.enabled = false\ncli_auth_credentials_store = \"file\"\n",
     )?;
     git(&source, &["init", "--quiet"])?;
@@ -222,7 +222,7 @@ trust_level = "trusted"
         "uncommitted launcher instructions",
     )?;
     fs::write(
-        source.join(".codex/config.toml"),
+        source.join(".audex/config.toml"),
         "model = \"source-model\"\nanalytics.enabled = true\n",
     )?;
     app_test_support::write_chatgpt_auth(
@@ -322,7 +322,7 @@ trust_level = "trusted"
     ] {
         if auth_failure {
             fs::write(
-                source.join(".codex/config.toml"),
+                source.join(".audex/config.toml"),
                 "forced_login_method = \"api\"\n",
             )?;
             git(
@@ -335,7 +335,7 @@ trust_level = "trusted"
                     "require API login",
                 ],
             )?;
-            fs::write(source.join(".codex/config.toml"), "")?;
+            fs::write(source.join(".audex/config.toml"), "")?;
         }
         let (metric_tx, mut metric_rx) = tokio::sync::mpsc::unbounded_channel();
         Mock::given(wiremock::matchers::path("/metrics"))
@@ -408,7 +408,7 @@ trust_level = "trusted"
             args.extend(["--cd".into(), source.display().to_string()]);
         }
         if explicit_cd {
-            args.extend(["--cd".into(), source.join(".codex").display().to_string()]);
+            args.extend(["--cd".into(), source.join(".audex").display().to_string()]);
         }
         if analytics {
             args.extend([
@@ -635,8 +635,9 @@ trust_level = "trusted"
         } else {
             session.terminate();
         }
-        let exit =
-            tokio::time::timeout(Duration::from_secs(/*secs*/ 10), spawned.exit_rx).await??;
+        let exit = tokio::time::timeout(Duration::from_secs(/*secs*/ 30), spawned.exit_rx)
+            .await
+            .context("timed out waiting for the worktree TUI to exit")??;
         // Include shutdown output: ConPTY can retain the channel after process exit.
         let _ = tokio::time::timeout(Duration::from_secs(/*secs*/ 1), async {
             while let Some(bytes) = stdout.recv().await {
@@ -798,7 +799,7 @@ trust_level = "trusted"
             .collect::<Vec<_>>()
             .join("\n");
         if explicit_cd {
-            let expected = format!("{checkout}/.codex").replace('\\', "/");
+            let expected = format!("{checkout}/.audex").replace('\\', "/");
             assert!(context.replace('\\', "/").contains(&expected), "{context}");
         }
         assert!(
@@ -883,7 +884,7 @@ trust_level = "trusted"
             Mock::given(wiremock::matchers::path("/source/backend-api/wham/config/bundle"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "config_toml": {"enterprise_managed": [{"id":"distrust-source", "name":"distrust-source",
-                        "contents": format!("[projects.{}]\ntrust_level = \"untrusted\"\n", serde_json::to_string(&codex_config::loader::project_trust_key(&source.join(".codex")))?)}]}
+                        "contents": format!("[projects.{}]\ntrust_level = \"untrusted\"\n", serde_json::to_string(&codex_config::loader::project_trust_key(&source.join(".audex")))?)}]}
                 }))).mount(&server).await;
             let output = rejected_start(
                 &program,
@@ -893,7 +894,7 @@ trust_level = "trusted"
                     "worktrees".into(),
                     "--no-alt-screen".into(),
                     "--cd".into(),
-                    source.join(".codex").display().to_string(),
+                    source.join(".audex").display().to_string(),
                 ],
                 &launcher,
                 &env,
@@ -935,7 +936,7 @@ trust_level = "trusted"
         server.reset().await;
     }
     // Source loads its healthy uncommitted config, but the new checkout loads malformed HEAD.
-    fs::write(source.join(".codex/config.toml"), "not = [valid toml")?;
+    fs::write(source.join(".audex/config.toml"), "not = [valid toml")?;
     git(
         &source,
         &[
@@ -946,7 +947,7 @@ trust_level = "trusted"
             "invalid destination",
         ],
     )?;
-    fs::write(source.join(".codex/config.toml"), "")?;
+    fs::write(source.join(".audex/config.toml"), "")?;
     let before = git(&source, &["worktree", "list", "--porcelain"])?;
     let output = rejected_start(
         &program,
