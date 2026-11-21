@@ -18,10 +18,12 @@ pub(super) fn validate(settings: &BackendSettings, selection: &ReviewerSelection
             && !selection.model.chars().any(char::is_whitespace),
         "Claude model must be a nonempty client model name"
     );
-    ensure!(
-        selection.effort.is_none(),
-        "Claude effort is not configured by this launcher"
-    );
+    if let Some(effort) = selection.effort.as_deref() {
+        ensure!(
+            matches!(effort, "low" | "medium" | "high" | "xhigh" | "max"),
+            "Claude effort must be low, medium, high, xhigh or max"
+        );
+    }
     match selection.route.as_str() {
         "claude_subscription" => {
             let config = settings
@@ -172,6 +174,9 @@ fn prepare_inner(
         "--tools",
         tools,
     ]);
+    if let Some(effort) = selection.effort.as_deref() {
+        command.args(["--effort", effort]);
+    }
     if !conversation {
         command.args(["--allowedTools", tools]);
     }

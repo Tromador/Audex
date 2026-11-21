@@ -1,5 +1,7 @@
 # Audex User Guide
 
+> **Current production instructions (Audex 1.0.0):** See [Production operations and operator handbook](audex-production-operator-handbook.md) for the live-source architecture, current `/audit` and `/claude` syntax, configured reviewers, authentication, and daemon updates. The older material below describes earlier Audex behaviour and should not override that handbook.
+
 Audex adds **durable, isolated source auditing** to the Codex command-line application. An audit captures an immutable copy of explicitly selected source files or a snippet, runs a restricted reviewer against that snapshot, and retains a report that can be retrieved after the terminal disconnects or the application restarts.
 
 Audex currently provides two operator interfaces:

@@ -233,6 +233,44 @@ fn assert_environment(call: &Value, fixture: &Fixture, api_key: Option<&str>) {
     assert_eq!(call["pdeathsig"], libc::SIGKILL);
 }
 
+#[test]
+fn claude_effort_validation_accepts_supported_levels() -> Result<()> {
+    let fixture = Fixture::new()?;
+    for route in ["claude_subscription", "claude_api"] {
+        let mut chosen = selection(route);
+        for effort in ["low", "medium", "high", "xhigh", "max"] {
+            chosen.effort = Some(effort.into());
+            launch::validate(&fixture.settings, &chosen)?;
+        }
+        for effort in ["", "MAX", "ultracode", "--permission-mode"] {
+            chosen.effort = Some(effort.into());
+            assert!(launch::validate(&fixture.settings, &chosen).is_err());
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_effort_is_forwarded_for_both_claude_routes() -> Result<()> {
+    for route in ["claude_subscription", "claude_api"] {
+        let fixture = Fixture::new()?;
+        let mut request = fixture.request(route, Input::Paths(fixture.sources.clone()));
+        request.reviewers[0].effort = Some("max".into());
+        let mut service = fixture.service()?;
+        let id = service.start(request)?;
+        finished(&mut service, id).await?;
+        let calls = fixture.calls()?;
+        assert_eq!(calls.len(), 1);
+        let args: Vec<String> = serde_json::from_value(calls[0]["args"].clone())?;
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--effort" && pair[1] == "max")
+        );
+        fixture.cleaned()?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn exact_launch_for_both_routes_and_all_target_shapes() -> Result<()> {
     for route in ["claude_subscription", "claude_api"] {
