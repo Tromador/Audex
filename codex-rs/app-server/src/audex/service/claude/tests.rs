@@ -263,15 +263,20 @@ fn reference_mcp_selection_allows_only_named_read_tools() -> Result<()> {
     for name in [
         "mcp__context7__resolve-library-id",
         "mcp__context7__query-docs",
-        "mcp__github__fetch_file",
-        "mcp__github__compare_commits",
+        "mcp__github__get_file_contents",
+        "mcp__github__list_commits",
+        "mcp__github__search_code",
+        "mcp__github__get_commit",
+        "mcp__github__issue_read",
+        "mcp__github__pull_request_read",
     ] {
         assert!(allowed.contains(&name.to_owned()), "missing {name}");
     }
     for name in [
-        "mcp__github__update_file",
+        "mcp__github__create_or_update_file",
         "mcp__github__delete_file",
         "mcp__github__merge_pull_request",
+        "mcp__github__fetch_file",
         "mcp__unrelated__search",
         "mcp__zen-storage__write_file",
     ] {

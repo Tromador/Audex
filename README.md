@@ -1,89 +1,84 @@
 # Audex
 
-Audex provides durable source auditing with isolated Codex reviewers, a command-line interface and a conversational TUI. For setup, commands, workflows, recovery and practical recipes, see the **[Audex User Guide](docs/audex-user-guide.md)**.
+**Independent source-code audits with multiple AI reviewers, built on [OpenAI Codex](https://github.com/openai/codex).**
 
-The upstream Codex instructions below describe Codex; its installer does not install this Audex fork.
+Audex is a personal fork of Codex that does one additional job: send the same selected source to independent reviewers, retain their original findings, and help the operator work through agreements, disagreements and supporting evidence.
 
----
+It is not a general-purpose CI service, an automated code-fixing system, or an official OpenAI or Anthropic product. The aim is to make a second opinion on code useful without spending half the day shuffling text between chat windows.
 
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+## What it does
 
----
+- **Independent reviews.** Run a native Codex reviewer and an official Claude CLI reviewer on the same file, set of paths, directory or supplied snippet. Reviewer/model selection and reasoning effort are configurable.
+- **Live source, no invented scope.** Audex passes directory targets directly to reviewers. It does not enumerate them, generate file inventories, apply inclusion rules, or snapshot the source tree. Reviewers investigate using their own tools.
+- **Read-only execution.** Native reviewers use Codex's sandboxed inspection; Claude uses a restricted set of read-only source and reference tools, a dedicated profile, and disabled project hooks.
+- **Useful reference access.** Reviewers can consult selected GitHub read tools, Context7 documentation, public web search and read-only Zen Storage paths where those services are configured. Reference lookup is distinct from unrestricted shell networking.
+- **Retained evidence.** Audit runs, original reviewer output, findings and diagnostics remain available for inspection, reopening, cancellation and reviewer retries.
+- **Compare and challenge.** The Codex TUI can reconcile reviewers' conclusions, show individual findings and sources, and support follow-up discussion with Claude through `/claude`.
 
-## Quickstart
+A finding is a model's claim, not a proven defect. Agreement between models can be useful, but is not verification. A failed reviewer is not silently counted as a clean review.
 
-### Installing and running Codex CLI
+## Quick example
 
-Run the following on Mac or Linux to install Codex CLI:
+Audex uses a managed app-server. With an already configured installation:
 
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
-```
+~~~bash
+audex app-server daemon start
+audex --remote unix://
+~~~
 
-Run the following on Windows to install Codex CLI:
+Inside the **Audex TUI**:
 
-```shell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
-```
+~~~text
+/audit /path/to/project/src
+~~~
 
-The standalone installers download from `https://releases.openai.com/codex` by default and fall back to GitHub Releases if a metadata or asset download is unavailable. To force GitHub Releases, set `CODEX_INSTALLER_USE_RELEASES_OPENAI_COM` to `false` (`0` and `no` are also accepted):
+The configured default preset starts the selected reviewers independently. An explicit pair looks like this:
 
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=false sh
-```
+~~~text
+/audit /path/to/source.cpp --reviewer native:gpt-6.2-astra:high --reviewer claude_subscription:claude-opus-5-5:high
+~~~
 
-```powershell
-$env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM='false'; irm https://chatgpt.com/codex/install.ps1 | iex
-```
+You can focus the job with a brief and guidance:
 
-Codex CLI can also be installed via the following package managers:
+~~~text
+/audit /path/to/source.cpp --brief "Find concrete defects in ownership and error handling." --guidance-text "Preserve the public API; distinguish source evidence from assumptions."
+~~~
 
-```shell
-# Install using npm
-npm install -g @openai/codex
-```
+Reviewers may also inspect remote files through Zen Storage and compare them with upstream GitHub contents:
 
-```shell
-# Install using Homebrew
-brew install --cask codex
-```
+~~~text
+/audit O:/home/example/project/src/file.cpp --guidance-text "Use read-only GitHub MCP to compare this file against owner/repository:src/file.cpp on main. Report differences and any access failures."
+~~~
 
-Then simply run `codex` to get started.
+Inspect and discuss an audit after it runs:
 
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+~~~text
+/audit list
+/audit read RUN_ID
+/claude --audit RUN_ID Challenge the reasoning behind reviewer 1's second finding.
+~~~
 
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
+A new audit uses a freshly selected reviewer roster. Existing reviewer attempts can be retried, but another independent reviewer cannot currently be added to a run already created.
 
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
+## Running and building it
 
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+Audex retains the underlying Codex codebase and builds a separate `audex` executable. Its current operator-managed build and deployment target is **Linux x86-64, including WSL**. Using Audex requires the appropriate model/client authentication and an installed managed daemon.
 
-</details>
+The executable can be compiled from the source tree with:
 
-### Using Codex with your ChatGPT plan
+~~~bash
+cd codex-rs
+cargo build --release -p codex-cli --bin audex
+~~~
 
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
+**Building the executable alone is not a complete installation.** Deployment also needs its companion executables and packaged resources, followed by installation or update of the independently managed daemon. See the handbook rather than using an upstream Codex installer.
 
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
+For the current behaviour, reviewer configuration, external tool permissions, full slash-command reference and deployment workflow, read the **[Audex operator handbook](docs/audex-production-operator-handbook.md)**.
 
-## Docs
+## Project relationship and licence
 
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
+Audex is derived from [OpenAI Codex](https://github.com/openai/codex). Much of the source tree remains upstream Codex; Audex-specific orchestration and TUI integration live in the Rust application. Upstream Codex's installation instructions install **Codex**, not Audex.
 
-This repository is licensed under the [Apache-2.0 License](LICENSE).
+This is an independent project. The original Codex documentation is available at [developers.openai.com/codex](https://developers.openai.com/codex).
+
+The repository is licensed under [Apache-2.0](LICENSE).
