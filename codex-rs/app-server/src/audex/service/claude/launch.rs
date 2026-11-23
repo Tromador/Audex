@@ -1,7 +1,8 @@
 //! Official-client arguments and environment; no policy discovery or source walks.
 use super::*;
 use crate::audex::backends::{BackendSettings, CredentialReference};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -78,6 +79,81 @@ fn credential(reference: &CredentialReference) -> Result<String> {
     Ok(secret.to_owned())
 }
 
+fn user_mcp_config(include_zen: bool) -> Result<Option<(String, Vec<String>)>> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("host HOME is unavailable")?);
+    let bytes = match fs::read(home.join(".claude.json")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let settings: Value =
+        serde_json::from_slice(&bytes).context("invalid Claude user configuration")?;
+    let Some(servers) = settings.get("mcpServers").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    select_mcp_servers(servers, include_zen)
+}
+
+pub(super) fn select_mcp_servers(
+    servers: &serde_json::Map<String, Value>,
+    include_zen: bool,
+) -> Result<Option<(String, Vec<String>)>> {
+    let mut selected = serde_json::Map::new();
+    let mut permissions = Vec::new();
+    for (name, names) in [
+        ("context7", &["resolve-library-id", "query-docs"][..]),
+        (
+            "github",
+            &[
+                "compare_commits",
+                "fetch",
+                "fetch_commit",
+                "fetch_file",
+                "fetch_pr",
+                "fetch_pr_file_patch",
+                "get_pr_diff",
+                "get_pr_info",
+                "get_repo",
+                "search",
+                "search_branches",
+                "search_commits",
+                "search_repositories",
+            ][..],
+        ),
+    ] {
+        if let Some(server) = servers.get(name) {
+            selected.insert(name.to_owned(), server.clone());
+            permissions.extend(names.iter().map(|tool| format!("mcp__{name}__{tool}")));
+        }
+    }
+    if include_zen {
+        let name = "zen-storage";
+        let server = servers
+            .get(name)
+            .context("Zen Storage is not configured for Claude")?;
+        selected.insert(name.into(), server.clone());
+        permissions.extend(
+            [
+                "read_text_file",
+                "read_media_file",
+                "read_multiple_files",
+                "get_file_info",
+                "list_directory",
+                "list_directory_with_sizes",
+                "directory_tree",
+                "search_files",
+                "list_allowed_directories",
+            ]
+            .into_iter()
+            .map(|tool| format!("mcp__{name}__{tool}")),
+        );
+    }
+    if selected.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((json!({"mcpServers":selected}).to_string(), permissions)))
+}
+
 pub(super) fn prepare(
     settings: &BackendSettings,
     selection: &ReviewerSelection,
@@ -85,6 +161,7 @@ pub(super) fn prepare(
     rules: &str,
     assignment: Value,
     audit_run: Option<&Path>,
+    zen_only: bool,
 ) -> Result<Launch> {
     prepare_inner(
         settings,
@@ -94,6 +171,7 @@ pub(super) fn prepare(
         assignment,
         audit_run,
         false,
+        zen_only,
     )
 }
 
@@ -110,7 +188,7 @@ pub(super) fn prepare_conversation(
         effort: None,
         permission_summary: String::new(),
     };
-    prepare_inner(settings, &selection, &[], rules, assignment, None, true)
+    prepare_inner(settings, &selection, &[], rules, assignment, None, true, false)
 }
 
 fn prepare_inner(
@@ -121,6 +199,7 @@ fn prepare_inner(
     assignment: Value,
     audit_run: Option<&Path>,
     conversation: bool,
+    zen_only: bool,
 ) -> Result<Launch> {
     validate(settings, selection)?;
     let (executable, runtime_root) = match selection.route.as_str() {
@@ -159,11 +238,18 @@ fn prepare_inner(
             .first()
             .context("Claude needs a working directory")?
     };
-    let tools = if conversation { "" } else { "Read,Grep,Glob" };
+    let tools = if conversation { "" } else { "Read,Grep,Glob,WebSearch" };
+    let mcp = if conversation {
+        None
+    } else {
+        user_mcp_config(zen_only)?
+    };
     let mut command = Command::new(executable);
+    command.arg("-p");
+    if conversation {
+        command.arg("--restricted");
+    }
     command.args([
-        "-p",
-        "--restricted",
         "--input-format",
         "stream-json",
         "--output-format",
@@ -178,19 +264,30 @@ fn prepare_inner(
         command.args(["--effort", effort]);
     }
     if !conversation {
-        command.args(["--allowedTools", tools]);
+        command.args(["--setting-sources", "user", "--allowedTools", tools]);
+        if let Some((config, permissions)) = mcp {
+            let path = runtime.path().join("mcp.json");
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)?;
+            file.write_all(config.as_bytes())?;
+            command.args(permissions);
+            command.arg("--mcp-config").arg(path);
+        }
     }
     command.args([
         "--permission-mode",
         "dontAsk",
-        "--strict-mcp-config",
         "--disable-slash-commands",
         "--no-session-persistence",
         "--settings",
-        r#"{"permissions":{"blockReadsOutsideWorkingDirectories":true}}"#,
+        r#"{"disableAllHooks":true,"permissions":{"blockReadsOutsideWorkingDirectories":true}}"#,
         "--system-prompt",
         rules,
     ]);
+    command.arg("--strict-mcp-config");
     if conversation {
         command.arg("--include-partial-messages");
     } else if let Some(run) = audit_run {

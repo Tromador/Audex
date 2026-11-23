@@ -289,6 +289,7 @@ pub(crate) async fn execute(
             let params = AuditStartRequest {
                 input: args.input,
                 cwd: thread.thread.cwd.to_string(),
+                origin_thread_id: Some(thread_id.to_string()),
                 brief: args.brief,
                 reviewers,
                 guidance: args.guidance,

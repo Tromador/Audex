@@ -1,6 +1,6 @@
 use super::*;
 use crate::audex::reviewer::native::{RULES, prepare};
-use codex_extension_api::{IsolatedSessionExtensions, SessionIsolation, ToolName, ToolPolicy};
+use codex_extension_api::{ToolName, ToolPolicy};
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_models_manager::{ModelOrigin, manager::StaticModelsManager};
@@ -68,7 +68,7 @@ async fn fixture(temp: &tempfile::TempDir) -> Result<(Config, RunRecord, StaticM
     let mcp = toml::from_str("command = \"forbidden-mcp\"")?;
     host.mcp_servers
         .set([("forbidden".into(), mcp)].into_iter().collect())?;
-    host.codex_self_exe = Some(PathBuf::from(std::env::var("CARGO_BIN_EXE_audex")?));
+    host.codex_self_exe = Some(codex_utils_cargo_bin::cargo_bin("audex")?);
     host.codex_linux_sandbox_exe = host.codex_self_exe.clone();
     let run = RunRecord {
         id: Uuid::now_v7(),
@@ -115,7 +115,7 @@ async fn construction_preserves_targets_and_enforces_isolation() -> Result<()> {
                 .paths
                 .clone_from(&run.targets.working_directories);
         }
-        let prepared = prepare(&host, &models, &run, &selection()).await?;
+        let prepared = prepare(&host, &models, &run, &selection(), temp.path()).await?;
         let config = &prepared.options.config;
         assert_eq!(config.cwd.as_path(), run.targets.working_directories[0]);
         assert_eq!(
@@ -158,25 +158,19 @@ async fn construction_preserves_targets_and_enforces_isolation() -> Result<()> {
         assert!(!shell_policy.use_profile);
         assert_eq!(config.project_doc_max_bytes, 0);
         assert!(config.project_doc_fallback_filenames.is_empty());
-        assert!(
-            config
-                .config_layer_stack
-                .layers_low_to_high()
-                .next()
-                .is_none()
+        assert_eq!(
+            config.config_layer_stack.effective_config(),
+            host.config_layer_stack.effective_config()
         );
         assert!(config.base_instructions.is_none());
         assert_eq!(config.developer_instructions.as_deref(), Some(RULES));
         assert!(RULES.contains("Do not execute source"));
         assert!(config.notify.is_none());
-        assert!(config.mcp_servers.get().is_empty());
-        assert_eq!(config.plugins, Default::default());
-        assert_eq!(config.web_search_mode.value(), WebSearchMode::Disabled);
-        assert!(
-            !config.agents_enabled
-                && !config.cloud_skill_enabled
-                && !config.orchestrator_mcp_enabled
-        );
+        assert!(config.mcp_servers.get().contains_key("forbidden"));
+        assert_eq!(config.plugins, host.plugins);
+        assert_eq!(config.web_search_mode.value(), WebSearchMode::Live);
+        assert!(!config.agents_enabled && !config.cloud_skill_enabled);
+        assert_eq!(config.orchestrator_mcp_enabled, host.orchestrator_mcp_enabled);
         assert!(!config.include_skill_instructions && !config.include_apps_instructions);
         assert!(!config.experimental_request_user_input_enabled && !config.update_plan_enabled);
         assert!(!config.allow_persistent_dynamic_tool_updates);
@@ -188,7 +182,7 @@ async fn construction_preserves_targets_and_enforces_isolation() -> Result<()> {
             Feature::Collab,
             Feature::MemoryTool,
         ] {
-            assert!(!config.features.enabled(feature));
+            assert!(config.features.enabled(feature));
         }
         assert!(config.features.enabled(Feature::ShellTool));
         assert!(config.features.enabled(Feature::UnifiedExec));
@@ -207,31 +201,41 @@ async fn construction_preserves_targets_and_enforces_isolation() -> Result<()> {
         );
         assert_eq!(config.model_context_window, host.model_context_window);
         let extensions = &prepared.options.thread_extension_init;
-        assert_eq!(
-            *extensions.get::<SessionIsolation>().unwrap(),
-            SessionIsolation::Isolated
-        );
-        let registry = &extensions
-            .get::<IsolatedSessionExtensions<Config>>()
-            .unwrap()
-            .0;
-        assert!(registry.tool_contributors().is_empty());
-        assert!(registry.context_contributors().is_empty());
-        assert!(registry.mcp_server_contributors().is_empty());
-        assert!(registry.config_contributors().is_empty());
-        assert!(registry.model_request_contributors().is_empty());
-        assert!(registry.turn_lifecycle_contributors().is_empty());
+        assert!(extensions.get::<codex_extension_api::SessionIsolation>().is_none());
         let policy = extensions.get::<ToolPolicy>().unwrap();
-        assert_eq!(
-            policy.allowed_tools.as_ref().unwrap(),
-            &["exec_command", "write_stdin", "exec", "wait"]
-                .into_iter()
-                .map(|n| ToolName::namespaced("functions", n))
-                .collect::<Vec<_>>()
-        );
+        assert!(policy.allowed_tools.is_some());
         assert!(policy.require_managed_sandbox && policy.require_unified_exec);
         assert!(!policy.expose_additional_permissions);
-        assert!(!policy.allows(&ToolName::namespaced("audex_source", "read")));
+        assert!(policy.allows(&ToolName::plain("exec_command")));
+        assert!(policy.allows(&ToolName::namespaced("web", "run")));
+        assert!(policy.allows(&ToolName::namespaced(
+            "mcp__codex_apps__context7",
+            "_query_docs"
+        )));
+        assert!(policy.allows(&ToolName::namespaced(
+            "mcp__codex_apps__github",
+            "_fetch_file"
+        )));
+        assert!(!policy.allows(&ToolName::namespaced(
+            "mcp__codex_apps__github",
+            "_update_file"
+        )));
+        assert!(!policy.allows(&ToolName::namespaced(
+            "mcp__codex_apps__github",
+            "_merge_pull_request"
+        )));
+        assert!(!policy.allows(&ToolName::namespaced(
+            "mcp__codex_apps__zen_storage",
+            "_write_file"
+        )));
+        assert!(!policy.allows(&ToolName::namespaced(
+            "mcp__codex_apps__gmail",
+            "_fetch"
+        )));
+        assert!(!policy.allows(&ToolName::namespaced(
+            "mcp__codex_apps__zen_storage",
+            "_read_text_file"
+        )));
         assert!(prepared.options.dynamic_tools.is_empty());
         assert!(
             prepared
@@ -367,7 +371,7 @@ fn native_turn_delivers_effective_tools_schema_output_and_usage_to_s1() -> Resul
             status
                 .reviewer
                 .permission_summary
-                .contains("No writable roots or network")
+                .contains("No writable local roots; shell network restricted")
         );
         assert!(
             !status
@@ -425,14 +429,14 @@ fn native_turn_delivers_effective_tools_schema_output_and_usage_to_s1() -> Resul
             }
         }
         names.sort();
-        assert_eq!(names, vec!["exec_command", "write_stdin"]);
+        assert!(names.contains(&"exec_command".to_owned()));
+        assert!(names.contains(&"write_stdin".to_owned()));
         assert_eq!(body["text"]["format"]["schema"], output_schema());
         for sentinel in [
             "HOST_DEVELOPER_SENTINEL",
             "HOST_BASE_SENTINEL",
             "TARGET_AGENTS_SENTINEL",
             "HOME_AGENTS_SENTINEL",
-            "forbidden-mcp",
         ] {
             assert!(!body.to_string().contains(sentinel), "inherited {sentinel}");
         }
@@ -608,6 +612,39 @@ fn cancellation_stops_native_execution_and_retains_partial_output() -> Result<()
     })
 }
 
+#[tokio::test]
+async fn remote_audits_use_private_local_cwd_and_read_only_zen_tools() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (host, mut run, models) = fixture(&temp).await?;
+    run.targets = super::super::targets::resolve_mixed(
+        &[PathBuf::from("O:/source/project")],
+        &[Some(true)],
+    )?;
+    let private = temp.path().join("private");
+    fs::create_dir(&private)?;
+    let prepared = prepare(&host, &models, &run, &selection(), &private).await?;
+    assert_eq!(prepared.options.config.cwd.as_path(), private.as_path());
+    assert_eq!(
+        prepared.options.config.workspace_roots[0].as_path(),
+        private.as_path()
+    );
+    let policy = prepared.options.thread_extension_init.get::<ToolPolicy>().unwrap();
+    assert!(policy.allowed_tools.is_some());
+    assert!(policy.allows(&ToolName::namespaced(
+        "mcp__codex_apps__zen_storage",
+        "_read_text_file"
+    )));
+    assert!(!policy.allows(&ToolName::namespaced(
+        "mcp__codex_apps__zen_storage",
+        "_write_file"
+    )));
+    assert!(!policy.allows(&ToolName::namespaced(
+        "mcp__codex_apps__zen_storage",
+        "_delete_file"
+    )));
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn helper_runtime_read_resolves_only_the_executable_file() -> Result<()> {
@@ -622,7 +659,7 @@ async fn helper_runtime_read_resolves_only_the_executable_file() -> Result<()> {
     let alias = temp.path().join("helper-alias");
     std::os::unix::fs::symlink(&executable, &alias)?;
     host.codex_linux_sandbox_exe = Some(alias);
-    let prepared = prepare(&host, &models, &run, &selection()).await?;
+    let prepared = prepare(&host, &models, &run, &selection(), temp.path()).await?;
     let config = prepared.options.config;
     assert_eq!(config.codex_linux_sandbox_exe, Some(executable.clone()));
     let fs = config.permissions.file_system_sandbox_policy();
@@ -637,6 +674,6 @@ async fn helper_runtime_read_resolves_only_the_executable_file() -> Result<()> {
     );
     assert!(prepared.permission_summary.contains("exact file"));
     host.codex_linux_sandbox_exe = Some(runtime);
-    assert!(prepare(&host, &models, &run, &selection()).await.is_err());
+    assert!(prepare(&host, &models, &run, &selection(), temp.path()).await.is_err());
     Ok(())
 }

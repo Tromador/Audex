@@ -34,6 +34,75 @@ pub fn resolve(paths: &[PathBuf]) -> Result<Targets> {
     resolve_with(paths, &LivePaths)
 }
 
+/// On a Linux host, drive-prefixed paths are opaque Zen Storage paths.
+pub fn is_zen_storage_path(path: &Path) -> bool {
+    let Some(path) = path.to_str() else {
+        return false;
+    };
+    let bytes = path.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
+}
+
+impl Targets {
+    pub fn has_remote(&self) -> bool {
+        self.paths.iter().any(|path| is_zen_storage_path(path))
+    }
+
+    pub fn local_working_directories(&self) -> Vec<PathBuf> {
+        self.working_directories
+            .iter()
+            .filter(|path| !is_zen_storage_path(path))
+            .cloned()
+            .collect()
+    }
+}
+
+/// Remote target kinds have already been checked using Zen Storage metadata.
+/// No remote path is ever canonicalised, listed or opened by the local host.
+pub fn resolve_mixed(paths: &[PathBuf], remote_directories: &[Option<bool>]) -> Result<Targets> {
+    ensure!(
+        paths.len() == remote_directories.len(),
+        "remote target metadata does not match target selection"
+    );
+    ensure!(!paths.is_empty(), "at least one audit target is required");
+    let mut targets = Targets {
+        paths: Vec::new(),
+        working_directories: Vec::new(),
+    };
+    for (supplied, remote_directory) in paths.iter().zip(remote_directories) {
+        let (path, directory) = if is_zen_storage_path(supplied) {
+            let is_directory = remote_directory
+                .ok_or_else(|| anyhow::anyhow!("Zen Storage target was not checked"))?;
+            let path = supplied.clone();
+            let directory = if is_directory {
+                path.clone()
+            } else {
+                let name = path.to_str().expect("checked ASCII drive prefix");
+                let slash = name.rfind('/').expect("drive path contains slash");
+                let end = if slash == 2 { 3 } else { slash };
+                PathBuf::from(&name[..end])
+            };
+            (path, directory)
+        } else {
+            ensure!(remote_directory.is_none(), "unexpected Zen Storage metadata for local path");
+            let path = std::fs::canonicalize(supplied)?;
+            let directory = if std::fs::metadata(&path)?.is_dir() {
+                path.clone()
+            } else {
+                path.parent()
+                    .ok_or_else(|| anyhow::anyhow!("target has no containing directory"))?
+                    .to_path_buf()
+            };
+            (path, directory)
+        };
+        targets.paths.push(path);
+        if !targets.working_directories.contains(&directory) {
+            targets.working_directories.push(directory);
+        }
+    }
+    Ok(targets)
+}
+
 fn resolve_with(paths: &[PathBuf], lookup: &impl PathLookup) -> Result<Targets> {
     ensure!(!paths.is_empty(), "at least one audit target is required");
     let mut targets = Targets {
@@ -61,6 +130,23 @@ fn resolve_with(paths: &[PathBuf], lookup: &impl PathLookup) -> Result<Targets> 
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn zen_storage_dispatch_keeps_drive_paths_opaque() -> Result<()> {
+        assert!(is_zen_storage_path(Path::new("O:/src/repo")));
+        assert!(is_zen_storage_path(Path::new("g:/My Drive/source")));
+        assert!(!is_zen_storage_path(Path::new("O:\\src")));
+        assert!(!is_zen_storage_path(Path::new("/home/stef/source")));
+        let paths = vec![PathBuf::from("O:/source.rs"), PathBuf::from("G:/My Drive/project")];
+        let targets = resolve_mixed(&paths, &[Some(false), Some(true)])?;
+        assert_eq!(targets.paths, paths);
+        assert_eq!(
+            targets.working_directories,
+            vec![PathBuf::from("O:/"), PathBuf::from("G:/My Drive/project")]
+        );
+        assert!(targets.local_working_directories().is_empty());
+        Ok(())
+    }
 
     #[test]
     fn target_resolution_only_canonicalises_and_stats_each_supplied_path() -> Result<()> {

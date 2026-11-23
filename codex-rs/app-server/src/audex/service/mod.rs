@@ -6,7 +6,7 @@ pub(crate) mod read;
 pub(super) mod record;
 pub(super) mod result;
 mod summary;
-mod targets;
+pub(super) mod targets;
 
 pub use record::AttemptStatus;
 pub use record::ReviewerSelection;
@@ -38,6 +38,7 @@ use uuid::Uuid;
 
 pub enum Input {
     Paths(Vec<PathBuf>),
+    ResolvedTargets(targets::Targets),
     Snippet { name: String, text: String },
 }
 
@@ -244,6 +245,7 @@ impl AuditService {
         }
         let paths = match &request.input {
             Input::Paths(paths) => Some(targets::resolve(paths)?),
+            Input::ResolvedTargets(targets) => Some(targets.clone()),
             Input::Snippet { name, .. } => {
                 let mut components = Path::new(name).components();
                 ensure!(

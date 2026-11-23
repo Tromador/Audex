@@ -48,6 +48,7 @@ impl Reviewer for NativeReviewer {
                 models.as_ref(),
                 &attempt.run,
                 &attempt.status.reviewer,
+                attempt.directory(),
             )
             .await?;
             attempt.permission_summary(prepared.permission_summary)?;

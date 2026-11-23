@@ -42,6 +42,7 @@ impl Reviewer for Routes {
 pub(crate) struct AuditRpc {
     service: Mutex<Result<AuditService>>,
     settings: BackendSettings,
+    threads: Option<Arc<ThreadManager>>,
     stopped: AtomicBool,
 }
 impl AuditRpc {
@@ -67,7 +68,7 @@ impl AuditRpc {
                 let runner = Arc::new(Routes {
                     native: service::native::NativeReviewer::new(
                         config.clone(),
-                        threads,
+                        threads.clone(),
                         listen,
                         cleanup,
                     ),
@@ -84,8 +85,73 @@ impl AuditRpc {
         Arc::new(Self {
             service: Mutex::new(service),
             settings,
+            threads: Some(threads),
             stopped: AtomicBool::new(false),
         })
+    }
+
+    /// Reject remote targets before a run or reviewer exists. The originating
+    /// Codex thread owns the already-authenticated hosted Apps connection.
+    async fn check_zen_storage_path(&self, path: &str, origin: Option<&str>) -> Result<bool> {
+        let origin = origin.context("Zen Storage audit requires an originating Codex thread")?;
+        let thread_id = codex_protocol::ThreadId::from_string(origin)?;
+        let thread = self
+            .threads
+            .as_ref()
+            .context("Zen Storage preflight requires the originating thread manager")?
+            .get_thread(thread_id)
+            .await
+            .context("originating Codex thread is unavailable for Zen Storage preflight")?;
+        // Codex Apps has distinct model-visible and raw MCP tool names.
+        // Resolve the raw name from this thread's live catalogue, rather than
+        // guessing a connector prefix.
+        let catalogue = thread
+            .refresh_codex_apps_tools()
+            .await
+            .context("could not discover Zen Storage tools")?;
+        let mut matching = catalogue.tools.iter().filter(|tool| {
+            tool.callable_namespace.ends_with("__zen_storage")
+                && matches!(tool.callable_name.as_str(), "get_file_info" | "_get_file_info")
+        });
+        let raw_name = matching
+            .next()
+            .context("Zen Storage get_file_info is unavailable in the Codex Apps catalogue")?
+            .tool
+            .name
+            .as_ref();
+        ensure!(
+            matching.next().is_none(),
+            "Zen Storage get_file_info is ambiguous in the Codex Apps catalogue"
+        );
+        let response = thread
+            .call_mcp_tool(
+                "codex_apps",
+                None,
+                raw_name,
+                Some(serde_json::json!({"path": path})),
+                None,
+            )
+            .await
+            .with_context(|| format!("Zen Storage preflight failed for {path}"))?;
+        let value = serde_json::to_value(&response)?;
+        let detail = value["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        ensure!(
+            response.is_error != Some(true),
+            "Zen Storage rejected {path}: {detail}"
+        );
+        if detail.lines().any(|line| line.trim() == "isDirectory: true") {
+            Ok(true)
+        } else if detail.lines().any(|line| line.trim() == "isFile: true") {
+            Ok(false)
+        } else {
+            anyhow::bail!("Zen Storage returned no file/directory type for {path}: {detail}")
+        }
     }
 
     pub(crate) fn stop_new_dispatch(&self) {
@@ -131,7 +197,36 @@ impl AuditRpc {
                 ensure!(cwd.is_absolute(), "cwd must be absolute");
                 let input = match params.input {
                     AuditInput::Paths { paths } => {
-                        service::Input::Paths(paths.iter().map(|p| codex_utils_absolute_path::AbsolutePathBuf::resolve_path_against_base(p, cwd).to_path_buf()).collect())
+                        let paths = paths
+                            .iter()
+                            .map(|path| {
+                                if service::targets::is_zen_storage_path(Path::new(path)) {
+                                    std::path::PathBuf::from(path)
+                                } else {
+                                    codex_utils_absolute_path::AbsolutePathBuf::resolve_path_against_base(path, cwd).to_path_buf()
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        if paths.iter().any(|path| service::targets::is_zen_storage_path(path)) {
+                            let mut remote_directories = Vec::with_capacity(paths.len());
+                            for path in &paths {
+                                let kind = if service::targets::is_zen_storage_path(path) {
+                                    Some(self.check_zen_storage_path(
+                                        path.to_str().context("Zen Storage path is not UTF-8")?,
+                                        params.origin_thread_id.as_deref(),
+                                    ).await?)
+                                } else {
+                                    None
+                                };
+                                remote_directories.push(kind);
+                            }
+                            service::Input::ResolvedTargets(service::targets::resolve_mixed(
+                                &paths,
+                                &remote_directories,
+                            )?)
+                        } else {
+                            service::Input::Paths(paths)
+                        }
                     }
                     AuditInput::Snippet { name, text } => service::Input::Snippet { name, text },
                 };

@@ -749,6 +749,36 @@ fn citation_checks_all_statuses_and_named_file_context_without_listing() -> Resu
 }
 
 #[test]
+fn remote_citations_are_scope_checked_without_local_reads() -> Result<()> {
+    use result::CitationStatus::*;
+    let targets = targets::resolve_mixed(
+        &[PathBuf::from("O:/source/repo/a.rs")],
+        &[Some(false)],
+    )?;
+    assert_eq!(
+        result::check_citation(&finding("a.rs", 1, 7), &targets),
+        RemoteUnverified
+    );
+    assert_eq!(
+        result::check_citation(&finding("O:/source/repo/context.rs", 1, 3), &targets),
+        RemoteUnverified
+    );
+    assert_eq!(
+        result::check_citation(&finding("O:/source/elsewhere.rs", 1, 3), &targets),
+        OutsideWorkingDirectories
+    );
+    assert_eq!(
+        result::check_citation(&finding("../elsewhere.rs", 1, 3), &targets),
+        OutsideWorkingDirectories
+    );
+    assert_eq!(
+        result::check_citation(&finding("a.rs", 0, 1), &targets),
+        LinesOutOfRange
+    );
+    anyhow::Ok(())
+}
+
+#[test]
 fn line_schema_parser_keeps_all_finding_fields() -> Result<()> {
     let fixture = Fixture::new()?;
     let targets = targets::resolve(std::slice::from_ref(&fixture.source))?;

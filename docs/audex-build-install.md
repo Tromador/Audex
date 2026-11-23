@@ -1,5 +1,7 @@
 # Build, install and update Audex on WSL
 
+> **Current installation layout (November 2026):** Audex uses `~/.audex/packages/standalone/current` with `~/.local/bin/audex` pointing to its `bin/audex`; the managed daemon uses `~/.audex/packages/app-server-daemon/current`. The installation and update procedures further down this document describe an older layout and must not be used for the current deployment. Follow [the production operator handbook](audex-production-operator-handbook.md#6-building-and-installing-the-complete-production-package) instead.
+
 Audex builds a real `audex` executable. The compatibility `codex` executable uses the same CLI implementation. Internal helpers and the managed daemon retain their existing Codex filenames.
 
 Use a complete package for normal operation. Copying the application executable alone omits the code-mode host, execution server, sandbox and search resources.

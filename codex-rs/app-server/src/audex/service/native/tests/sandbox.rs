@@ -44,7 +44,7 @@ async fn effective_profile_confines_actual_commands_without_inference() -> Resul
             .success(),
         "host canary positive control"
     );
-    let prepared = prepare(&host, &models, &run, &selection()).await?;
+    let prepared = prepare(&host, &models, &run, &selection(), temp.path()).await?;
     let config = &prepared.options.config;
     // Artificial parent only: never enumerate or print the test process environment.
     let runtime = HashMap::from([

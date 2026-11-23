@@ -158,7 +158,6 @@ fn expected_args(
 ) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
-        "--restricted",
         "--input-format",
         "stream-json",
         "--output-format",
@@ -167,18 +166,20 @@ fn expected_args(
         "--model",
         model,
         "--tools",
-        "Read,Grep,Glob",
+        "Read,Grep,Glob,WebSearch",
+        "--setting-sources",
+        "user",
         "--allowedTools",
-        "Read,Grep,Glob",
+        "Read,Grep,Glob,WebSearch",
         "--permission-mode",
         "dontAsk",
-        "--strict-mcp-config",
         "--disable-slash-commands",
         "--no-session-persistence",
         "--settings",
-        r#"{"permissions":{"blockReadsOutsideWorkingDirectories":true}}"#,
+        r#"{"disableAllHooks":true,"permissions":{"blockReadsOutsideWorkingDirectories":true}}"#,
         "--system-prompt",
         rules,
+        "--strict-mcp-config",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -202,6 +203,17 @@ fn expected_args(
     }
     args
 }
+fn args_without_mcp(args: &Value) -> Result<Value> {
+    let mut args = args.as_array().context("Claude arguments are not an array")?.clone();
+    if let Some(index) = args.iter().position(|arg| arg == "--mcp-config") {
+        let path = args.get(index + 1).and_then(Value::as_str).context("MCP config path missing")?;
+        ensure!(Path::new(path).file_name().is_some_and(|name| name == "mcp.json"), "MCP configuration must be passed as a temporary file");
+        args.drain(index..index + 2);
+        args.retain(|arg| !arg.as_str().is_some_and(|value| value.starts_with("mcp__")));
+    }
+    Ok(Value::Array(args))
+}
+
 fn assert_environment(call: &Value, fixture: &Fixture, api_key: Option<&str>) {
     let mut expected = json!({"PATH":"/usr/bin:/bin", "LANG":"C.UTF-8", "TERM":"dumb",
         "CLAUDE_CODE_DISABLE_CLAUDE_MDS":"1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY":"1",
@@ -231,6 +243,52 @@ fn assert_environment(call: &Value, fixture: &Fixture, api_key: Option<&str>) {
     assert_eq!(call["env"], expected);
     assert_eq!(call["pid"], call["pgid"]);
     assert_eq!(call["pdeathsig"], libc::SIGKILL);
+}
+
+#[test]
+fn reference_mcp_selection_allows_only_named_read_tools() -> Result<()> {
+    let input = json!({
+        "context7": {"command": "c7"},
+        "github": {"command": "gh"},
+        "zen-storage": {"command": "zen"},
+        "unrelated": {"command": "other"}
+    });
+    let servers = input.as_object().unwrap();
+    let (config, allowed) = launch::select_mcp_servers(servers, false)?.unwrap();
+    let parsed: Value = serde_json::from_str(&config)?;
+    assert_eq!(
+        parsed["mcpServers"].as_object().unwrap().keys().cloned().collect::<Vec<_>>(),
+        vec!["context7", "github"]
+    );
+    for name in [
+        "mcp__context7__resolve-library-id",
+        "mcp__context7__query-docs",
+        "mcp__github__fetch_file",
+        "mcp__github__compare_commits",
+    ] {
+        assert!(allowed.contains(&name.to_owned()), "missing {name}");
+    }
+    for name in [
+        "mcp__github__update_file",
+        "mcp__github__delete_file",
+        "mcp__github__merge_pull_request",
+        "mcp__unrelated__search",
+        "mcp__zen-storage__write_file",
+    ] {
+        assert!(!allowed.contains(&name.to_owned()), "unexpected {name}");
+    }
+
+    let (remote_config, remote_allowed) =
+        launch::select_mcp_servers(servers, true)?.unwrap();
+    let remote: Value = serde_json::from_str(&remote_config)?;
+    assert!(remote["mcpServers"].get("zen-storage").is_some());
+    assert!(remote_allowed.contains(&"mcp__zen-storage__read_text_file".to_owned()));
+    assert!(!remote_allowed.contains(&"mcp__zen-storage__write_file".to_owned()));
+    assert!(launch::select_mcp_servers(
+        json!({"context7":{"command":"c7"}}).as_object().unwrap(),
+        true
+    ).is_err());
+    Ok(())
 }
 
 #[test]
@@ -297,7 +355,7 @@ async fn exact_launch_for_both_routes_and_all_target_shapes() -> Result<()> {
             assert_eq!(calls.len(), 1);
             let call = &calls[0];
             assert_eq!(
-                call["args"],
+                args_without_mcp(&call["args"])?,
                 json!(expected_args(
                     "requested-model",
                     crate::audex::reviewer::native::RULES,
@@ -657,6 +715,7 @@ async fn task_abort_still_cleans_group_and_publishes_captured_bytes() -> Result<
         "rules",
         json!({"brief":"test"}),
         None,
+        false,
     )?;
     let capture_dir = directory.clone();
     let observed = Arc::new(tokio::sync::Notify::new());
@@ -747,7 +806,7 @@ async fn audit_conversation_launcher_exposes_results_and_live_source_without_leg
         assert_eq!(calls.len(), 2);
         let call = &calls[1];
         assert_eq!(
-            call["args"],
+            args_without_mcp(&call["args"])?,
             json!(expected_args(
                 "requested-model",
                 CONVERSATION_RULES,

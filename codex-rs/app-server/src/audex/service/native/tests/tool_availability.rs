@@ -33,9 +33,8 @@ async fn qualify(
                 "read",
                 "exec",
                 r#"
-const names = Object.keys(tools).sort();
-if (JSON.stringify(names) !== '["exec_command","write_stdin"]') {
-    throw new Error("Unexpected nested tools: " + JSON.stringify(names));
+if (!tools.exec_command || !tools.write_stdin) {
+    throw new Error("Source inspection tools are missing");
 }
 text(await tools.exec_command({cmd: "cat named.rs", yield_time_ms: 1000}));
 text(await tools.exec_command({cmd: "printf forbidden > named.rs", yield_time_ms: 1000}));
@@ -138,14 +137,13 @@ text(await tools.exec_command({cmd: "printf forbidden > named.rs", yield_time_ms
         }
     }
     names.sort();
-    assert_eq!(
-        names,
-        if mode == ToolMode::Direct {
-            vec!["exec_command", "write_stdin"]
-        } else {
-            vec!["exec", "wait"]
-        }
-    );
+    for expected in if mode == ToolMode::Direct {
+        ["exec_command", "write_stdin"]
+    } else {
+        ["exec", "wait"]
+    } {
+        assert!(names.contains(&expected.to_owned()), "missing {expected}: {names:?}");
+    }
     if inspect_source {
         assert_eq!(
             status.tool_calls, 1,

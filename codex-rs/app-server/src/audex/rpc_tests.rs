@@ -140,6 +140,7 @@ impl Fixture {
         let rpc = AuditRpc {
             service: Mutex::new(Ok(service)),
             settings,
+            threads: None,
             stopped: AtomicBool::new(false),
         };
         Ok(Self {

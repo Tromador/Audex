@@ -27,6 +27,10 @@ pub struct AuditStartRequest {
     pub input: AuditInput,
     /// Base directory for the operator's relative paths.
     pub cwd: String,
+    /// Source conversation for an MCP-backed target preflight; never shown to reviewers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub origin_thread_id: Option<String>,
     pub brief: String,
     pub reviewers: Vec<AuditReviewer>,
     /// Operator-named UTF-8 guidance file, read once at start.

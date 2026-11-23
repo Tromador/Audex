@@ -56,6 +56,7 @@ pub enum CitationStatus {
     PathNotFound,
     OutsideWorkingDirectories,
     LinesOutOfRange,
+    RemoteUnverified,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -120,6 +121,30 @@ pub fn check_citation(finding: &Finding, targets: &Targets) -> CitationStatus {
         return CitationStatus::OutsideWorkingDirectories;
     };
     let supplied = Path::new(&finding.path);
+    let remote = super::targets::is_zen_storage_path(supplied)
+        || (!supplied.is_absolute()
+            && super::targets::is_zen_storage_path(first));
+    if remote {
+        let candidate = if super::targets::is_zen_storage_path(supplied) {
+            supplied.to_path_buf()
+        } else {
+            first.join(supplied)
+        };
+        let candidate = normalise(&candidate);
+        if !targets
+            .working_directories
+            .iter()
+            .filter(|root| super::targets::is_zen_storage_path(root))
+            .any(|root| candidate.starts_with(normalise(root)))
+        {
+            return CitationStatus::OutsideWorkingDirectories;
+        }
+        return if finding.start_line == 0 || finding.end_line < finding.start_line {
+            CitationStatus::LinesOutOfRange
+        } else {
+            CitationStatus::RemoteUnverified
+        };
+    }
     let candidate = if supplied.is_absolute() {
         supplied.to_path_buf()
     } else {

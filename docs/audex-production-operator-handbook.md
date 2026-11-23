@@ -209,7 +209,24 @@ The configured CLI is `/home/stef/.local/bin/claude`. Keep the dedicated profile
 
 The current release is **1.0.0**. The workspace version was raised from `0.0.0` so the daemon would request the full modern OpenAI model catalogue. Updating only the standalone CLI left the managed daemon reporting `0.0.0`; the remedy was to update its independently installed package.
 
-When a complete new build already exists at `~/scratch/codex/Audex/production-package`:
+The live installation follows the standalone package layout, **not** the obsolete `~/.local/share/audex/package` layout:
+
+- CLI link: `~/.local/bin/audex` → `~/.audex/packages/standalone/current/bin/audex`
+- Standalone package: `~/.audex/packages/standalone/current`
+- Independently managed daemon package: `~/.audex/packages/app-server-daemon/current`
+
+**Executable-only acceptance testing:** If the `audex` executable is already built and its companion binaries and resources are unchanged, reuse the existing complete standalone package. Close the Audex TUI, then:
+
+```bash
+audex app-server daemon stop
+install -m 755 "$HOME/projects/Audex/codex-rs/target/release/audex" \
+  "$HOME/.audex/packages/standalone/current/bin/audex"
+audex app-server daemon update --from-cli
+```
+
+If `CARGO_TARGET_DIR` was set for the build, use the actual release binary path instead. This is a local executable refresh, not a newly assembled or revision-labelled package.
+
+**Complete package installation:** When a complete new build already exists at `~/scratch/codex/Audex/production-package`, copy its contents to the selected standalone release and update the managed daemon:
 
 ```bash
 audex app-server daemon stop
@@ -220,7 +237,7 @@ cp -a "$HOME/scratch/codex/Audex/production-package/." \
 audex app-server daemon update --from-cli
 ```
 
-**Do not forget `update --from-cli` after replacing the executable package.** It installs the current standalone package as the managed daemon package. For configuration-only edits, do **not** rebuild or reinstall: just restart the daemon (`stop` then `start`).
+**Do not forget `update --from-cli` after replacing the executable package.** The managed daemon has its own selected package; changing only the standalone binary does not update it. For configuration-only edits, do **not** rebuild or reinstall: just restart the daemon (`stop` then `start`).
 
 The installed layouts and data paths are:
 

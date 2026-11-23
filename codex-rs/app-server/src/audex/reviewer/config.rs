@@ -15,19 +15,13 @@ pub(super) async fn isolated_config(
         .ok_or_else(|| anyhow::anyhow!("unknown reviewer provider"))?
         .clone();
 
-    let mut config = Config::load_default_with_cli_overrides_for_codex_home(
-        host.codex_home.to_path_buf(),
-        Vec::new(),
-    )
-    .await?;
-    config.config_layer_stack = codex_config::ConfigLayerStack::new(
-        Vec::new(),
-        requirements.clone(),
-        host.config_layer_stack.requirements_toml().clone(),
-    )?
-    .with_cloud_config_binding(host.config_layer_stack.cloud_config_binding().cloned())
-    .with_applied_config_server(host.config_layer_stack.applied_config_server().cloned())
-    .with_user_and_project_exec_policy_rules_ignored(true);
+    // Inherit the running client's MCP/Apps configuration rather than reconstructing
+    // a fresh layer stack that discards its registered connections.
+    let mut config = host.clone();
+    config.config_layer_stack = host
+        .config_layer_stack
+        .clone()
+        .with_user_and_project_exec_policy_rules_ignored(true);
     config.application_network_policy = host.application_network_policy.clone();
     config.application_auth_route_config = host.application_auth_route_config.clone();
     config.cli_auth_credentials_store_mode = host.cli_auth_credentials_store_mode;
@@ -84,7 +78,6 @@ pub(super) async fn isolated_config(
     config.include_collaboration_mode_instructions = false;
     config.include_skill_instructions = false;
     config.cloud_skill_enabled = false;
-    config.orchestrator_mcp_enabled = false;
     config.include_environment_context = false;
     config.include_environment_context_time = false;
     config.notify = None;
@@ -99,11 +92,8 @@ pub(super) async fn isolated_config(
     config.rollout_budget = None;
     config.current_time_reminder = None;
     config.features = host.features.clone();
-    retain_reviewer_features(&mut config)?;
     config.web_search_mode = host.web_search_mode.clone();
-    config.web_search_mode.set(WebSearchMode::Disabled)?;
+    config.web_search_mode.set(WebSearchMode::Live)?;
     config.mcp_servers = host.mcp_servers.clone();
-    config.mcp_servers.set(Default::default())?;
-    config.plugins = Default::default();
     Ok(config)
 }
