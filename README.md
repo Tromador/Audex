@@ -11,11 +11,19 @@ It is not a general-purpose CI service, an automated code-fixing system, or an o
 - **Independent reviews.** Run a native Codex reviewer and an official Claude CLI reviewer on the same file, set of paths, directory or supplied snippet. Reviewer/model selection and reasoning effort are configurable.
 - **Live source, no invented scope.** Audex passes directory targets directly to reviewers. It does not enumerate them, generate file inventories, apply inclusion rules, or snapshot the source tree. Reviewers investigate using their own tools.
 - **Read-only execution.** Native reviewers use Codex's sandboxed inspection; Claude uses a restricted set of read-only source and reference tools, a dedicated profile, and disabled project hooks.
-- **Useful reference access.** Reviewers can consult selected GitHub read tools, Context7 documentation, public web search and read-only Zen Storage paths where those services are configured. Reference lookup is distinct from unrestricted shell networking.
+- **Useful reference access.** Reviewers can consult selected GitHub read tools, Context7 documentation and public web search. An optional private Zen Storage connector also permits read-only access to files outside the local Linux filesystem. Reference lookup is distinct from unrestricted shell networking.
 - **Retained evidence.** Audit runs, original reviewer output, findings and diagnostics remain available for inspection, reopening, cancellation and reviewer retries.
 - **Compare and challenge.** The Codex TUI can reconcile reviewers' conclusions, show individual findings and sources, and support follow-up discussion with Claude through `/claude`.
 
 A finding is a model's claim, not a proven defect. Agreement between models can be useful, but is not verification. A failed reviewer is not silently counted as a clean review.
+
+## About Zen Storage
+
+**Zen Storage is a private MCP (Model Context Protocol) filesystem service used by the original Audex installation.** It is not part of Audex, is not published as a downloadable product, and is not something a third party can install by following this README.
+
+It connects selected filesystems to ChatGPT and the Audex reviewers through a Windows-hosted service and tunnel. Those locations are exposed as drive-prefixed paths, for example `O:/home/example/project/src/file.cpp`. Depending on what the operator has connected, these may represent files on another computer, a Windows drive, or other storage. The reviewers use the connector's **read-only** operations to inspect those files. Audex recognises the drive-prefixed target and passes it to the connector instead of treating it as a normal Linux pathname.
+
+**Zen Storage is optional.** Ordinary Audex reviews of local files and directories do not need it. GitHub, Context7 and web-search capabilities are separate integrations. Examples using `O:/...` specifically demonstrate the author's private setup; they are not portable paths or general installation instructions. Without that connector, use source paths available to the machine running Audex.
 
 ## Quick example
 
@@ -44,7 +52,7 @@ You can focus the job with a brief and guidance:
 /audit /path/to/source.cpp --brief "Find concrete defects in ownership and error handling." --guidance-text "Preserve the public API; distinguish source evidence from assumptions."
 ~~~
 
-Reviewers may also inspect remote files through Zen Storage and compare them with upstream GitHub contents:
+On an installation with the private Zen Storage connector configured, reviewers can also compare a remote file with upstream GitHub contents:
 
 ~~~text
 /audit O:/home/example/project/src/file.cpp --guidance-text "Use read-only GitHub MCP to compare this file against owner/repository:src/file.cpp on main. Report differences and any access failures."
