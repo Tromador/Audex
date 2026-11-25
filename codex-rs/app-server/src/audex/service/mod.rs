@@ -9,13 +9,14 @@ mod summary;
 pub(super) mod targets;
 
 pub use record::AttemptStatus;
+pub use record::ConversationReviewer;
 pub use record::ReviewerSelection;
 pub use record::RunId;
 pub use record::RunRecord;
 pub use record::State;
 pub use record::Trigger;
 pub use record::Usage;
-pub(super) use result::schema as output_schema;
+pub(crate) use result::schema as output_schema;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -134,6 +135,52 @@ impl Attempt {
         self.publish()
     }
 
+    /// The originating conversation's reviewer this attempt should use, if any.
+    /// An operator retry is a fresh independent review on the isolated route.
+    pub fn conversation(&self) -> Option<&ConversationReviewer> {
+        self.run.conversation.as_ref().filter(|conversation| {
+            conversation.reviewer == self.reviewer_index
+                && self.status.trigger != Trigger::OperatorRetry
+        })
+    }
+
+    /// Records the conversation, its rollout and the admitted turn for this attempt.
+    pub fn conversation_turn(
+        &mut self,
+        thread: String,
+        rollout: Option<PathBuf>,
+        turn: Option<String>,
+    ) -> Result<()> {
+        self.status.execution = Some("conversation".into());
+        self.status.native_thread_id = Some(thread);
+        self.status.rollout_path = rollout;
+        self.status.turn_id = turn;
+        self.publish()
+    }
+
+    /// A conversation review stays queued until its conversation admits the turn.
+    fn awaiting_admission(&mut self) -> Result<()> {
+        self.status.state = State::Queued;
+        self.status.started_at = None;
+        self.publish()
+    }
+
+    fn admitted(&mut self) -> Result<()> {
+        self.status.state = State::Running;
+        self.status.started_at = Some(record::now());
+        self.publish()
+    }
+
+    /// Records the settings actually in effect when the conversation admitted the review.
+    pub fn actual_settings(&mut self, model: String, effort: Option<String>) -> Result<()> {
+        if self.status.reviewer.model == model && self.status.reviewer.effort == effort {
+            return Ok(());
+        }
+        self.status.reviewer.model = model;
+        self.status.reviewer.effort = effort;
+        self.publish()
+    }
+
     pub fn write_output(&mut self, output: &[u8]) -> Result<()> {
         record::write_atomic(&self.directory.join("output.txt"), output)
     }
@@ -235,10 +282,44 @@ impl AuditService {
     }
 
     pub fn start(&mut self, request: StartRequest) -> Result<RunId> {
+        self.start_with_conversation(request, None)
+    }
+
+    /// Starts a run whose `conversation` reviewer, if any, is performed by the
+    /// originating conversation instead of an isolated reviewer thread.
+    pub fn start_with_conversation(
+        &mut self,
+        request: StartRequest,
+        conversation: Option<ConversationReviewer>,
+    ) -> Result<RunId> {
         ensure!(
             !request.reviewers.is_empty(),
             "at least one reviewer is required"
         );
+        if let Some(conversation) = &conversation {
+            ensure!(
+                request
+                    .reviewers
+                    .get(conversation.reviewer)
+                    .is_some_and(|reviewer| reviewer.route == "native"),
+                "the conversation reviewer must be a native selection"
+            );
+            // One conversation history cannot host two concurrent initial reviews.
+            let busy = self.runs.values().any(|run| {
+                run.record.conversation.as_ref().is_some_and(|other| {
+                    other.thread_id == conversation.thread_id
+                        && run
+                            .reviewers
+                            .get(&other.reviewer)
+                            .and_then(|reviewer| reviewer.task.as_ref())
+                            .is_some_and(|task| !task.is_finished())
+                })
+            });
+            ensure!(
+                !busy,
+                "this conversation already has a native review in progress; wait for it to finish or cancel it"
+            );
+        }
         for reviewer in &request.reviewers {
             record::validate_label(&reviewer.label)?;
             self.runner.validate(reviewer)?;
@@ -279,6 +360,7 @@ impl AuditService {
             guidance: request.guidance,
             reviewers: request.reviewers,
             created_at: record::now(),
+            conversation,
         });
         record::write_json(&directory.join("run.json"), &*run)?;
         let mut handle = RunHandle {

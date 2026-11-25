@@ -1125,6 +1125,11 @@ impl Session {
                 });
             }
         }
+        if is_audex_review(&active_task.turn_context) {
+            return Err(NotSubmittedReason::ActiveTurnNotSteerable {
+                turn_kind: NonSteerableTurnKind::Review,
+            });
+        }
 
         if matches!(input, SubmittedTurnInput::UserInput { content, .. } if content.is_empty()) {
             return Err(NotSubmittedReason::EmptyInput);
@@ -1178,6 +1183,16 @@ impl Session {
             active_task.turn_context.root_turn_id(),
         ))
     }
+}
+
+/// An Audex initial review must reach its conclusion without same-turn input.
+/// Kept synchronous so steering holds no extra state across awaits.
+fn is_audex_review(turn_context: &TurnContext) -> bool {
+    turn_context
+        .turn_metadata_state
+        .current_turn_trigger()
+        .as_deref()
+        == Some(codex_protocol::turn_input::AUDEX_REVIEW_TURN_TRIGGER)
 }
 
 async fn capture_sender_user_messages(

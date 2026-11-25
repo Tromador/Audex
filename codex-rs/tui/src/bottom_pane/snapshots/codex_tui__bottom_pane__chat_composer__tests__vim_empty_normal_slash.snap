@@ -2,8 +2,8 @@
 source: tui/src/bottom_pane/chat_composer.rs
 expression: terminal.backend()
 ---
-"› /audit          start or retrieve a durable isolated      "
-"                  source audit                              "
+"› /audit          open active audit controls or start an    "
+"                  isolated source audit                     "
 "  /claude         talk to Claude in this conversation;      "
 "                  optionally --model MODEL                  "
 "  /model          choose what model and reasoning effort to "

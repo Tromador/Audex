@@ -10,6 +10,7 @@ fn retained_run(fixture: &Fixture, state: State) -> Result<(RunId, PathBuf, Path
         guidance: None,
         reviewers: vec![selection("one")],
         created_at: record::now(),
+        conversation: None,
     };
     let attempt = record::reviewer_dir(&directory, 0, &run.reviewers[0]).join("attempt-1");
     fs::create_dir_all(&attempt)?;

@@ -153,6 +153,7 @@ impl ChatWidget {
                     .transcript
                     .has_replayed_cloud_text(&notification.turn_id, &notification.item_id)
                     && !self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
+                    && !self.is_audit_review_turn(&notification.turn_id)
                     && (from_replay
                         || !self.is_realtime_delegated_agent_item(
                             &notification.turn_id,
@@ -521,8 +522,11 @@ impl ChatWidget {
                 self.last_non_retry_error = None;
                 self.flush_generated_images(&notification.turn.id);
                 let completion = self.completion_cell(&notification.turn, replay_kind);
+                let review_turn = self.is_audit_review_turn(&notification.turn.id);
                 self.on_task_complete(
-                    last_agent_message.map(|(_, text)| text.to_owned()),
+                    last_agent_message
+                        .filter(|_| !review_turn)
+                        .map(|(_, text)| text.to_owned()),
                     completion,
                     replay_kind.is_some(),
                 );
@@ -627,6 +631,7 @@ impl ChatWidget {
                 // render with their choices on completion.
                 if delegated
                     || self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
+                    || self.is_audit_review_turn(&notification.turn_id)
                     || self
                         .transcript
                         .has_replayed_cloud_text(&notification.turn_id, &id)

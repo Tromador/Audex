@@ -111,7 +111,10 @@ impl AuditRpc {
             .context("could not discover Zen Storage tools")?;
         let mut matching = catalogue.tools.iter().filter(|tool| {
             tool.callable_namespace.ends_with("__zen_storage")
-                && matches!(tool.callable_name.as_str(), "get_file_info" | "_get_file_info")
+                && matches!(
+                    tool.callable_name.as_str(),
+                    "get_file_info" | "_get_file_info"
+                )
         });
         let raw_name = matching
             .next()
@@ -145,7 +148,10 @@ impl AuditRpc {
             response.is_error != Some(true),
             "Zen Storage rejected {path}: {detail}"
         );
-        if detail.lines().any(|line| line.trim() == "isDirectory: true") {
+        if detail
+            .lines()
+            .any(|line| line.trim() == "isDirectory: true")
+        {
             Ok(true)
         } else if detail.lines().any(|line| line.trim() == "isFile: true") {
             Ok(false)
@@ -207,14 +213,21 @@ impl AuditRpc {
                                 }
                             })
                             .collect::<Vec<_>>();
-                        if paths.iter().any(|path| service::targets::is_zen_storage_path(path)) {
+                        if paths
+                            .iter()
+                            .any(|path| service::targets::is_zen_storage_path(path))
+                        {
                             let mut remote_directories = Vec::with_capacity(paths.len());
                             for path in &paths {
                                 let kind = if service::targets::is_zen_storage_path(path) {
-                                    Some(self.check_zen_storage_path(
-                                        path.to_str().context("Zen Storage path is not UTF-8")?,
-                                        params.origin_thread_id.as_deref(),
-                                    ).await?)
+                                    Some(
+                                        self.check_zen_storage_path(
+                                            path.to_str()
+                                                .context("Zen Storage path is not UTF-8")?,
+                                            params.origin_thread_id.as_deref(),
+                                        )
+                                        .await?,
+                                    )
                                 } else {
                                     None
                                 };
@@ -244,7 +257,7 @@ impl AuditRpc {
                     (None, text) => text,
                 };
                 let brief = params.brief;
-                let reviewers = params
+                let mut reviewers: Vec<ReviewerSelection> = params
                     .reviewers
                     .into_iter()
                     .enumerate()
@@ -256,12 +269,58 @@ impl AuditRpc {
                         permission_summary: String::new(),
                     })
                     .collect();
-                let id = service.start(service::StartRequest {
-                    input,
-                    brief,
-                    guidance,
-                    reviewers,
-                })?;
+                // A native selection without a model is the originating conversation itself.
+                let mut selected = reviewers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r.route == "native" && r.model.is_empty())
+                    .map(|(index, _)| index);
+                let conversation = selected.next();
+                ensure!(
+                    selected.next().is_none(),
+                    "select the originating conversation (native) at most once; use native:MODEL[:EFFORT] for additional native reviewers"
+                );
+                let conversation = match conversation {
+                    Some(index) => {
+                        let origin = params
+                            .origin_thread_id
+                            .clone()
+                            .context("native requires an originating Codex conversation")?;
+                        let thread = self
+                            .threads
+                            .as_ref()
+                            .context("native requires the originating thread manager")?
+                            .get_thread(codex_protocol::ThreadId::from_string(&origin)?)
+                            .await
+                            .context("the originating Codex conversation is not loaded")?;
+                        let settings = thread.config_snapshot().await;
+                        ensure!(
+                            !settings.ephemeral,
+                            "native requires a persistent Codex conversation"
+                        );
+                        // Record the conversation's effective settings; the attempt
+                        // updates them if they change before the review is admitted.
+                        reviewers[index].model = settings.model;
+                        reviewers[index].effort = settings
+                            .reasoning_effort
+                            .and_then(|effort| serde_json::to_value(effort).ok())
+                            .and_then(|value| value.as_str().map(str::to_owned));
+                        Some(service::ConversationReviewer {
+                            thread_id: origin,
+                            reviewer: index,
+                        })
+                    }
+                    None => None,
+                };
+                let id = service.start_with_conversation(
+                    service::StartRequest {
+                        input,
+                        brief,
+                        guidance,
+                        reviewers,
+                    },
+                    conversation,
+                )?;
                 Ok(ClientResponsePayload::AuditStart(AuditRunResponse {
                     run: service::read::view(&service.run_directory(id))?,
                 }))

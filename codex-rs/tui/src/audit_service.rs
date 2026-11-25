@@ -88,7 +88,7 @@ pub(crate) fn parse_command(args: &str) -> Result<AuditAction, String> {
     let mut input = parts.iter().map(String::as_str);
     let first = input
         .next()
-        .ok_or("Usage: /audit <path>… [--with PRESET] [--reviewer ROUTE:MODEL[:EFFORT]] [--guidance FILE | --guidance-text TEXT]")?;
+        .ok_or("Usage: /audit <path>… [--with PRESET] [--reviewer native | ROUTE:MODEL[:EFFORT]] [--guidance FILE | --guidance-text TEXT]")?;
     let rest: Vec<_> = input.collect();
     match first {
         "list" => {
@@ -136,7 +136,7 @@ pub(crate) fn parse_command(args: &str) -> Result<AuditAction, String> {
             "--with" => preset = Some(args.next().ok_or("--with requires a preset")?),
             "--reviewer" => reviewers.push(
                 args.next()
-                    .ok_or("--reviewer requires ROUTE:MODEL[:EFFORT]")?,
+                    .ok_or("--reviewer requires native or ROUTE:MODEL[:EFFORT]")?,
             ),
             "--brief" => brief = args.next().ok_or("--brief requires text")?,
             "--guidance" => guidance = Some(args.next().ok_or("--guidance requires a filename")?),
@@ -170,6 +170,14 @@ pub(crate) fn parse_command(args: &str) -> Result<AuditAction, String> {
 }
 
 pub(crate) fn parse_reviewer(value: &str) -> Result<AuditReviewer, String> {
+    // Bare `native` is this conversation; the server resolves its model and effort.
+    if value == "native" {
+        return Ok(AuditReviewer {
+            route: "native".into(),
+            model: String::new(),
+            effort: None,
+        });
+    }
     let parts: Vec<_> = value.split(':').collect();
     if !(2..=3).contains(&parts.len()) || parts.iter().any(|v| v.is_empty()) {
         return Err("Reviewer must be ROUTE:MODEL[:EFFORT]".into());
@@ -200,13 +208,25 @@ pub(crate) fn selections(
     if values.is_empty() {
         return Err("Select at least one reviewer".into());
     }
-    values.iter().map(|s| parse_reviewer(s)).collect()
+    let reviewers = values
+        .iter()
+        .map(|s| parse_reviewer(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    if reviewers.iter().filter(|r| is_conversation(r)).count() > 1 {
+        return Err("Select this conversation (native) at most once; use native:MODEL[:EFFORT] for additional native reviewers".into());
+    }
+    Ok(reviewers)
+}
+
+/// Whether a selection is the originating conversation rather than a separate reviewer.
+pub(crate) fn is_conversation(reviewer: &AuditReviewer) -> bool {
+    reviewer.route == "native" && reviewer.model.is_empty()
 }
 
 pub(crate) fn tool_specs() -> Vec<DynamicToolSpec> {
     let run = json!({"type":"string"});
     [
-        ("audit_start", "Propose a read-only audit of the supplied live paths or pasted input. Named files remain the targets; directories are never enumerated by Audex. The operator sees one disclosure before submission. Reviewers use route:model[:effort]; without explicit reviewers the configured default preset applies. Supply either guidance (an operator-selected filename) or guidanceText (literal text). Both are subordinate to audit rules.", json!({"input":{"oneOf":[{"type":"object","properties":{"type":{"const":"paths"},"paths":{"type":"array","items":{"type":"string"},"minItems":1}},"required":["type","paths"],"additionalProperties":false},{"type":"object","properties":{"type":{"const":"snippet"},"name":{"type":"string"},"text":{"type":"string"}},"required":["type","name","text"],"additionalProperties":false}]},"reviewers":{"type":"array","items":{"type":"string"}},"with":{"type":"string"},"brief":{"type":"string"},"guidance":{"type":"string"},"guidanceText":{"type":"string"}}), vec!["input"]),
+        ("audit_start", "Propose a read-only audit of the supplied live paths or pasted input. Named files remain the targets; directories are never enumerated by Audex. The operator sees one disclosure before submission. Reviewers use native (this conversation performs its own review after the current turn ends, at most once) or route:model[:effort] (a separate reviewer); without explicit reviewers the configured default preset applies. Starting returns at once; do not wait for or read the pending review in this turn. Supply either guidance (an operator-selected filename) or guidanceText (literal text). Both are subordinate to audit rules.", json!({"input":{"oneOf":[{"type":"object","properties":{"type":{"const":"paths"},"paths":{"type":"array","items":{"type":"string"},"minItems":1}},"required":["type","paths"],"additionalProperties":false},{"type":"object","properties":{"type":{"const":"snippet"},"name":{"type":"string"},"text":{"type":"string"}},"required":["type","name","text"],"additionalProperties":false}]},"reviewers":{"type":"array","items":{"type":"string"}},"with":{"type":"string"},"brief":{"type":"string"},"guidance":{"type":"string"},"guidanceText":{"type":"string"}}), vec!["input"]),
         ("audit_list", "List retained file-backed audits without starting inference.", json!({"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1}}), vec![]),
         ("audit_cancel", "Cancel an audit or one selected reviewer. Partial output and earlier attempts remain readable.", json!({"runId":run,"reviewer":{"type":"string"}}), vec!["runId"]),
         ("audit_read", READ_GUIDANCE, json!({"runId":run,"view":{"enum":["reviewers","findings","finding","output","diagnostics","report"]},"reviewer":{"type":"string"},"attempt":{"type":"integer","minimum":1},"number":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1}}), vec!["runId"]),

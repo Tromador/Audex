@@ -16,6 +16,7 @@ fn retained_fixture(route: &str) -> Result<(tempfile::TempDir, RunRecord, PathBu
         guidance: None,
         reviewers: vec![reviewer.clone()],
         created_at: "2021-02-03T04:05:06Z".into(),
+        conversation: None,
     };
     record::write_json(&temp.path().join("run.json"), &run)?;
     fs::write(

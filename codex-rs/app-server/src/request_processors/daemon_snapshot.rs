@@ -40,6 +40,11 @@ impl ThreadRequestProcessor {
                     continue;
                 }
                 snapshot.loaded.insert(thread_id.to_string());
+                // An Audex review turn is reconciled as interrupted for operator retry;
+                // its conversation is restored, but the review is never resubmitted.
+                let interrupted = interrupted.filter(|(_, options, _)| {
+                    options.final_output_json_schema != Some(crate::audex::service::output_schema())
+                });
                 if let Some((turn_id, options, environment)) = interrupted {
                     snapshot.interrupted.insert(
                         thread_id.to_string(),

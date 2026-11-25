@@ -122,8 +122,7 @@ pub fn check_citation(finding: &Finding, targets: &Targets) -> CitationStatus {
     };
     let supplied = Path::new(&finding.path);
     let remote = super::targets::is_zen_storage_path(supplied)
-        || (!supplied.is_absolute()
-            && super::targets::is_zen_storage_path(first));
+        || (!supplied.is_absolute() && super::targets::is_zen_storage_path(first));
     if remote {
         let candidate = if super::targets::is_zen_storage_path(supplied) {
             supplied.to_path_buf()

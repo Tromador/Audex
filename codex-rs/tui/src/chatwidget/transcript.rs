@@ -79,6 +79,8 @@ pub(super) struct TranscriptState {
     pub(super) plan_delta_buffer: String,
     /// True while a plan item is streaming.
     pub(super) plan_item_active: bool,
+    /// Turns that performed an Audex initial review; their raw text is not displayed.
+    pub(super) audit_review_turns: std::collections::HashSet<String>,
 }
 
 impl TranscriptState {

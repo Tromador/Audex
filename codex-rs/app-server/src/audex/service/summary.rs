@@ -126,10 +126,15 @@ pub(super) fn render_review(
     status: &AttemptStatus,
 ) -> Result<String> {
     let mut out = format!(
-        "# Review — {}\n\n**Reviewer:** {} / {}\n\n**Audit created:** {}\n\n**Attempt:** {} — {}\n\n",
+        "# Review — {}\n\n**Reviewer:** {} / {}{}\n\n**Audit created:** {}\n\n**Attempt:** {} — {}\n\n",
         status.reviewer.label,
         status.reviewer.route,
         status.reviewer.model,
+        if status.execution.as_deref() == Some("conversation") {
+            " (originating conversation)"
+        } else {
+            ""
+        },
         run.created_at,
         status.attempt,
         word(&status.state)

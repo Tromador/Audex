@@ -329,6 +329,9 @@ impl ChatWidget {
     ) {
         let from_replay = render_source.is_replay();
         let replay_kind = render_source.replay_kind();
+        if self.audit_review_item(&turn_id, &item) {
+            return;
+        }
         match item {
             ThreadItemPayload::UserMessage {
                 content, client_id, ..

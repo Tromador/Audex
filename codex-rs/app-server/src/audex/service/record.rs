@@ -32,6 +32,17 @@ pub struct RunRecord {
     pub guidance: Option<String>,
     pub reviewers: Vec<ReviewerSelection>,
     pub created_at: String,
+    /// The native reviewer performed by the originating conversation, if selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<ConversationReviewer>,
+}
+
+/// Associates one reviewer with the Codex conversation that commissioned the run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationReviewer {
+    pub thread_id: String,
+    /// Zero-based index into `RunRecord::reviewers`.
+    pub reviewer: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +79,13 @@ pub struct AttemptStatus {
     pub reported_model: Option<String>,
     pub native_thread_id: Option<String>,
     pub rollout_path: Option<PathBuf>,
+    /// "conversation" when the originating conversation ran this attempt; absent for
+    /// an isolated reviewer thread or another route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<String>,
+    /// The admitted turn within `native_thread_id` that performed a conversation attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 impl AttemptStatus {
@@ -85,6 +103,8 @@ impl AttemptStatus {
             reported_model: None,
             native_thread_id: None,
             rollout_path: None,
+            execution: None,
+            turn_id: None,
         }
     }
 

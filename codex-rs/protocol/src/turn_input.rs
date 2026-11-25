@@ -403,3 +403,11 @@ pub enum NotSubmittedReason {
     /// `start_or_steer_turn` or `steer_turn` reached a steering path with empty user input.
     EmptyInput,
 }
+
+/// Audex: trigger of a native initial review running in its originating conversation.
+/// Core rejects steering into such a turn, so follow-up input waits for the next turn.
+pub const AUDEX_REVIEW_TURN_TRIGGER: &str = "audex_review";
+
+/// Audex: first line of that review turn's assignment. Clients use it to present the
+/// turn as an audit rather than as an ordinary prompt and reply.
+pub const AUDEX_REVIEW_MARKER: &str = "Audex initial review assignment";

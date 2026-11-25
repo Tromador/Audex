@@ -301,7 +301,14 @@ pub fn normalize_pasted_path(pasted: &str) -> Option<PathBuf> {
     Some(PathBuf::from(path))
 }
 
-#[cfg(target_os = "linux")]
+/// Tests use the non-WSL baseline so rendered shortcuts do not depend on the
+/// host. WSL behaviour is tested through explicit flags instead.
+#[cfg(all(target_os = "linux", test))]
+pub(crate) fn is_probably_wsl() -> bool {
+    false
+}
+
+#[cfg(all(target_os = "linux", not(test)))]
 pub(crate) fn is_probably_wsl() -> bool {
     // Primary: Check /proc/version for "microsoft" or "WSL" (most reliable for standard WSL).
     if let Ok(version) = std::fs::read_to_string("/proc/version") {

@@ -142,7 +142,10 @@ text(await tools.exec_command({cmd: "printf forbidden > named.rs", yield_time_ms
     } else {
         ["exec", "wait"]
     } {
-        assert!(names.contains(&expected.to_owned()), "missing {expected}: {names:?}");
+        assert!(
+            names.contains(&expected.to_owned()),
+            "missing {expected}: {names:?}"
+        );
     }
     if inspect_source {
         assert_eq!(

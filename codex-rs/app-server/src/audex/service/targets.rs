@@ -84,7 +84,10 @@ pub fn resolve_mixed(paths: &[PathBuf], remote_directories: &[Option<bool>]) -> 
             };
             (path, directory)
         } else {
-            ensure!(remote_directory.is_none(), "unexpected Zen Storage metadata for local path");
+            ensure!(
+                remote_directory.is_none(),
+                "unexpected Zen Storage metadata for local path"
+            );
             let path = std::fs::canonicalize(supplied)?;
             let directory = if std::fs::metadata(&path)?.is_dir() {
                 path.clone()
@@ -137,7 +140,10 @@ mod tests {
         assert!(is_zen_storage_path(Path::new("g:/My Drive/source")));
         assert!(!is_zen_storage_path(Path::new("O:\\src")));
         assert!(!is_zen_storage_path(Path::new("/home/stef/source")));
-        let paths = vec![PathBuf::from("O:/source.rs"), PathBuf::from("G:/My Drive/project")];
+        let paths = vec![
+            PathBuf::from("O:/source.rs"),
+            PathBuf::from("G:/My Drive/project"),
+        ];
         let targets = resolve_mixed(&paths, &[Some(false), Some(true)])?;
         assert_eq!(targets.paths, paths);
         assert_eq!(

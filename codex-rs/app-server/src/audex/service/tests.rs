@@ -574,6 +574,7 @@ async fn startup_interrupts_only_unfinished_attempts_and_never_relaunches() -> R
             .map(|(i, _)| selection(&format!("reviewer-{i}")))
             .collect(),
         created_at: record::now(),
+        conversation: None,
     };
     record::write_json(&directory.join("run.json"), &run)?;
     let mut before = Vec::new();
@@ -751,10 +752,7 @@ fn citation_checks_all_statuses_and_named_file_context_without_listing() -> Resu
 #[test]
 fn remote_citations_are_scope_checked_without_local_reads() -> Result<()> {
     use result::CitationStatus::*;
-    let targets = targets::resolve_mixed(
-        &[PathBuf::from("O:/source/repo/a.rs")],
-        &[Some(false)],
-    )?;
+    let targets = targets::resolve_mixed(&[PathBuf::from("O:/source/repo/a.rs")], &[Some(false)])?;
     assert_eq!(
         result::check_citation(&finding("a.rs", 1, 7), &targets),
         RemoteUnverified

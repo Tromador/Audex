@@ -204,10 +204,21 @@ fn expected_args(
     args
 }
 fn args_without_mcp(args: &Value) -> Result<Value> {
-    let mut args = args.as_array().context("Claude arguments are not an array")?.clone();
+    let mut args = args
+        .as_array()
+        .context("Claude arguments are not an array")?
+        .clone();
     if let Some(index) = args.iter().position(|arg| arg == "--mcp-config") {
-        let path = args.get(index + 1).and_then(Value::as_str).context("MCP config path missing")?;
-        ensure!(Path::new(path).file_name().is_some_and(|name| name == "mcp.json"), "MCP configuration must be passed as a temporary file");
+        let path = args
+            .get(index + 1)
+            .and_then(Value::as_str)
+            .context("MCP config path missing")?;
+        ensure!(
+            Path::new(path)
+                .file_name()
+                .is_some_and(|name| name == "mcp.json"),
+            "MCP configuration must be passed as a temporary file"
+        );
         args.drain(index..index + 2);
         args.retain(|arg| !arg.as_str().is_some_and(|value| value.starts_with("mcp__")));
     }
@@ -257,7 +268,12 @@ fn reference_mcp_selection_allows_only_named_read_tools() -> Result<()> {
     let (config, allowed) = launch::select_mcp_servers(servers, false)?.unwrap();
     let parsed: Value = serde_json::from_str(&config)?;
     assert_eq!(
-        parsed["mcpServers"].as_object().unwrap().keys().cloned().collect::<Vec<_>>(),
+        parsed["mcpServers"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
         vec!["context7", "github"]
     );
     for name in [
@@ -283,16 +299,18 @@ fn reference_mcp_selection_allows_only_named_read_tools() -> Result<()> {
         assert!(!allowed.contains(&name.to_owned()), "unexpected {name}");
     }
 
-    let (remote_config, remote_allowed) =
-        launch::select_mcp_servers(servers, true)?.unwrap();
+    let (remote_config, remote_allowed) = launch::select_mcp_servers(servers, true)?.unwrap();
     let remote: Value = serde_json::from_str(&remote_config)?;
     assert!(remote["mcpServers"].get("zen-storage").is_some());
     assert!(remote_allowed.contains(&"mcp__zen-storage__read_text_file".to_owned()));
     assert!(!remote_allowed.contains(&"mcp__zen-storage__write_file".to_owned()));
-    assert!(launch::select_mcp_servers(
-        json!({"context7":{"command":"c7"}}).as_object().unwrap(),
-        true
-    ).is_err());
+    assert!(
+        launch::select_mcp_servers(
+            json!({"context7":{"command":"c7"}}).as_object().unwrap(),
+            true
+        )
+        .is_err()
+    );
     Ok(())
 }
 

@@ -1,8 +1,6 @@
 use codex_core::StartThreadOptions;
 use codex_core::config::Config;
-use codex_extension_api::{
-    ToolPolicy,
-};
+use codex_extension_api::ToolPolicy;
 use codex_features::Feature;
 use codex_models_manager::manager::ModelsManager;
 use codex_protocol::config_types::WebSearchMode;

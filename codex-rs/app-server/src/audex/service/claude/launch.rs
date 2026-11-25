@@ -156,7 +156,10 @@ pub(super) fn select_mcp_servers(
     if selected.is_empty() {
         return Ok(None);
     }
-    Ok(Some((json!({"mcpServers":selected}).to_string(), permissions)))
+    Ok(Some((
+        json!({"mcpServers":selected}).to_string(),
+        permissions,
+    )))
 }
 
 pub(super) fn prepare(
@@ -193,7 +196,16 @@ pub(super) fn prepare_conversation(
         effort: None,
         permission_summary: String::new(),
     };
-    prepare_inner(settings, &selection, &[], rules, assignment, None, true, false)
+    prepare_inner(
+        settings,
+        &selection,
+        &[],
+        rules,
+        assignment,
+        None,
+        true,
+        false,
+    )
 }
 
 fn prepare_inner(
@@ -243,7 +255,11 @@ fn prepare_inner(
             .first()
             .context("Claude needs a working directory")?
     };
-    let tools = if conversation { "" } else { "Read,Grep,Glob,WebSearch" };
+    let tools = if conversation {
+        ""
+    } else {
+        "Read,Grep,Glob,WebSearch"
+    };
     let mcp = if conversation {
         None
     } else {

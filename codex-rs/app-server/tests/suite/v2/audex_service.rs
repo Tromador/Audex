@@ -183,9 +183,11 @@ async fn file_backed_two_reviewer_rpc_and_claude_audit_followup() -> anyhow::Res
     assert_eq!(assignment["brief"], "Offline fixture");
     assert_eq!(assignment["guidance"], "GUIDANCE_ONCE_SENTINEL");
     let args = calls[1]["args"].as_array().unwrap();
-    assert!(args.contains(&json!("--restricted")));
+    // An audit follow-up reads retained results and source with reference tools;
+    // only a plain /claude conversation is restricted.
+    assert!(!args.contains(&json!("--restricted")));
     assert!(args.contains(&json!(root.join("audex/runs").join(&run_id))));
-    assert!(args.contains(&json!("Read,Grep,Glob")));
+    assert!(args.contains(&json!("Read,Grep,Glob,WebSearch")));
     assert!(!args.contains(&json!("--mcp-config")));
     assert!(
         !calls[1]["prompt"]

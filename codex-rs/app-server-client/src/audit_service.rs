@@ -100,6 +100,11 @@ pub fn start_disclosure(params: &AuditStartRequest) -> String {
     };
     let mut text = format!("Targets:\n{targets}\n\nReviewers:\n");
     for reviewer in &params.reviewers {
+        // A native selection without a model is the originating conversation itself.
+        if reviewer.route == "native" && reviewer.model.is_empty() {
+            text.push_str("native: this conversation — its current model and effort, with its prior context; it reviews after the current turn ends — source is sent to the configured native model provider (external unless configured locally)\n");
+            continue;
+        }
         let disclosure = if reviewer.route == "native" {
             "source is sent to the configured native model provider (external unless configured locally)"
         } else {
@@ -119,7 +124,7 @@ pub fn start_disclosure(params: &AuditStartRequest) -> String {
     if let Some(text_guidance) = &params.guidance_text {
         text.push_str(&format!("\nInline guidance:\n{text_guidance}\n"));
     }
-    text.push_str("\nRead-only audit. Completed results enter this conversation; two or more completed reviewers trigger one Codex comparison using the conversation's current model.");
+    text.push_str("\nRead-only audit. Other reviewers run separately. Completed results enter this conversation; two or more completed reviewers trigger one Codex comparison using the conversation's current model.");
     text
 }
 
@@ -166,6 +171,7 @@ mod tests {
                             paths: vec!["source".into()]
                         },
                         cwd: "/cwd".into(),
+                        origin_thread_id: None,
                         brief: "brief".into(),
                         reviewers: vec![],
                         guidance: None,

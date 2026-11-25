@@ -80,6 +80,7 @@ async fn fixture(temp: &tempfile::TempDir) -> Result<(Config, RunRecord, StaticM
         guidance: Some("Keep the full operator guidance".into()),
         reviewers: vec![selection()],
         created_at: record::now(),
+        conversation: None,
     };
     let models = StaticModelsManager::new(
         None,
@@ -170,7 +171,10 @@ async fn construction_preserves_targets_and_enforces_isolation() -> Result<()> {
         assert_eq!(config.plugins, host.plugins);
         assert_eq!(config.web_search_mode.value(), WebSearchMode::Live);
         assert!(!config.agents_enabled && !config.cloud_skill_enabled);
-        assert_eq!(config.orchestrator_mcp_enabled, host.orchestrator_mcp_enabled);
+        assert_eq!(
+            config.orchestrator_mcp_enabled,
+            host.orchestrator_mcp_enabled
+        );
         assert!(!config.include_skill_instructions && !config.include_apps_instructions);
         assert!(!config.experimental_request_user_input_enabled && !config.update_plan_enabled);
         assert!(!config.allow_persistent_dynamic_tool_updates);
@@ -201,7 +205,11 @@ async fn construction_preserves_targets_and_enforces_isolation() -> Result<()> {
         );
         assert_eq!(config.model_context_window, host.model_context_window);
         let extensions = &prepared.options.thread_extension_init;
-        assert!(extensions.get::<codex_extension_api::SessionIsolation>().is_none());
+        assert!(
+            extensions
+                .get::<codex_extension_api::SessionIsolation>()
+                .is_none()
+        );
         let policy = extensions.get::<ToolPolicy>().unwrap();
         assert!(policy.allowed_tools.is_some());
         assert!(policy.require_managed_sandbox && policy.require_unified_exec);
@@ -228,10 +236,7 @@ async fn construction_preserves_targets_and_enforces_isolation() -> Result<()> {
             "mcp__codex_apps__zen_storage",
             "_write_file"
         )));
-        assert!(!policy.allows(&ToolName::namespaced(
-            "mcp__codex_apps__gmail",
-            "_fetch"
-        )));
+        assert!(!policy.allows(&ToolName::namespaced("mcp__codex_apps__gmail", "_fetch")));
         assert!(!policy.allows(&ToolName::namespaced(
             "mcp__codex_apps__zen_storage",
             "_read_text_file"
@@ -616,10 +621,8 @@ fn cancellation_stops_native_execution_and_retains_partial_output() -> Result<()
 async fn remote_audits_use_private_local_cwd_and_read_only_zen_tools() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (host, mut run, models) = fixture(&temp).await?;
-    run.targets = super::super::targets::resolve_mixed(
-        &[PathBuf::from("O:/source/project")],
-        &[Some(true)],
-    )?;
+    run.targets =
+        super::super::targets::resolve_mixed(&[PathBuf::from("O:/source/project")], &[Some(true)])?;
     let private = temp.path().join("private");
     fs::create_dir(&private)?;
     let prepared = prepare(&host, &models, &run, &selection(), &private).await?;
@@ -628,7 +631,11 @@ async fn remote_audits_use_private_local_cwd_and_read_only_zen_tools() -> Result
         prepared.options.config.workspace_roots[0].as_path(),
         private.as_path()
     );
-    let policy = prepared.options.thread_extension_init.get::<ToolPolicy>().unwrap();
+    let policy = prepared
+        .options
+        .thread_extension_init
+        .get::<ToolPolicy>()
+        .unwrap();
     assert!(policy.allowed_tools.is_some());
     assert!(policy.allows(&ToolName::namespaced(
         "mcp__codex_apps__zen_storage",
@@ -674,6 +681,10 @@ async fn helper_runtime_read_resolves_only_the_executable_file() -> Result<()> {
     );
     assert!(prepared.permission_summary.contains("exact file"));
     host.codex_linux_sandbox_exe = Some(runtime);
-    assert!(prepare(&host, &models, &run, &selection(), temp.path()).await.is_err());
+    assert!(
+        prepare(&host, &models, &run, &selection(), temp.path())
+            .await
+            .is_err()
+    );
     Ok(())
 }

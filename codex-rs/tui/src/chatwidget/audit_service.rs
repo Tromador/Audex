@@ -14,6 +14,33 @@ impl ChatWidget {
             ),
         );
     }
+    /// Presents an Audex review turn by its audit status instead of its raw assignment
+    /// and structured JSON, live and on replay. The turn stays in conversation history.
+    /// Returns true when the item belongs to such a turn and must not be rendered.
+    pub(super) fn audit_review_item(&mut self, turn_id: &str, item: &ThreadItemPayload) -> bool {
+        match item {
+            ThreadItemPayload::UserMessage { content, .. } if is_review_assignment(content) => {
+                if self
+                    .transcript
+                    .audit_review_turns
+                    .insert(turn_id.to_owned())
+                {
+                    self.add_info_message(
+                        "Audex native review — this conversation is performing its independent initial review. Use /audit for progress and the original report.".into(),
+                        None,
+                    );
+                }
+                true
+            }
+            ThreadItemPayload::AgentMessage { .. } => {
+                self.transcript.audit_review_turns.contains(turn_id)
+            }
+            _ => false,
+        }
+    }
+    pub(super) fn is_audit_review_turn(&self, turn_id: &str) -> bool {
+        self.transcript.audit_review_turns.contains(turn_id)
+    }
     pub(crate) fn discard_deleted_audit_comparison(&mut self, client_id: &str) {
         self.take_submitted_message(client_id);
         self.refresh_pending_input_preview();
@@ -211,10 +238,23 @@ impl ChatWidget {
         let decision = Arc::new(Mutex::new(Some(decision)));
         let accept = Arc::clone(&decision);
         let decline = Arc::clone(&decision);
-        let disclosure = codex_app_server_client::audit::start_disclosure(&params);
+        let mut disclosure = codex_app_server_client::audit::start_disclosure(&params);
+        let conversation = params.reviewers.iter().any(crate::audit::is_conversation);
+        if conversation {
+            disclosure.push_str(&format!(
+                "\nThis conversation currently uses {} (effort: {}).",
+                self.current_model(),
+                self.current_reasoning_effort()
+                    .map_or_else(|| "default".to_owned(), |effort| effort.to_string()),
+            ));
+        }
         self.add_info_message(disclosure.clone(),Some("Review the complete disclosure in conversation history before authorising submission.".to_owned()));
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: Some("Submit this isolated audit?".to_owned()),
+            title: Some(if conversation {
+                "Submit this audit?".to_owned()
+            } else {
+                "Submit this isolated audit?".to_owned()
+            }),
             subtitle: Some(disclosure),
             items: vec![
                 SelectionItem {
@@ -235,6 +275,15 @@ impl ChatWidget {
         });
         self.request_redraw();
     }
+}
+
+fn is_review_assignment(content: &[codex_app_server_protocol::UserInput]) -> bool {
+    content.iter().any(|input| match input {
+        codex_app_server_protocol::UserInput::Text { text, .. } => {
+            text.starts_with(codex_protocol::turn_input::AUDEX_REVIEW_MARKER)
+        }
+        _ => false,
+    })
 }
 
 fn decide(decision: &Arc<Mutex<Option<oneshot::Sender<bool>>>>, value: bool) {
@@ -576,6 +625,7 @@ mod tests {
                 paths: vec!["selected directory".into()],
             },
             cwd: "/source".into(),
+            origin_thread_id: None,
             brief: "brief".into(),
             reviewers: vec![codex_app_server_protocol::AuditReviewer {
                 route: "native".into(),
