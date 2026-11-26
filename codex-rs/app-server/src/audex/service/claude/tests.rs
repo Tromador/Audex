@@ -1,5 +1,6 @@
 use super::*;
 use crate::audex::backends::{ClaudeApi, ClaudeSubscription, CredentialReference};
+use crate::audex::rpc::{AuditDiscussion, SessionTurn, audit_discussion};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::time::Duration;
 
@@ -69,6 +70,13 @@ impl Fixture {
     fn root(&self) -> &Path {
         self.temp.path()
     }
+    /// The Audex state directory of the service's Codex home.
+    fn audex(&self) -> PathBuf {
+        self.root().join("codex-home/audex")
+    }
+    fn reviewer(&self) -> ClaudeReviewer {
+        ClaudeReviewer::new(self.settings.clone(), &self.audex())
+    }
     fn script(&self, stdout: &[u8], stderr: &[u8], mode: &str, exit: i32) -> Result<()> {
         fs::write(self.root().join("stdout.bin"), stdout)?;
         fs::write(self.root().join("stderr.bin"), stderr)?;
@@ -81,7 +89,7 @@ impl Fixture {
         let events = self.events.clone();
         AuditService::open(
             &self.root().join("codex-home"),
-            Arc::new(ClaudeReviewer::new(self.settings.clone())),
+            Arc::new(self.reviewer()),
             Arc::new(move |event| events.lock().unwrap().push(event)),
         )
     }
@@ -149,13 +157,19 @@ async fn wait_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `session` is `None` for a disposable invocation, or the session flag and identity.
 fn expected_args(
     model: &str,
     rules: &str,
     directories: &[PathBuf],
     run: Option<&Path>,
     api: bool,
+    session: Option<(&str, &str)>,
 ) -> Vec<String> {
+    let persistence: Vec<&str> = match session {
+        None => vec!["--no-session-persistence"],
+        Some((flag, id)) => vec![flag, id, "--system-prompt-snapshot", "off"],
+    };
     let mut args: Vec<String> = [
         "-p",
         "--input-format",
@@ -174,14 +188,14 @@ fn expected_args(
         "--permission-mode",
         "dontAsk",
         "--disable-slash-commands",
-        "--no-session-persistence",
         "--settings",
         r#"{"disableAllHooks":true,"permissions":{"blockReadsOutsideWorkingDirectories":true}}"#,
         "--system-prompt",
         rules,
-        "--strict-mcp-config",
     ]
     .into_iter()
+    .chain(persistence)
+    .chain(["--strict-mcp-config"])
     .map(str::to_owned)
     .collect();
     if let Some(run) = run {
@@ -202,6 +216,30 @@ fn expected_args(
         args.push("--bare".into());
     }
     args
+}
+fn session_arg(call: &Value, flag: &str) -> Result<String> {
+    let args = call["args"]
+        .as_array()
+        .context("Claude arguments are not an array")?;
+    let index = args
+        .iter()
+        .position(|arg| arg == flag)
+        .with_context(|| format!("{flag} missing"))?;
+    Ok(args
+        .get(index + 1)
+        .and_then(Value::as_str)
+        .context("session identity missing")?
+        .to_owned())
+}
+/// A scripted run that confirms its session, as the official client does.
+fn confirmed(text: &str, structured: Option<Value>) -> Vec<u8> {
+    let mut stdout = event(
+        json!({"type":"system","subtype":"init","model":"requested-model","session_id":"@SESSION@"}),
+    );
+    let mut terminal: Value = serde_json::from_slice(&result(Some(text), structured)).unwrap();
+    terminal["session_id"] = json!("@SESSION@");
+    stdout.extend(event(terminal));
+    stdout
 }
 fn args_without_mcp(args: &Value) -> Result<Value> {
     let mut args = args
@@ -225,7 +263,8 @@ fn args_without_mcp(args: &Value) -> Result<Value> {
     Ok(Value::Array(args))
 }
 
-fn assert_environment(call: &Value, fixture: &Fixture, api_key: Option<&str>) {
+/// `persistent` marks a stored audit session, whose API-route profile is durable.
+fn assert_environment(call: &Value, fixture: &Fixture, api_key: Option<&str>, persistent: bool) {
     let mut expected = json!({"PATH":"/usr/bin:/bin", "LANG":"C.UTF-8", "TERM":"dumb",
         "CLAUDE_CODE_DISABLE_CLAUDE_MDS":"1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY":"1",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"1", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE":"1"});
@@ -238,10 +277,12 @@ fn assert_environment(call: &Value, fixture: &Fixture, api_key: Option<&str>) {
     if let Some(key) = api_key {
         expected["ANTHROPIC_API_KEY"] = json!(key);
         expected["CLAUDE_CONFIG_DIR"] = call["env"]["CLAUDE_CONFIG_DIR"].clone();
-        assert!(
-            Path::new(expected["CLAUDE_CONFIG_DIR"].as_str().unwrap())
-                .starts_with(fixture.root().join("runtime"))
-        );
+        let profile = Path::new(expected["CLAUDE_CONFIG_DIR"].as_str().unwrap());
+        if persistent {
+            assert_eq!(profile, fixture.audex().join("claude-api-profile"));
+        } else {
+            assert!(profile.starts_with(fixture.root().join("runtime")));
+        }
         assert_eq!(call["profile_entries"], json!([]));
     } else {
         expected["CLAUDE_CONFIG_DIR"] = json!(fixture.root().join("profile"));
@@ -377,6 +418,8 @@ async fn exact_launch_for_both_routes_and_all_target_shapes() -> Result<()> {
             let calls = fixture.calls()?;
             assert_eq!(calls.len(), 1);
             let call = &calls[0];
+            let session = session_arg(call, "--session-id")?;
+            uuid::Uuid::parse_str(&session)?;
             assert_eq!(
                 args_without_mcp(&call["args"])?,
                 json!(expected_args(
@@ -384,7 +427,8 @@ async fn exact_launch_for_both_routes_and_all_target_shapes() -> Result<()> {
                     crate::audex::reviewer::native::RULES,
                     &run.targets.working_directories,
                     None,
-                    route == "claude_api"
+                    route == "claude_api",
+                    Some(("--session-id", &session))
                 ))
             );
             assert_eq!(call["cwd"], json!(run.targets.working_directories[0]));
@@ -392,7 +436,10 @@ async fn exact_launch_for_both_routes_and_all_target_shapes() -> Result<()> {
                 call,
                 &fixture,
                 (route == "claude_api").then_some("fake-key"),
+                true,
             );
+            // This fixture never reports the session, so it is not offered for resumption.
+            assert_eq!(fixture.attempts(&service, id)?[0].1.claude_session, None);
             let lines: Vec<_> = call["prompt"].as_str().unwrap().lines().collect();
             assert_eq!(lines.len(), 1);
             let user: Value = serde_json::from_str(lines[0])?;
@@ -437,7 +484,12 @@ async fn api_environment_credential_reference_is_resolved_before_clearing() -> R
     let mut service = fixture.service()?;
     let id = service.start(fixture.request("claude_api", Input::Paths(fixture.sources.clone())))?;
     finished(&mut service, id).await?;
-    assert_environment(&fixture.calls()?[0], &fixture, Some("synthetic-s3-key"));
+    assert_environment(
+        &fixture.calls()?[0],
+        &fixture,
+        Some("synthetic-s3-key"),
+        true,
+    );
     Ok(())
 }
 
@@ -739,15 +791,22 @@ async fn task_abort_still_cleans_group_and_publishes_captured_bytes() -> Result<
         json!({"brief":"test"}),
         None,
         false,
+        launch::Session::Disposable,
     )?;
     let capture_dir = directory.clone();
     let observed = Arc::new(tokio::sync::Notify::new());
     let observer = observed.clone();
     let task = tokio::spawn(async move {
-        stream::run(launch, &capture_dir, &CancellationToken::new(), |_| {
-            observer.notify_one();
-            Ok(())
-        })
+        stream::run(
+            launch,
+            &capture_dir,
+            &CancellationToken::new(),
+            None,
+            |_| {
+                observer.notify_one();
+                Ok(())
+            },
+        )
         .await
     });
     wait_file(&fixture.root().join("ready")).await?;
@@ -812,7 +871,7 @@ async fn audit_conversation_launcher_exposes_results_and_live_source_without_leg
             "finish",
             0,
         )?;
-        let reviewer = ClaudeReviewer::new(fixture.settings.clone());
+        let reviewer = fixture.reviewer();
         let outcome = reviewer
             .converse(
                 &selection(route),
@@ -835,13 +894,15 @@ async fn audit_conversation_launcher_exposes_results_and_live_source_without_leg
                 CONVERSATION_RULES,
                 &fixture.sources,
                 Some(&run_dir),
-                route == "claude_api"
+                route == "claude_api",
+                None
             ))
         );
         assert_environment(
             call,
             &fixture,
             (route == "claude_api").then_some("fake-key"),
+            false,
         );
         let user: Value = serde_json::from_str(call["prompt"].as_str().unwrap())?;
         let content: Value = serde_json::from_str(user["message"]["content"].as_str().unwrap())?;
@@ -1073,5 +1134,377 @@ async fn malformed_envelope_keeps_real_contribution_unless_error_is_explicit() -
         assert_eq!(collected["summary"], "retained findings");
         fixture.cleaned()?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_session_is_recorded_then_resumed_with_discussion_rules() -> Result<()> {
+    for route in ["claude_subscription", "claude_api"] {
+        let fixture = Fixture::new()?;
+        let structured = json!({"summary":"session summary","findings":[]});
+        fixture.script(
+            &confirmed("Audit report\n", Some(structured)),
+            b"",
+            "finish",
+            0,
+        )?;
+        let mut request = fixture.request(route, Input::Paths(fixture.sources.clone()));
+        request.reviewers[0].effort = Some("high".into());
+        let mut service = fixture.service()?;
+        let id = service.start(request)?;
+        finished(&mut service, id).await?;
+        let run_dir = service.run_directory(id);
+        let (attempt, status) = fixture.attempts(&service, id)?.remove(0);
+        assert_eq!(status.state, State::Succeeded);
+        let session = status.claude_session.clone().context("session recorded")?;
+        assert_eq!(
+            session.id,
+            session_arg(&fixture.calls()?[0], "--session-id")?
+        );
+        assert_eq!(session.cwd, fixture.sources[0]);
+        let records = ["status.json", "output.txt", "transcript.jsonl"];
+        let original = records
+            .iter()
+            .map(|name| fs::read(attempt.join(name)))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        // A restarted service still finds the recorded session and reviewer.
+        drop(service);
+        let service = fixture.service()?;
+        let AuditDiscussion::Session {
+            selection: chosen,
+            session: resumed,
+            attempt: chosen_attempt,
+            ..
+        } = audit_discussion(&fixture.audex(), &run_dir, None)?
+        else {
+            anyhow::bail!("{route}: expected a resumable session");
+        };
+        assert_eq!(chosen.route, route);
+        assert_eq!(chosen.model, "requested-model");
+        assert_eq!(chosen.effort.as_deref(), Some("high"));
+        assert_eq!(resumed, session);
+        assert_eq!(chosen_attempt, attempt);
+        let evidence = fixture.root().join("follow-up");
+        fs::create_dir(&evidence)?;
+        fixture.script(&confirmed("Resumed reply\n", None), b"", "finish", 0)?;
+        let reviewer = fixture.reviewer();
+        for first in [true, false] {
+            let assignment = json!({"discussion":[{"speaker":"codex","text":"Codex view"}],
+                "operator_message":"Do you agree?"});
+            let outcome = reviewer
+                .resume(
+                    &chosen,
+                    &run_dir,
+                    &session,
+                    &evidence,
+                    assignment,
+                    first,
+                    &CancellationToken::new(),
+                )
+                .await?;
+            assert!(matches!(outcome.completion, Completion::Succeeded));
+            assert_eq!(outcome.output.unwrap(), b"Resumed reply\n");
+            let calls = fixture.calls()?;
+            let call = calls.last().unwrap();
+            let mut expected = expected_args(
+                "requested-model",
+                CONTINUITY_RULES,
+                &fixture.sources,
+                Some(&run_dir),
+                route == "claude_api",
+                Some(("--resume", &session.id)),
+            );
+            let at = expected
+                .iter()
+                .position(|arg| arg == "--setting-sources")
+                .unwrap();
+            expected.insert(at, "high".into());
+            expected.insert(at, "--effort".into());
+            // No audit schema: the follow-up answers in ordinary text.
+            assert_eq!(args_without_mcp(&call["args"])?, json!(expected));
+            assert_eq!(call["cwd"], json!(session.cwd));
+            assert_eq!(
+                call["env"]["CLAUDE_CONFIG_DIR"],
+                calls[0]["env"]["CLAUDE_CONFIG_DIR"]
+            );
+            assert_environment(
+                call,
+                &fixture,
+                (route == "claude_api").then_some("fake-key"),
+                true,
+            );
+            let user: Value = serde_json::from_str(call["prompt"].as_str().unwrap())?;
+            let content: Value =
+                serde_json::from_str(user["message"]["content"].as_str().unwrap())?;
+            assert_eq!(content["operator_message"], "Do you agree?");
+            assert_eq!(content["discussion"][0]["text"], "Codex view");
+            assert_eq!(content.get("retained_summary").is_some(), first);
+            assert_eq!(content.get("result_files").is_some(), first);
+        }
+        assert_eq!(fixture.calls()?.len(), 3);
+        // Follow-ups keep their evidence apart from the original attempt.
+        let after = records
+            .iter()
+            .map(|name| fs::read(attempt.join(name)))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        assert_eq!(after, original);
+        assert!(evidence.join("transcript.jsonl").exists());
+        assert_eq!(fixture.attempts(&service, id)?.len(), 1);
+        fixture.cleaned()?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_attempt_starts_and_keeps_its_own_session() -> Result<()> {
+    let fixture = Fixture::new()?;
+    // A confirmed session that ends without output earns one automatic replacement.
+    let mut stdout = event(
+        json!({"type":"system","subtype":"init","model":"requested-model","session_id":"@SESSION@"}),
+    );
+    stdout.extend(event(
+        json!({"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"@SESSION@"}),
+    ));
+    fixture.script(&stdout, b"", "finish", 0)?;
+    let mut service = fixture.service()?;
+    let id = service
+        .start(fixture.request("claude_subscription", Input::Paths(fixture.sources.clone())))?;
+    finished(&mut service, id).await?;
+    fixture.script(&confirmed("Retried report\n", None), b"", "finish", 0)?;
+    service.retry(id, 0).await?;
+    finished(&mut service, id).await?;
+    let attempts = fixture.attempts(&service, id)?;
+    let triggers: Vec<_> = attempts.iter().map(|(_, status)| status.trigger).collect();
+    assert_eq!(
+        triggers,
+        [
+            Trigger::Initial,
+            Trigger::AutomaticReplacement,
+            Trigger::OperatorRetry,
+        ]
+    );
+    let calls = fixture.calls()?;
+    assert_eq!(calls.len(), 3);
+    let mut sessions = Vec::new();
+    for ((_, status), call) in attempts.iter().zip(&calls) {
+        let session = status
+            .claude_session
+            .as_ref()
+            .context("each attempt records its own session")?;
+        assert_eq!(session.id, session_arg(call, "--session-id")?);
+        sessions.push(session.id.clone());
+    }
+    sessions.sort();
+    sessions.dedup();
+    assert_eq!(sessions.len(), 3);
+    // Discussion continues the latest successful review: the operator retry.
+    let AuditDiscussion::Session { session, .. } =
+        audit_discussion(&fixture.audex(), &service.run_directory(id), None)?
+    else {
+        anyhow::bail!("expected a resumable session");
+    };
+    assert_eq!(Some(&session), attempts[2].1.claude_session.as_ref());
+    fixture.cleaned()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_different_or_unconfirmed_session_is_never_accepted() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let mut stdout =
+        event(json!({"type":"system","subtype":"init","session_id":"another-session"}));
+    stdout.extend(result(Some("must not count"), None));
+    fixture.script(&stdout, b"", "finish", 0)?;
+    let mut service = fixture.service()?;
+    let id = service
+        .start(fixture.request("claude_subscription", Input::Paths(fixture.sources.clone())))?;
+    finished(&mut service, id).await?;
+    for (_, status) in fixture.attempts(&service, id)? {
+        assert_eq!(status.state, State::Failed);
+        assert!(
+            status
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("not the requested session")
+        );
+        assert_eq!(status.claude_session, None);
+    }
+    let run_dir = service.run_directory(id);
+    let session = ClaudeSession {
+        id: uuid::Uuid::new_v4().to_string(),
+        cwd: fixture.sources[0].clone(),
+    };
+    let reviewer = fixture.reviewer();
+    let evidence = fixture.root().join("follow-up");
+    fs::create_dir(&evidence)?;
+    let before = fixture.calls()?.len();
+    for case in ["unconfirmed", "missing"] {
+        let (stdout, exit) = match case {
+            "unconfirmed" => (result(Some("unverified reply"), None), 0),
+            _ => (
+                event(
+                    json!({"type":"result","subtype":"error_during_execution","is_error":true,"result":"No conversation found with session ID"}),
+                ),
+                1,
+            ),
+        };
+        fixture.script(&stdout, b"", "finish", exit)?;
+        let outcome = reviewer
+            .resume(
+                &selection("claude_subscription"),
+                &run_dir,
+                &session,
+                &evidence,
+                json!({"operator_message":"continue"}),
+                false,
+                &CancellationToken::new(),
+            )
+            .await?;
+        let Completion::Failed(reason) = outcome.completion else {
+            anyhow::bail!("{case}: resumption must fail");
+        };
+        let expected = if case == "unconfirmed" {
+            "did not confirm"
+        } else {
+            "No conversation found"
+        };
+        assert!(reason.contains(expected), "{case}: {reason}");
+    }
+    let calls = fixture.calls()?;
+    assert_eq!(calls.len(), before + 2, "no replay or replacement session");
+    for call in &calls[before..] {
+        assert_eq!(session_arg(call, "--resume")?, session.id);
+        assert!(
+            !call["args"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("--session-id"))
+        );
+    }
+    // A review directory that no longer exists is reported before any launch.
+    let moved = ClaudeSession {
+        id: session.id.clone(),
+        cwd: fixture.root().join("moved"),
+    };
+    let error = reviewer
+        .resume(
+            &selection("claude_subscription"),
+            &run_dir,
+            &moved,
+            &evidence,
+            json!({"operator_message":"continue"}),
+            false,
+            &CancellationToken::new(),
+        )
+        .await
+        .err()
+        .context("a missing working directory must fail")?;
+    assert!(error.to_string().contains("cannot be resumed"));
+    assert_eq!(fixture.calls()?.len(), before + 2);
+    fixture.cleaned()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_discussion_inherits_the_reviewer_or_reports_instead_of_guessing() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let mut service = fixture.service()?;
+    // An older review without a recorded session discusses reports as its reviewer.
+    let mut request = fixture.request("claude_api", Input::Paths(fixture.sources.clone()));
+    request.reviewers[0].effort = Some("max".into());
+    let old = service.start(request)?;
+    finished(&mut service, old).await?;
+    let discussion = audit_discussion(&fixture.audex(), &service.run_directory(old), None)?;
+    let AuditDiscussion::Reports { selection, reason } = &discussion else {
+        anyhow::bail!("an unrecorded session cannot be resumed");
+    };
+    assert_eq!(selection.route, "claude_api");
+    assert_eq!(selection.model, "requested-model");
+    assert_eq!(selection.effort.as_deref(), Some("max"));
+    assert!(reason.contains("no resumable session"), "{reason}");
+    assert!(
+        discussion
+            .attribution()
+            .contains("from retained audit reports")
+    );
+    // An explicit model overrides only the model of a resumable reviewer.
+    fixture.script(&confirmed("report\n", None), b"", "finish", 0)?;
+    let mut request = fixture.request("claude_api", Input::Paths(fixture.sources.clone()));
+    request.reviewers[0].effort = Some("max".into());
+    let current = service.start(request)?;
+    finished(&mut service, current).await?;
+    let discussion = audit_discussion(
+        &fixture.audex(),
+        &service.run_directory(current),
+        Some("claude-sonnet-5-5".into()),
+    )?;
+    let AuditDiscussion::Session { selection, .. } = &discussion else {
+        anyhow::bail!("expected a resumable session");
+    };
+    assert_eq!(selection.route, "claude_api");
+    assert_eq!(selection.model, "claude-sonnet-5-5");
+    assert_eq!(selection.effort.as_deref(), Some("max"));
+    assert_eq!(
+        discussion.attribution(),
+        "Claude (claude-sonnet-5-5) — claude, continuing its audit session"
+    );
+    // With two Claude reviewers, neither session is chosen.
+    let mut request = fixture.request("claude_subscription", Input::Paths(fixture.sources.clone()));
+    let mut second = request.reviewers[0].clone();
+    second.label = "claude-2".into();
+    second.route = "claude_api".into();
+    request.reviewers.push(second);
+    let both = service.start(request)?;
+    finished(&mut service, both).await?;
+    let AuditDiscussion::Reports { selection, reason } =
+        audit_discussion(&fixture.audex(), &service.run_directory(both), None)?
+    else {
+        anyhow::bail!("two Claude reviewers must not select a session");
+    };
+    assert!(reason.contains("2 Claude reviewers"), "{reason}");
+    assert_eq!(selection.route, "claude_subscription");
+    assert_eq!(selection.model, conversation::DEFAULT_MODEL);
+    // A run without a Claude reviewer keeps the ordinary report-based default.
+    let mut native: RunRecord = record::read_json(&service.run_directory(both).join("run.json"))?;
+    native.reviewers = vec![ReviewerSelection {
+        label: "native".into(),
+        route: "native".into(),
+        model: "native-model".into(),
+        effort: None,
+        permission_summary: String::new(),
+    }];
+    let native_dir = fixture.root().join("native-run");
+    fs::create_dir(&native_dir)?;
+    record::write_json(&native_dir.join("run.json"), &native)?;
+    let AuditDiscussion::Reports { selection, reason } =
+        audit_discussion(&fixture.audex(), &native_dir, None)?
+    else {
+        anyhow::bail!("a native-only audit has no Claude session");
+    };
+    assert!(reason.contains("no Claude reviewer"), "{reason}");
+    assert_eq!(selection.model, conversation::DEFAULT_MODEL);
+    fixture.cleaned()?;
+    Ok(())
+}
+
+#[test]
+fn delivery_positions_survive_reopening_and_one_turn_holds_a_session() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let attempt = fixture.root().join("attempt");
+    fs::create_dir(&attempt)?;
+    let mut turn = SessionTurn::acquire(&attempt)?;
+    assert!(turn.first());
+    assert_eq!(turn.position("thread-a"), None);
+    let busy = SessionTurn::acquire(&attempt)
+        .err()
+        .context("a held session must be busy")?;
+    assert!(busy.to_string().contains("already answering"));
+    turn.delivered("thread-a".into(), "turn-2".into())?;
+    drop(turn);
+    let reopened = SessionTurn::acquire(&attempt)?;
+    assert!(!reopened.first());
+    assert_eq!(reopened.position("thread-a"), Some("turn-2"));
+    assert_eq!(reopened.position("thread-b"), None);
     Ok(())
 }

@@ -1,6 +1,8 @@
 # Audex operator handbook
 
-This handbook covers the current Audex 1.0.0 source-audit workflow and the local Linux/WSL deployment. Audex is a fork of [OpenAI Codex](https://github.com/openai/codex), not a distribution installed by upstream Codex's installers.
+This handbook covers the Audex source-audit workflow and local Linux/WSL deployment. Audex is a fork of [OpenAI Codex](https://github.com/openai/codex), not a distribution installed by upstream Codex's installers.
+
+**Release status:** 1.0.0 is the accepted baseline. The 1.1.0 native conversational-continuity implementation has passed automated regression testing; interactive acceptance and Claude conversational continuity remain outstanding. The 1.1.0 behaviour described below applies to the development candidate, not to an installed 1.0.0 application.
 
 Audex starts independent code reviewers, keeps their original results, and lets the operator compare or discuss their findings. The coordinator does not perform its own source inventory or snapshot the target. For an introduction, see the [repository README](../README.md).
 
@@ -19,7 +21,7 @@ Enter the following **inside the TUI**, not in a shell:
 /audit /absolute/path/to/source
 ~~~
 
-The installed `default` preset determines which reviewers run. An example two-reviewer configuration is:
+The installed `default` preset determines which reviewers run. An example 1.0.0 two-reviewer configuration is:
 
 | Reviewer | Route | Model | Effort |
 | --- | --- | --- | --- |
@@ -30,12 +32,26 @@ These are configured choices, not hard-coded model requirements. The installatio
 
 A normal audit can be as small as one source file. For a directory, Audex passes the directory path to each reviewer without listing its files, applying filters, hashing it or constructing a snapshot. Each reviewer decides what to inspect. Explicit file targets also allow reviewers to read their containing directories for context. Sources remain **live**; findings relate to what the reviewers observed during that run, not to a preserved source revision.
 
+## Native conversational continuity (1.1.0 development candidate)
+
+Bare `native` runs the OpenAI review as an ordinary turn in the originating Codex conversation. It inherits the conversation's effective model and reasoning effort, including its earlier context. The actual review investigation, tool results and final response remain in Core history for subsequent discussion and resume; the TUI substitutes an information line for the assignment and raw findings JSON rather than displaying them as ordinary conversational messages.
+
+An explicitly named `native:MODEL[:EFFORT]` reviewer still runs in a separate, isolated thread. Claude reviewers continue to execute independently of the OpenAI conversation. Each audit may contain at most one bare native reviewer.
+
+For a model-initiated audit, the native review queues until its originating conversation is idle. Operator input during an active native review queues for the following turn rather than steering the review. Cancellation stops the review turn without shutting down its conversation. An interrupted review is not automatically resumed on daemon restart. An eligible automatic replacement uses the originating conversation; an operator-requested retry uses an isolated reviewer with the recorded model and effort.
+
+The originating native route uses the ordinary conversation's permissions and tool configuration. Configure the Audex runtime in `~/.audex` independently of vanilla Codex; for read-only review use the read-only permission profile and no approval escalation. In the operator's configuration, project instruction loading is disabled and hosted apps default to denied except explicitly authorised read-only reference tools. Explicit isolated reviewers retain their existing restrictions. Audited project instructions are evidence, not audit authority; supply deliberate review instructions through the brief or guidance.
+
+These are implemented behaviours awaiting interactive acceptance. Native review continuity does not yet imply Claude session continuity.
+
+For acceptance, demonstrate that the native reviewer uses information supplied before the audit and can discuss its actual investigation afterwards without reconstructing it from the retained audit report. Also exercise model and effort inheritance, explicit isolated selection, transcript presentation, queued input, cancellation, conversation resume and interrupted-review recovery.
+
 ## Audit command reference
 
 ~~~text
 /audit PATH [PATH ...]
        [--with PRESET]
-       [--reviewer ROUTE:MODEL[:EFFORT]] ...
+       [--reviewer native | ROUTE:MODEL[:EFFORT]] ...
        [--brief "TEXT"]
        [--guidance FILE | --guidance-text "TEXT"]
 
@@ -47,6 +63,7 @@ A normal audit can be as small as one source file. For a directory, Audex passes
 | `PATH` | Existing file or directory. Quote paths containing spaces. Relative paths use the TUI thread's working directory. |
 | `--with PRESET` | Use the named preset from reviewer-backends.json. |
 | `--reviewer ROUTE:MODEL[:EFFORT]` | Choose an explicit reviewer; repeat for independent reviewers. |
+| `--reviewer native` | 1.1.0 candidate only: review in the originating Codex conversation, at most once per audit. |
 | `--brief TEXT` | Replace the default objective, “Find concrete defects supported by evidence in the selected source.” |
 | `--guidance FILE` | Read operator guidance from a local UTF-8 file. |
 | `--guidance-text TEXT` | Supply guidance inline instead of from a file. |
@@ -61,6 +78,9 @@ Examples:
 /audit /path/to/project/src --brief "Find concrete ownership and I/O defects."
 
 /audit /path/to/source.cpp --reviewer native:gpt-6.2-astra:high --reviewer claude_subscription:claude-opus-5-5:high
+
+# 1.1.0 candidate: originating conversation plus independent Claude reviewer
+/audit /path/to/source.cpp --reviewer native --reviewer claude_subscription:claude-opus-5-5:high
 
 /audit /path/to/file.cpp --guidance-text "Compare against upstream through read-only GitHub MCP. Report source differences, not presumed bugs."
 
@@ -136,7 +156,7 @@ For audit runs, Audex launches the official Claude CLI with a dedicated profile,
 
 Audex selects configured Context7, GitHub and (when needed) Zen Storage servers from the operator's `~/.claude.json`. Only a deliberately maintained list of read-only MCP tool names is permitted. The actual Claude GitHub tool interface includes `mcp__github__get_file_contents`, `mcp__github__list_commits` and `mcp__github__search_code`. A tool that exists but is missing from the allowlist will be denied by `dontAsk`.
 
-The conversational `/claude` route is more restricted than an independent audit. It is not a way to launch another audit or perform unrestricted external research.
+Plain `/claude` conversation uses `--restricted`. Audit follow-up (`/claude --audit`) may use read-only source and reference tools, including WebSearch; it is discussion of retained evidence, not another independent audit.
 
 ## Reviewer configuration and authentication
 
@@ -159,6 +179,17 @@ The following is an **example** `~/.audex/audex/reviewer-backends.json`. Adjust 
   }
 }
 ~~~
+
+For the 1.1.0 candidate, change the default preset when deploying the matching client and daemon:
+
+~~~json
+"default": [
+  "native",
+  "claude_subscription:claude-opus-5-5:high"
+]
+~~~
+
+Leave the other settings unchanged. Do not apply the bare native preset to an installed 1.0.0 client or server, which does not support it.
 
 The native reviewer uses Codex's established authentication. Claude subscription uses the official Claude CLI and a **separate private profile**; do not reuse personal `~/.claude` or put tokens in the JSON configuration.
 
@@ -189,7 +220,7 @@ cd /path/to/Audex/codex-rs
 cargo build --release -p codex-cli --bin audex
 ~~~
 
-A normal installation also needs companion binaries and resources, including the code-mode host, execution server, sandbox helper and ripgrep. Use `scripts/build_codex_package.py` to assemble a complete Audex package for first installation or when those components change. Check its options and the repository's [build prerequisites](audex-build-install.md) before assembling from scratch; the prerequisites include matching local V8 inputs.
+A normal installation also needs companion binaries and resources, including the code-mode host, execution server, sandbox helper and ripgrep. Use `scripts/build_codex_package.py` to assemble a complete Audex package for first installation or when those components change. Follow the [current development and release build procedure](audex-build-install.md#current-development-and-release-build-procedure-linux-x86-64--wsl) for verified V8 inputs, scoped builds, regression testing and complete package assembly.
 
 The established managed layout is:
 

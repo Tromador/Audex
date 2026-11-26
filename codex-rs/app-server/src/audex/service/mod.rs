@@ -9,6 +9,7 @@ mod summary;
 pub(super) mod targets;
 
 pub use record::AttemptStatus;
+pub use record::ClaudeSession;
 pub use record::ConversationReviewer;
 pub use record::ReviewerSelection;
 pub use record::RunId;
@@ -126,6 +127,11 @@ impl Attempt {
 
     pub fn permission_summary(&mut self, summary: String) -> Result<()> {
         self.status.reviewer.permission_summary = summary;
+        self.publish()
+    }
+
+    pub fn claude_session(&mut self, session: ClaudeSession) -> Result<()> {
+        self.status.claude_session = Some(session);
         self.publish()
     }
 

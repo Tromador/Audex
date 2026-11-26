@@ -1,12 +1,150 @@
 # Build, install and update Audex on WSL
 
-> **Current installation layout (November 2026):** Audex uses `~/.audex/packages/standalone/current` with `~/.local/bin/audex` pointing to its `bin/audex`; the managed daemon uses `~/.audex/packages/app-server-daemon/current`. The installation and update procedures further down this document describe an older layout and must not be used for the current deployment. Follow [the production operator handbook](audex-production-operator-handbook.md#6-building-and-installing-the-complete-production-package) instead.
+> **Current installation layout (November 2026):** Audex uses `~/.audex/packages/standalone/current` with `~/.local/bin/audex` pointing to its `bin/audex`; the managed daemon uses `~/.audex/packages/app-server-daemon/current`. The installation and update procedures further down this document describe an older layout and must not be used for the current deployment. Follow [the production operator handbook](audex-production-operator-handbook.md#build-and-update-on-linuxwsl) instead.
 
 Audex builds a real `audex` executable. The compatibility `codex` executable uses the same CLI implementation. Internal helpers and the managed daemon retain their existing Codex filenames.
 
 Use a complete package for normal operation. Copying the application executable alone omits the code-mode host, execution server, sandbox and search resources.
 
-## Build prerequisites
+## Current development and release build procedure (Linux x86-64 / WSL)
+
+This procedure was established during the 1.1.0 native-continuity work. It applies to source development and candidate packages, independently of the installed Audex version. The historical build and installation examples below are retained for reference, not as the current release recipe.
+
+### Toolchain and verified V8 inputs
+
+Use the repository's pinned Rust toolchain and native build tools. Install the separate-process test runner if it is not already available:
+
+```bash
+cargo install --locked cargo-nextest
+```
+
+Scope Cargo operations to the packages under development. An unscoped workspace build/check can pull in unrelated ALSA, GLib/GStreamer and V8 dependencies. The CLI-only build does not require the code-mode host, but a complete package and the native tool-availability tests do.
+
+The code-mode host requires the Codex-built V8 archive and generated Rust bindings for the version resolved in Cargo.lock, the target and the ptrcomp_sandbox_release profile. Use the existing packaging helper to obtain both inputs and authenticate the release checksums against the repository's pinned manifest. From the repository root, in a Bash shell:
+
+```bash
+export AUDEX_BUILD_ROOT="$HOME/scratch/Audex"
+mkdir -p "$AUDEX_BUILD_ROOT"
+
+V8_INPUTS=$(CODEX_REPO_ROOT="$PWD" PYTHONPATH="$PWD/scripts" python3 -c '
+import os
+from pathlib import Path
+from codex_package.targets import TARGET_SPECS
+from codex_package.v8 import fetch_codex_v8_artifacts
+
+pair = fetch_codex_v8_artifacts(
+    TARGET_SPECS["x86_64-unknown-linux-gnu"],
+    cache_root=Path(os.environ["AUDEX_BUILD_ROOT"]) / "v8",
+)
+print(pair.archive.parent)
+') && export \
+    RUSTY_V8_ARCHIVE="$V8_INPUTS/librusty_v8_ptrcomp_sandbox_release_x86_64-unknown-linux-gnu.a.gz" \
+    RUSTY_V8_SRC_BINDING_PATH="$V8_INPUTS/src_binding_ptrcomp_sandbox_release_x86_64-unknown-linux-gnu.rs"
+```
+
+The helper downloads missing inputs and verifies cached inputs. It resolves the version from Cargo.lock, so the acquisition command does not need editing on V8 version changes. Do not substitute a musl archive for the GNU target. Both environment overrides must be set together. Keep them available in the shell for the code-mode host build and release packaging; reuse a verified cache if available.
+
+### Regression test environment
+
+Run one Cargo operation at a time from codex-rs. This example uses the standard debug target directory; the tests locate companion binaries in that directory.
+
+```bash
+cd codex-rs
+export TMPDIR="$AUDEX_BUILD_ROOT/tmp"
+mkdir -p "$TMPDIR"
+export AUDEX_CLIENT_TEST_RUNTIME_ROOT="$TMPDIR"
+export RUST_MIN_STACK=16777216
+export INSTA_UPDATE=no
+TEST_HOME=$(mktemp -d "$AUDEX_BUILD_ROOT/home.XXXXXX")
+
+t() {
+    CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
+    RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
+    HOME="$TEST_HOME" \
+    AUDEX_S3_TEST_KEY=synthetic-s3-key "$@"
+}
+```
+
+- Unoptimised Core tests can overflow the default 2 MiB test-thread stack. A 16 MiB stack was sufficient in verification.
+- Use an empty private HOME: Claude tests require that no personal .claude directory or .claude.json exists there. The synthetic credential is a fixture, not a real API key.
+- HOME and TMPDIR must be separate sibling directories, not nested. A test HOME beneath TMPDIR causes the native sandbox write-denial regression test to fail.
+- Keep Cargo and Rustup pointed at the real toolchain/cache even when HOME is replaced.
+- INSTA_UPDATE=no avoids generating pending snapshot files during test runs.
+- AUDEX_CLIENT_TEST_RUNTIME_ROOT is required by the Claude conversation integration fixtures, which create and manage their own temporary runtime directories beneath that root.
+
+Format and compile the affected packages, then build the actual helper binaries required by the Audex tests:
+
+```bash
+cargo fmt --check -p codex-protocol -p codex-core -p codex-app-server -p codex-app-server-client -p codex-tui
+cargo check -p codex-app-server -p codex-tui --tests
+cargo build -p codex-cli --bin audex
+cargo build -p codex-code-mode-host
+```
+
+The following are the regression suites used for native continuity. Select the relevant suites for subsequent changes; a filter selecting zero tests is not a pass.
+
+```bash
+t cargo test -p codex-core --lib session::turn_input
+t cargo test -p codex-app-server --lib audex
+t cargo test -p codex-app-server --lib listener_shutdown_tests
+t cargo test -p codex-app-server --test all suite::v2::audex::
+t cargo test -p codex-app-server --test all suite::v2::daemon_update_recovery::
+t cargo test -p codex-app-server --test all suite::v2::thread_resume::
+t cargo test -p codex-app-server-client --lib audit
+```
+
+For Claude continuity changes, run the Audex app-server unit and integration suites above together with the Claude conversation projection and integration suites:
+
+```bash
+t cargo test -p codex-app-server --lib turn_processor::claude
+t cargo test -p codex-app-server --test all suite::v2::claude_conversation::
+```
+
+For the full TUI unit suite use nextest, not plain cargo test. The upstream tests assume per-test process isolation; shared processes can produce duplicate Insta assertions and leak process-global state. TUI tests also emit terminal control sequences and query the terminal, so detach from the controlling terminal as well as redirecting stdin and output:
+
+```bash
+NEXTEST_PROFILE=local t setsid -w cargo nextest run --no-fail-fast -p codex-tui --lib \
+    </dev/null >"$TMPDIR/tui-tests.log" 2>&1
+```
+
+The validated native-continuity run used nextest 0.9.152 and returned 6,398 passed (one flaky test passed on retry), four skipped. The intermittent test was app::tests::session_lifecycle_requests::dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespace, with a thread/resume list_turns error. If it fails again, rerun it in isolation before proposing changes; its underlying cause has not been established.
+
+The TUI uses the upstream 0.0.0 version and non-WSL shortcut baseline in test builds to avoid host/version-dependent snapshots. Production builds retain the actual version and WSL detection.
+
+When finished, remove the private test HOME and the task-owned temporary test files/directories after inspecting logs. Preserve verified V8 inputs until the build work is finished. No development cleanup should touch the installed packages or retained audit runs.
+
+### Assemble the complete release candidate
+
+From the repository root, ensure Cargo.lock matches the workspace version in codex-rs/Cargo.toml. Normal Cargo development builds update workspace entries; if necessary, update them explicitly before packaging:
+
+```bash
+cargo update --manifest-path codex-rs/Cargo.toml --workspace --offline
+```
+
+The compiled workspace version is reported to the provider and affects model availability. The package builder defaults its manifest version to the workspace version; omit --package-version for a normal release. The packaging flag alone does not change the compiled version.
+
+With the verified V8 overrides still exported:
+
+```bash
+build="$AUDEX_BUILD_ROOT/release"
+export CARGO_TARGET_DIR="$build/target"
+export CARGO_BUILD_JOBS=8
+
+CODEX_REPO_ROOT="$PWD" python3 scripts/build_codex_package.py \
+  --variant audex \
+  --target x86_64-unknown-linux-gnu \
+  --cargo-profile release \
+  --package-dir "$build/production-package" \
+  --rg-bin "$(command -v rg)"
+
+"$build/production-package/bin/audex" --version
+```
+
+This is the package-builder entry point used by the just recipe, without requiring just to be installed. Source packaging uses locked, offline Cargo resolution; dependencies must already be cached. The selected V8 artifacts must be available locally. Add --force only when intentionally replacing the scratch package at that destination.
+
+Check the executable's version against Cargo.toml before deploying. Follow the [operator handbook](audex-production-operator-handbook.md#build-and-update-on-linuxwsl) for the current standalone and managed daemon layout. Building the candidate does not establish interactive acceptance.
+
+## Build prerequisites (historical example)
 
 Use the Rust toolchain selected by `codex-rs/rust-toolchain.toml`, a working native build toolchain, and locally available locked Cargo dependencies. No build command below installs dependencies or downloads models.
 

@@ -16,6 +16,10 @@ pub(super) struct Stream {
     pub tools: u64,
     pub result: Option<bool>,
     pub failure: Option<String>,
+    /// The identity Audex assigned or resumed; any record reporting another fails.
+    expected_session: Option<String>,
+    /// Set once a client record confirms the session identity.
+    pub session: Option<String>,
 }
 
 impl Stream {
@@ -48,6 +52,15 @@ impl Stream {
         let kind = value["type"]
             .as_str()
             .context("Claude record has no type")?;
+        if let Some(session) = value["session_id"].as_str() {
+            if let Some(expected) = &self.expected_session {
+                ensure!(
+                    session == expected,
+                    "Claude reported session {session}, not the requested session {expected}"
+                );
+            }
+            self.session = Some(session.into());
+        }
         match kind {
             "system" if value["subtype"] == "init" => {
                 if let Some(model) = value["model"].as_str() {
@@ -189,6 +202,7 @@ pub(super) async fn run(
     launch: launch::Launch,
     directory: &Path,
     cancellation: &CancellationToken,
+    session: Option<&str>,
     mut progress: impl FnMut(&Stream) -> Result<()>,
 ) -> Result<Outcome> {
     let mut transcript = Capture::new(directory, "transcript.jsonl")?;
@@ -210,7 +224,10 @@ pub(super) async fn run(
     let mut exit = None;
     let mut cancelled = false;
     let mut error = None;
-    let mut state = Stream::default();
+    let mut state = Stream {
+        expected_session: session.map(str::to_owned),
+        ..Default::default()
+    };
     let mut bytes = [0u8; 8192];
     let mut stderr_bytes = [0u8; 8192];
     while stdout_open || stderr_open || exit.is_none() {

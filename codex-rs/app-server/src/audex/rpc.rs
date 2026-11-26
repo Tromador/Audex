@@ -73,7 +73,7 @@ impl AuditRpc {
                         cleanup,
                     ),
                     #[cfg(target_os = "linux")]
-                    claude: service::claude::ClaudeReviewer::new(settings.clone()),
+                    claude: service::claude::ClaudeReviewer::new(settings.clone(), &root),
                 });
                 (
                     AuditService::open(&config.codex_home, runner, events),
@@ -429,30 +429,193 @@ fn progress(root: &Path, event: service::Event) -> AuditProgress {
     }
 }
 
+/// How `/claude` discusses a retained audit.
+#[cfg(target_os = "linux")]
+pub(crate) enum AuditDiscussion {
+    /// Resume the audit's Claude reviewer in its own recorded session.
+    Session {
+        selection: ReviewerSelection,
+        label: String,
+        attempt: std::path::PathBuf,
+        session: service::ClaudeSession,
+    },
+    /// Discuss the retained reports in a fresh invocation that stores no session.
+    Reports {
+        selection: ReviewerSelection,
+        reason: String,
+    },
+}
+
+#[cfg(target_os = "linux")]
+impl AuditDiscussion {
+    pub(crate) fn selection(&self) -> &ReviewerSelection {
+        match self {
+            Self::Session { selection, .. } | Self::Reports { selection, .. } => selection,
+        }
+    }
+
+    /// Shown with each reply, so continuity is distinguishable from report-based discussion.
+    pub(crate) fn attribution(&self) -> String {
+        match self {
+            Self::Session {
+                selection, label, ..
+            } => format!(
+                "Claude ({}) — {label}, continuing its audit session",
+                selection.model
+            ),
+            Self::Reports { selection, reason } => format!(
+                "Claude ({}) — from retained audit reports; {reason}",
+                selection.model
+            ),
+        }
+    }
+}
+
+/// Selects the audit's Claude reviewer from its records, without guessing
+/// between several. An explicit model overrides only the model; the route and
+/// effort remain the reviewer's.
+#[cfg(target_os = "linux")]
+pub(crate) fn audit_discussion(
+    root: &Path,
+    run_directory: &Path,
+    model: Option<String>,
+) -> Result<AuditDiscussion> {
+    use service::claude::conversation::selected_model;
+    let run = service::read::record(run_directory)?;
+    let reviewers: Vec<_> = run
+        .reviewers
+        .iter()
+        .enumerate()
+        .filter(|(_, reviewer)| {
+            matches!(
+                reviewer.route.as_str(),
+                "claude_subscription" | "claude_api"
+            )
+        })
+        .collect();
+    let [(index, reviewer)] = reviewers[..] else {
+        // No single reviewer identifies a session: the existing report-based route.
+        let reason = if reviewers.is_empty() {
+            "this audit has no Claude reviewer".to_owned()
+        } else {
+            format!(
+                "this audit has {} Claude reviewers, so no session was selected",
+                reviewers.len()
+            )
+        };
+        return Ok(AuditDiscussion::Reports {
+            selection: ReviewerSelection {
+                label: "claude".into(),
+                route: "claude_subscription".into(),
+                model: selected_model(root, model)?,
+                effort: None,
+                permission_summary: String::new(),
+            },
+            reason,
+        });
+    };
+    service::record::validate_label(&reviewer.label)?;
+    // The latest successful review is the one its report presents.
+    let directory = service::record::reviewer_dir(run_directory, index, reviewer);
+    let succeeded = service::record::attempts(&directory)?
+        .into_iter()
+        .rev()
+        .find(|(_, status)| status.state == service::State::Succeeded);
+    let mut selection = succeeded
+        .as_ref()
+        .map_or_else(|| reviewer.clone(), |(_, status)| status.reviewer.clone());
+    if let Some(model) = model {
+        selection.model = selected_model(root, Some(model))?;
+    }
+    let label = reviewer.label.clone();
+    Ok(match succeeded {
+        Some((attempt, status)) => match status.claude_session {
+            Some(session) => AuditDiscussion::Session {
+                selection,
+                label,
+                attempt,
+                session,
+            },
+            None => AuditDiscussion::Reports {
+                selection,
+                reason: format!("{label} has no resumable session"),
+            },
+        },
+        None => AuditDiscussion::Reports {
+            selection,
+            reason: format!("{label} has no successful review to continue"),
+        },
+    })
+}
+
+/// Exclusive use of one reviewer session for a discussion turn, with its
+/// per-thread delivery position. Dropping it releases the session. These files
+/// are written only after the attempt has finished, so the attempt's own
+/// records keep their single writer.
+#[cfg(target_os = "linux")]
+pub(crate) struct SessionTurn {
+    _lock: std::fs::File,
+    path: std::path::PathBuf,
+    delivery: service::record::Delivery,
+}
+
+#[cfg(target_os = "linux")]
+impl SessionTurn {
+    pub(crate) fn acquire(attempt: &Path) -> Result<Self> {
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(attempt.join("discussion.lock"))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+                "this Claude reviewer is already answering in another conversation; try again when it has finished"
+            ),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+        let path = attempt.join("discussion.json");
+        let delivery = match service::record::read_optional(&path)? {
+            Some(bytes) => serde_json::from_slice(&bytes).context("parse discussion.json")?,
+            None => service::record::Delivery::default(),
+        };
+        Ok(Self {
+            _lock: lock,
+            path,
+            delivery,
+        })
+    }
+
+    /// True until the session has received any shared discussion.
+    pub(crate) fn first(&self) -> bool {
+        self.delivery.threads.is_empty()
+    }
+
+    pub(crate) fn position(&self, thread: &str) -> Option<&str> {
+        self.delivery.threads.get(thread).map(String::as_str)
+    }
+
+    pub(crate) fn delivered(&mut self, thread: String, turn: String) -> Result<()> {
+        self.delivery.threads.insert(thread, turn);
+        service::record::write_json(&self.path, &self.delivery)
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) async fn claude_conversation(
     root: &Path,
     run: &Path,
-    model: &str,
+    selection: &ReviewerSelection,
     discussion: serde_json::Value,
     message: &str,
 ) -> Result<String> {
     let settings = BackendSettings::load(root)?;
-    let reviewer = service::claude::ClaudeReviewer::new(settings);
-    let selection = ReviewerSelection {
-        label: "claude".into(),
-        route: "claude_subscription".into(),
-        model: model.into(),
-        effort: None,
-        permission_summary: String::new(),
-    };
-    let parent = root.join("conversations");
-    std::fs::create_dir_all(&parent)?;
-    let evidence = tempfile::tempdir_in(parent)?;
+    let reviewer = service::claude::ClaudeReviewer::new(settings, root);
+    let evidence = conversation_evidence(root)?;
     let cancellation = tokio_util::sync::CancellationToken::new();
     let outcome = reviewer
         .converse(
-            &selection,
+            selection,
             run,
             evidence.path(),
             discussion,
@@ -460,6 +623,53 @@ pub(crate) async fn claude_conversation(
             &cancellation,
         )
         .await?;
+    reply(outcome)
+}
+
+/// One discussion turn in the reviewer's own session. Follow-up evidence stays
+/// in a disposable directory, apart from the attempt's original records.
+#[cfg(target_os = "linux")]
+pub(crate) async fn claude_resume(
+    root: &Path,
+    run: &Path,
+    selection: &ReviewerSelection,
+    session: &service::ClaudeSession,
+    assignment: serde_json::Value,
+    first: bool,
+) -> Result<String> {
+    let settings = BackendSettings::load(root)?;
+    let reviewer = service::claude::ClaudeReviewer::new(settings, root);
+    let evidence = conversation_evidence(root)?;
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    reviewer
+        .resume(
+            selection,
+            run,
+            session,
+            evidence.path(),
+            assignment,
+            first,
+            &cancellation,
+        )
+        .await
+        .and_then(reply)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "reviewer session {} did not complete this turn: {error:#}. No new session was started and the request was not replayed",
+                session.id
+            )
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn conversation_evidence(root: &Path) -> Result<tempfile::TempDir> {
+    let parent = root.join("conversations");
+    std::fs::create_dir_all(&parent)?;
+    Ok(tempfile::tempdir_in(parent)?)
+}
+
+#[cfg(target_os = "linux")]
+fn reply(outcome: service::Outcome) -> Result<String> {
     match outcome.completion {
         service::Completion::Succeeded => String::from_utf8(outcome.output.unwrap_or_default())
             .context("Claude output was not UTF-8"),

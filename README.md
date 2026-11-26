@@ -10,10 +10,12 @@ It is not a general-purpose CI service, an automated code-fixing system, or an o
 
 - **Independent reviews.** Run a native Codex reviewer and an official Claude CLI reviewer on the same file, set of paths, directory or supplied snippet. Reviewer/model selection and reasoning effort are configurable.
 - **Live source, no invented scope.** Audex passes directory targets directly to reviewers. It does not enumerate them, generate file inventories, apply inclusion rules, or snapshot the source tree. Reviewers investigate using their own tools.
-- **Read-only execution.** Native reviewers use Codex's sandboxed inspection; Claude uses a restricted set of read-only source and reference tools, a dedicated profile, and disabled project hooks.
+- **Read-only execution.** Isolated native reviewers use Codex's sandboxed inspection; Claude uses a restricted set of read-only source and reference tools, a dedicated profile, and disabled project hooks. The 1.1.0 originating-conversation route uses the configured Codex conversation permissions.
 - **Useful reference access.** Reviewers can consult selected GitHub read tools, Context7 documentation and public web search. An optional private Zen Storage connector also permits read-only access to files outside the local Linux filesystem. Reference lookup is distinct from unrestricted shell networking.
 - **Retained evidence.** Audit runs, original reviewer output, findings and diagnostics remain available for inspection, reopening, cancellation and reviewer retries.
 - **Compare and challenge.** The Codex TUI can reconcile reviewers' conclusions, show individual findings and sources, and support follow-up discussion with Claude through `/claude`.
+
+**1.1.0 development:** bare `native` runs the OpenAI review in the originating Codex conversation, inheriting its current model, reasoning effort and earlier context. The review investigation remains available in conversation history for follow-up. Explicit `native:MODEL[:EFFORT]` retains isolated reviewer execution. Native continuity has passed automated regression testing; interactive acceptance and Claude continuity remain outstanding. The accepted release baseline is 1.0.0.
 
 A finding is a model's claim, not a proven defect. Agreement between models can be useful, but is not verification. A failed reviewer is not silently counted as a clean review.
 
@@ -81,7 +83,7 @@ cargo build --release -p codex-cli --bin audex
 
 **Building the executable alone is not a complete installation.** Deployment also needs its companion executables and packaged resources, followed by installation or update of the independently managed daemon. See the handbook rather than using an upstream Codex installer.
 
-For the current behaviour, reviewer configuration, external tool permissions, full slash-command reference and deployment workflow, read the **[Audex operator handbook](docs/audex-production-operator-handbook.md)**.
+For the current behaviour, reviewer configuration, external tool permissions, full slash-command reference and deployment workflow, read the **[Audex operator handbook](docs/audex-production-operator-handbook.md)**. The [build and test procedure](docs/audex-build-install.md) covers verified V8 acquisition, regression-test setup and complete release packaging.
 
 ## Project relationship and licence
 

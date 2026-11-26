@@ -2,7 +2,8 @@
 use app_test_support::{MockResponsesConfig, TestAppServer};
 use codex_app_server_protocol::{
     AuditListPage, AuditReadResult, AuditRunResponse, ClientRequest, ThreadClaudeParams,
-    ThreadClaudeResponse, ThreadReadParams, ThreadReadResponse, ThreadStartParams,
+    ThreadClaudeResponse, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadStartParams,
 };
 use core_test_support::responses;
 use serde_json::{Value, json};
@@ -43,7 +44,7 @@ async fn file_backed_two_reviewer_rpc_and_claude_audit_followup() -> anyhow::Res
         root.join("client/stdout.bin"),
         format!(
             "{}\n",
-            json!({"type":"result","subtype":"success","is_error":false,"result":"literal Claude audit","structured_output":{"summary":"Claude findings summary","findings":[]}})
+            json!({"type":"result","subtype":"success","is_error":false,"session_id":"@SESSION@","result":"literal Claude audit","structured_output":{"summary":"Claude findings summary","findings":[]}})
         ),
     )?;
     std::fs::write(root.join("audex/reviewer-backends.json"),json!({"version":1,"presets":{"default":["native:mock-model","claude_subscription:claude-fixture"]},"claudeSubscription":{"executable":executable,"profile":root.join("profile"),"runtimeRoot":root.join("runtime")}}).to_string())?;
@@ -137,40 +138,28 @@ async fn file_backed_two_reviewer_rpc_and_claude_audit_followup() -> anyhow::Res
         root.join("client/stdout.bin"),
         format!(
             "{}\n",
-            json!({"type":"result","subtype":"success","is_error":false,"result":"Claude follow-up: retained evidence discussed"})
+            json!({"type":"result","subtype":"success","is_error":false,"session_id":"@SESSION@","result":"Claude follow-up: retained evidence discussed"})
         ),
     )?;
-    let turn: ThreadClaudeResponse = client
-        .request(|id| ClientRequest::ThreadClaude {
-            request_id: id,
-            params: ThreadClaudeParams {
-                thread_id: ordinary.thread.id.clone(),
-                model: Some("claude-followup".into()),
-                message: "Discuss the native review".into(),
-                audit: Some(run_id.clone()),
-            },
-        })
-        .await?;
-    tokio::time::timeout(
-        Duration::from_secs(30),
-        client.read_stream_until_matching_notification("Claude completion", |n| {
-            n.method == "turn/completed"
-                && n.params
-                    .as_ref()
-                    .is_some_and(|p| p["turn"]["id"] == turn.turn_id)
-        }),
+    let turn = followup(
+        &mut client,
+        &ordinary.thread.id,
+        &run_id,
+        "Discuss the native review",
     )
-    .await??;
+    .await?;
+    assert_eq!(turn.model, "claude-followup");
     let conversation: ThreadReadResponse = client
         .request(|id| ClientRequest::ThreadRead {
             request_id: id,
             params: ThreadReadParams {
-                thread_id: ordinary.thread.id,
+                thread_id: ordinary.thread.id.clone(),
                 include_turns: true,
             },
         })
         .await?;
     assert!(serde_json::to_string(&conversation)?.contains("Claude follow-up"));
+    assert!(serde_json::to_string(&conversation)?.contains("continuing its audit session"));
     let calls: Vec<Value> = std::fs::read_to_string(root.join("client/calls.jsonl"))?
         .lines()
         .map(serde_json::from_str)
@@ -197,6 +186,52 @@ async fn file_backed_two_reviewer_rpc_and_claude_audit_followup() -> anyhow::Res
     );
     assert!(calls[1]["prompt"].as_str().unwrap().contains("result.json"));
     assert!(!serde_json::to_string(&conversation)?.contains("may have changed"));
+    // The follow-up resumed the reviewer's own session, without the audit schema.
+    let session = argument(&calls[0], "--session-id");
+    assert_eq!(argument(&calls[1], "--resume"), session);
+    assert!(!args.contains(&json!("--json-schema")));
+    // Later turns deliver only unseen dialogue, including after a daemon restart.
+    followup(
+        &mut client,
+        &ordinary.thread.id,
+        &run_id,
+        "And the second point?",
+    )
+    .await?;
+    client.shutdown_gracefully().await?;
+    let mut client = TestAppServer::builder()
+        .with_codex_home(root)
+        .build_initialized()
+        .await?;
+    let _: ThreadResumeResponse = client
+        .request(|id| ClientRequest::ThreadResume {
+            request_id: id,
+            params: ThreadResumeParams {
+                thread_id: ordinary.thread.id.clone(),
+                ..Default::default()
+            },
+        })
+        .await?;
+    followup(&mut client, &ordinary.thread.id, &run_id, "After restart?").await?;
+    let calls: Vec<Value> = std::fs::read_to_string(root.join("client/calls.jsonl"))?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    assert_eq!(calls.len(), 4);
+    for call in &calls[2..] {
+        assert_eq!(argument(call, "--resume"), session);
+        let envelope: Value = serde_json::from_str(call["prompt"].as_str().unwrap())?;
+        let content: Value =
+            serde_json::from_str(envelope["message"]["content"].as_str().unwrap())?;
+        assert_eq!(content["discussion"], json!([]), "{content}");
+        assert!(
+            content["discussion_scope"]
+                .as_str()
+                .unwrap()
+                .contains("since your last reply")
+        );
+        assert!(content.get("retained_summary").is_none());
+    }
     for reviewer in ["1", "2"] {
         let report: codex_app_server_protocol::AuditReadResult = client
             .request(|id| ClientRequest::AuditRead {
@@ -237,4 +272,41 @@ async fn file_backed_two_reviewer_rpc_and_claude_audit_followup() -> anyhow::Res
         .await?;
     assert!(page.runs.is_empty());
     Ok(())
+}
+
+/// Addresses the audit's Claude reviewer and waits for its reply.
+async fn followup(
+    client: &mut TestAppServer,
+    thread: &str,
+    run_id: &str,
+    message: &str,
+) -> anyhow::Result<ThreadClaudeResponse> {
+    let turn: ThreadClaudeResponse = client
+        .request(|id| ClientRequest::ThreadClaude {
+            request_id: id,
+            params: ThreadClaudeParams {
+                thread_id: thread.into(),
+                model: Some("claude-followup".into()),
+                message: message.into(),
+                audit: Some(run_id.into()),
+            },
+        })
+        .await?;
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        client.read_stream_until_matching_notification("Claude completion", |n| {
+            n.method == "turn/completed"
+                && n.params
+                    .as_ref()
+                    .is_some_and(|p| p["turn"]["id"] == turn.turn_id)
+        }),
+    )
+    .await??;
+    Ok(turn)
+}
+
+fn argument(call: &Value, flag: &str) -> String {
+    let args = call["args"].as_array().unwrap();
+    let index = args.iter().position(|arg| arg == flag).unwrap();
+    args[index + 1].as_str().unwrap().to_owned()
 }

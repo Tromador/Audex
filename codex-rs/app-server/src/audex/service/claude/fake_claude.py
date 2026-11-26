@@ -24,7 +24,13 @@ receipt = {
 with (root / 'calls.jsonl').open('a') as calls:
     calls.write(json.dumps(receipt) + '\n')
 
-sys.stdout.buffer.write((root / 'stdout.bin').read_bytes())
+stdout = (root / 'stdout.bin').read_bytes()
+# Scripted records name the assigned or resumed session as @SESSION@.
+for flag in ('--session-id', '--resume'):
+    if flag in sys.argv:
+        session = sys.argv[sys.argv.index(flag) + 1]
+        stdout = stdout.replace(b'@SESSION@', session.encode())
+sys.stdout.buffer.write(stdout)
 sys.stdout.buffer.flush()
 sys.stderr.buffer.write((root / 'stderr.bin').read_bytes())
 sys.stderr.buffer.flush()

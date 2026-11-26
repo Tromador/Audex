@@ -12,6 +12,35 @@ pub(super) struct Launch {
     pub runtime: TempDir,
 }
 
+/// How the official client stores this invocation's conversation.
+#[derive(Clone, Copy)]
+pub(super) enum Session<'a> {
+    /// Nothing is stored: report-based discussion and ordinary conversation.
+    Disposable,
+    /// A new audit session with this explicit identity.
+    Start { id: &'a str, api_profile: &'a Path },
+    /// Continue a recorded audit session.
+    Resume { id: &'a str, api_profile: &'a Path },
+}
+
+/// The API route keeps resumable sessions in a durable private configuration
+/// directory. Authentication is unchanged: the key is still supplied per launch.
+fn api_session_profile(path: &Path) -> Result<PathBuf> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
+    let metadata = fs::metadata(path)?;
+    // SAFETY: geteuid has no arguments or ownership effects.
+    ensure!(
+        metadata.is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o077 == 0,
+        "Claude API session profile must be private to the current user"
+    );
+    Ok(path.to_path_buf())
+}
+
 pub(super) fn validate(settings: &BackendSettings, selection: &ReviewerSelection) -> Result<()> {
     ensure!(
         !selection.model.trim().is_empty()
@@ -170,6 +199,7 @@ pub(super) fn prepare(
     assignment: Value,
     audit_run: Option<&Path>,
     zen_only: bool,
+    session: Session,
 ) -> Result<Launch> {
     prepare_inner(
         settings,
@@ -180,6 +210,7 @@ pub(super) fn prepare(
         audit_run,
         false,
         zen_only,
+        session,
     )
 }
 
@@ -205,6 +236,7 @@ pub(super) fn prepare_conversation(
         None,
         true,
         false,
+        Session::Disposable,
     )
 }
 
@@ -217,6 +249,7 @@ fn prepare_inner(
     audit_run: Option<&Path>,
     conversation: bool,
     zen_only: bool,
+    session: Session,
 ) -> Result<Launch> {
     validate(settings, selection)?;
     let (executable, runtime_root) = match selection.route.as_str() {
@@ -302,12 +335,24 @@ fn prepare_inner(
         "--permission-mode",
         "dontAsk",
         "--disable-slash-commands",
-        "--no-session-persistence",
         "--settings",
         r#"{"disableAllHooks":true,"permissions":{"blockReadsOutsideWorkingDirectories":true}}"#,
         "--system-prompt",
         rules,
     ]);
+    match session {
+        Session::Disposable => {
+            command.arg("--no-session-persistence");
+        }
+        // A resumed turn must use the discussion rules, not the audit prompt
+        // recorded on the session's first request.
+        Session::Start { id, .. } => {
+            command.args(["--session-id", id, "--system-prompt-snapshot", "off"]);
+        }
+        Session::Resume { id, .. } => {
+            command.args(["--resume", id, "--system-prompt-snapshot", "off"]);
+        }
+    }
     command.arg("--strict-mcp-config");
     if conversation {
         command.arg("--include-partial-messages");
@@ -350,9 +395,15 @@ fn prepare_inner(
         );
     } else {
         let config = settings.claude_api.as_ref().expect("validated route");
+        let profile = match session {
+            Session::Disposable => runtime.path().join("profile"),
+            Session::Start { api_profile, .. } | Session::Resume { api_profile, .. } => {
+                api_session_profile(api_profile)?
+            }
+        };
         command
             .arg("--bare")
-            .env("CLAUDE_CONFIG_DIR", runtime.path().join("profile"))
+            .env("CLAUDE_CONFIG_DIR", profile)
             .env("ANTHROPIC_API_KEY", credential(&config.credential)?);
     }
     let mut prompt = serde_json::to_vec(

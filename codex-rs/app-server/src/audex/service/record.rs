@@ -86,6 +86,24 @@ pub struct AttemptStatus {
     /// The admitted turn within `native_thread_id` that performed a conversation attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    /// The official Claude client session this attempt created, once the client confirmed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_session: Option<ClaudeSession>,
+}
+
+/// A persistent official-client session that later audit discussion resumes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeSession {
+    pub id: String,
+    /// The client's working directory for the review; resumption reuses it.
+    pub cwd: PathBuf,
+}
+
+/// Kept in `discussion.json` beside a resumable attempt: for each Codex thread,
+/// the last turn whose shared dialogue the Claude session has already received.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Delivery {
+    pub threads: std::collections::BTreeMap<String, String>,
 }
 
 impl AttemptStatus {
@@ -105,6 +123,7 @@ impl AttemptStatus {
             rollout_path: None,
             execution: None,
             turn_id: None,
+            claude_session: None,
         }
     }
 
