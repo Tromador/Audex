@@ -14,7 +14,6 @@ use serde::Serialize;
 
 use crate::aliases::SkillLocator;
 use crate::catalog::SkillResourceId;
-use crate::catalog::SkillSourceKind;
 use crate::provider::MAX_SKILL_RESOURCE_CONTENT_BYTES;
 use crate::provider::SkillReadContext;
 use crate::provider::SkillReadRequest;
@@ -91,7 +90,7 @@ pub(super) struct ReadTool {
     pub(super) metrics: Option<Arc<dyn ExtensionMetrics>>,
 }
 
-impl<'call> ToolExecutor<ToolCall<'call>> for ReadTool {
+impl ToolExecutor for ReadTool {
     fn tool_name(&self) -> ToolName {
         skill_tool_name(TOOL_NAME)
     }
@@ -113,10 +112,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ReadTool {
         )
     }
 
-    fn handle<'a>(&'a self, call: ToolCall<'call>) -> ToolExecutorFuture<'a>
-    where
-        'call: 'a,
-    {
+    fn handle<'a>(&'a self, call: ToolCall<'a>) -> ToolExecutorFuture<'a> {
         Box::pin(async move {
             let mut outcome = "internal_error";
             let result = async {
@@ -321,15 +317,6 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ReadTool {
                     return Err(FunctionCallError::RespondToModel(
                         "skills.read cursor is invalid".to_string(),
                     ));
-                }
-                // Shadow candidates use the merged identity, not the selected read route.
-                if skill_entry.authority.kind == SkillSourceKind::Cloud
-                    && let Some(state) = self
-                        .context
-                        .thread_state
-                        .shadow_selection_turn(&call.turn_id)
-                {
-                    state.record_invocation(skill_entry.main_prompt.as_str());
                 }
                 let metadata = if self.context.step_state.discovery_v2 {
                     let mut installations = Vec::new();

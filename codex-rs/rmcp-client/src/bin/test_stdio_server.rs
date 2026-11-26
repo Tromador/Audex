@@ -766,6 +766,14 @@ impl ServerHandler for TestToolServer {
             .and_then(|params| params.get("leaseId"))
             .ok_or_else(|| McpError::invalid_params("missing lease ID", None))?;
         record_lease_event(&request.method, id)?;
+        if request.method == "codex/connection/open"
+            && let Ok(delay) = std::env::var("MCP_TEST_LEASE_OPEN_DELAY_MS")
+        {
+            let delay = delay
+                .parse()
+                .map_err(|_| McpError::invalid_params("invalid lease delay", None))?;
+            sleep(Duration::from_millis(delay)).await;
+        }
         Ok(rmcp::model::CustomResult(serde_json::json!({})))
     }
 
@@ -907,12 +915,14 @@ impl ServerHandler for TestToolServer {
                 Ok(Self::structured_result(structured_content))
             }
             "encrypted_output" => {
+                let ciphertext = std::env::var("MCP_TEST_ENCRYPTED_OUTPUT")
+                    .unwrap_or_else(|_| "gAAAA-test".to_string());
                 let mut meta = MetaObject::new();
                 meta.insert("codex/encryptedContent".to_string(), json!(true));
                 let mut result = CallToolResult::success(vec![
                     rmcp::model::ContentBlock::text("Lookup completed"),
                     rmcp::model::ContentBlock::Text(
-                        rmcp::model::TextContent::new("gAAAA-test").with_meta(meta),
+                        rmcp::model::TextContent::new(ciphertext).with_meta(meta),
                     ),
                 ]);
                 result.structured_content = Some(json!({"encrypted_output": "ignored"}));

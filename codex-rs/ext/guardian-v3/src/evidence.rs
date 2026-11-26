@@ -2,14 +2,20 @@
 //! A capture has a fixed end; consumers acknowledge records only after their writes succeed.
 
 use anyhow::ensure;
+use codex_context_fragments::AnnotatedContent;
+use codex_context_fragments::set_annotated_content;
+use codex_context_fragments::to_annotated_content;
 use codex_history::CodexHarnessMetadata;
 use codex_history::HistoryInitialization;
 use codex_history::ResponseItemEnvelope;
 use codex_history::RetainedContextEvent;
 use codex_history::RolloutItem;
 use codex_protocol::ThreadId;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemProvenance;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::is_closing_media_label;
+use codex_protocol::models::is_opening_media_label;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -67,7 +73,7 @@ impl EvidenceSnapshot {
         self.thread_id
     }
 
-    /// Exclusive durable source boundary to bind later retrieval to this capture.
+    /// Exclusive end of the original history read by the housekeeper.
     pub fn cutoff(&self) -> HistoryPosition {
         self.end
     }
@@ -87,6 +93,17 @@ pub struct EvidenceCursor {
 }
 
 impl EvidenceCursor {
+    pub(super) fn start(thread_id: ThreadId) -> Self {
+        Self {
+            thread_id,
+            position: HistoryPosition {
+                thread_id,
+                end_ordinal_exclusive: 0,
+                end_byte_offset: 0,
+            },
+        }
+    }
+
     /// Fresh roots have no prior evidence. Resumed roots start at their durable tail.
     pub async fn at_thread_ready(
         store: &dyn ThreadStore,
@@ -99,14 +116,9 @@ impl EvidenceCursor {
             "Guardian evidence requires paginated root history"
         );
         match initialization {
-            HistoryInitialization::New | HistoryInitialization::Cleared => Ok(Self {
-                thread_id,
-                position: HistoryPosition {
-                    thread_id,
-                    end_ordinal_exclusive: 0,
-                    end_byte_offset: 0,
-                },
-            }),
+            HistoryInitialization::New | HistoryInitialization::Cleared => {
+                Ok(Self::start(thread_id))
+            }
             HistoryInitialization::ColdResume
             | HistoryInitialization::SuppliedHistory
             | HistoryInitialization::WarmFork
@@ -127,6 +139,10 @@ impl EvidenceCursor {
 
     pub fn thread_id(&self) -> ThreadId {
         self.thread_id
+    }
+
+    pub(super) fn position(&self) -> HistoryPosition {
+        self.position
     }
 
     /// Read the unread suffix through a fixed cutoff without advancing progress.
@@ -320,6 +336,26 @@ fn selected(envelope: &ResponseItemEnvelope) -> anyhow::Result<bool> {
     })
 }
 
+/// Keep captions and their provenance. Local images can also have a pair of harness labels.
+fn without_image_attachments(parts: Vec<AnnotatedContent>) -> Vec<AnnotatedContent> {
+    let mut retained = Vec::with_capacity(parts.len());
+    let mut parts = parts.into_iter();
+    while let Some(part) = parts.next() {
+        if let ContentItem::InputText { text: open } = part.content()
+            && let [image, close, ..] = parts.as_slice()
+            && matches!(image.content(), ContentItem::InputImage { .. })
+            && is_opening_media_label(open, image.content())
+            && matches!(close.content(), ContentItem::InputText { text } if is_closing_media_label(text, image.content()))
+        {
+            // Consume the image and its closing label together.
+            let _ = parts.nth(1);
+        } else if !matches!(part.content(), ContentItem::InputImage { .. }) {
+            retained.push(part);
+        }
+    }
+    retained
+}
+
 /// Select original evidence at intake and strip host-only metadata before routing.
 fn review_original(
     mut item: RolloutItem,
@@ -341,7 +377,11 @@ fn review_original(
             }
             message.complete
         }
-        RolloutItem::SessionMeta(_) | RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_)) => {
+        RolloutItem::SessionMeta(_)
+        | RolloutItem::EventMsg {
+            event: EventMsg::ThreadRolledBack(_),
+            ..
+        } => {
             anyhow::bail!("evidence history was replaced");
         }
         RolloutItem::RetainedContext(RetainedContextEvent::AcceptedFileAudio { .. })
@@ -353,13 +393,33 @@ fn review_original(
         | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::SecurityRiskScore(_)
-        | RolloutItem::EventMsg(_)
+        | RolloutItem::EventMsg { .. }
         | RolloutItem::RealtimeItem(_) => false,
     };
     if !include {
         return Ok(None);
     }
     if let RolloutItem::ResponseItem(envelope) = &mut item {
+        // Ordinary user images are outside the sync reviewer's evidence. Omit
+        // them before the housekeeper budgets the record or serializes a board post.
+        if let ResponseItem::Message { role, content, .. } = &envelope.item
+            && role == "user"
+            && content
+                .iter()
+                .any(|part| matches!(part, ContentItem::InputImage { .. }))
+            && let Some(parts) = to_annotated_content(&mut envelope.item)
+        {
+            let retained = without_image_attachments(parts);
+            if retained.iter().all(|part| match part.content() {
+                ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+                    text.trim().is_empty()
+                }
+                ContentItem::InputAudio { .. } | ContentItem::InputImage { .. } => false,
+            }) {
+                return Ok(None);
+            }
+            let _ = set_annotated_content(&mut envelope.item, retained);
+        }
         // Admission uses private host provenance. Keep only the source order in the
         // copy seen by the housekeeper, board readers and reviewer.
         envelope.metadata = envelope

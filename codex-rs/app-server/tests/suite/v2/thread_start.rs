@@ -1522,6 +1522,7 @@ async fn thread_start_emits_mcp_server_status_updated_notifications() -> Result<
             name: "optional_broken".to_string(),
             environment_id: None,
             status: McpServerStartupState::Starting,
+            duration_ms: None,
             error: None,
             failure_reason: None,
         }
@@ -1556,6 +1557,7 @@ async fn thread_start_emits_mcp_server_status_updated_notifications() -> Result<
     assert_eq!(failed.thread_id, Some(start_response.thread.id));
     assert_eq!(failed.name, "optional_broken");
     assert_eq!(failed.status, McpServerStartupState::Failed);
+    assert!(failed.duration_ms.is_some());
     assert_eq!(failed.failure_reason, None);
     assert!(
         failed
@@ -1663,6 +1665,8 @@ async fn config_requests_surface_cloud_config_bundle_load_errors(
     let refresh_token_url = format!("{}/oauth/token", server.uri());
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        // Startup falls back to defaults after the 401 and ignores config.toml.
+        .with_args(&["-c", &format!("chatgpt_base_url={chatgpt_base_url:?}")])
         .with_env_overrides(&[
             ("OPENAI_API_KEY", None),
             (

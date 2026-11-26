@@ -52,6 +52,8 @@ const EXPERIMENTAL_CLIENT_METHOD_DEPENDENCY_TYPES: &[&str] = &[
     "EnvironmentShellInfo",
     "EnvironmentStatusKind",
     "GuardianAssessmentOutcome",
+    "GuardianRootEvidenceMessage",
+    "GuardianRootEvidence",
     "RemoteControlClient",
     "RemoteControlClientsListOrder",
     "ThreadBackgroundTerminal",
@@ -1377,6 +1379,14 @@ where
         } else if file_stem == "ServerNotification" {
             strip_v1_server_notification_variants_from_json_schema(&mut schema_value);
             add_server_notification_emitted_at_to_json_schema(&mut schema_value)?;
+        } else if file_stem == "DynamicToolCallResponse" {
+            // The untagged variants validate values. Require exactly one result key
+            // by presence so even a malformed second key cannot slip through.
+            schema_value["oneOf"] = serde_json::json!([
+                {"required": ["contentItems"]},
+                {"required": ["structuredContent"]},
+                {"required": ["errorMessage"]},
+            ]);
         }
         if let Some(Value::Object(error_schema)) =
             schema_value.pointer_mut("/definitions/CodexErrorInfo")
@@ -2233,6 +2243,12 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("missing MCP login completion fixture"))?,
         )?;
         assert!(mcp_login_completion_ts.contains("loginId?: string | null"));
+        let mcp_status_update_ts = std::str::from_utf8(
+            fixture_tree
+                .get(Path::new("v2/McpServerStatusUpdatedNotification.ts"))
+                .ok_or_else(|| anyhow::anyhow!("missing MCP status update fixture"))?,
+        )?;
+        assert!(mcp_status_update_ts.contains("durationMs?: number | null"));
         let typescript_index = std::str::from_utf8(
             fixture_tree
                 .get(Path::new("index.ts"))
@@ -2428,6 +2444,8 @@ mod tests {
                         && matches!(field_prefix.trim(), "startedAtMs?" | "completedAtMs?"))
                     || (path == Path::new("v2/McpServerOauthLoginCompletedNotification.ts")
                         && field_prefix.trim() == "loginId?")
+                    || (path == Path::new("v2/McpServerStatusUpdatedNotification.ts")
+                        && field_prefix.trim() == "durationMs?")
                     || (path == Path::new("v2/McpServerStatus.ts")
                         && field_prefix.trim() == "environmentId?")
                     || (path == Path::new("v2/ProcessExitedNotification.ts")

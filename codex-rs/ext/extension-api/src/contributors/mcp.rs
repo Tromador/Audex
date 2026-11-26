@@ -212,6 +212,16 @@ pub struct SelectedPluginIdentity {
     pub plugin_id: PluginIdentity,
 }
 
+/// Whether a discovered plugin is enabled and how broadly a disable applies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PluginEnablement {
+    Enabled,
+    /// The source or executor excluded this installation. Other copies remain eligible.
+    DisabledForInstallation,
+    /// Suppress the shared plugin ID as well as this installation.
+    DisabledForThread,
+}
+
 /// An executor plugin and its deferred MCP data. Callers that only need the identity can drop
 /// `mcp` without loading server or connector configuration. A plugin still owns its skills when
 /// it has no MCP data.
@@ -219,7 +229,7 @@ pub struct SelectedPlugin<'a> {
     pub selected_root_id: String,
     pub plugin_id: String,
     pub identity: PluginIdentity,
-    pub enabled: bool,
+    pub enabled: PluginEnablement,
     pub mcp: ExtensionFuture<'a, SelectedPluginContribution>,
 }
 
@@ -248,6 +258,12 @@ pub enum McpServerContribution {
         name: String,
         config: Box<McpServerConfig>,
         protocol_mode: crate::McpProtocolMode,
+    },
+    /// Adds an HTTP server whose auth provider runs in process on the Core host.
+    SetWithAuthProvider {
+        name: String,
+        config: Box<McpServerConfig>,
+        auth_provider: crate::McpRequestAuthProvider,
     },
     /// Registers the controller-owned Apps server under its reserved name.
     HostedApps {

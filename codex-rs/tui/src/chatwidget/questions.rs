@@ -32,6 +32,25 @@ impl ChatWidget {
         self.bottom_pane.take_question_drafts()
     }
 
+    pub(crate) fn needs_question_answer_history(&self) -> bool {
+        self.bottom_pane
+            .questions
+            .as_ref()
+            .is_some_and(|questions| questions.unanswered_count() > 0)
+            || self.has_queued_question_answer()
+    }
+
+    fn has_queued_question_answer(&self) -> bool {
+        self.input_queue
+            .queued_user_messages
+            .iter()
+            .any(|message| message.source == UserMessageSource::QuestionAnswer)
+            || self
+                .input_queue
+                .rejected_steer_sources
+                .contains(&UserMessageSource::QuestionAnswer)
+    }
+
     pub(super) fn add_async_questions(
         &mut self,
         message_id: &str,
@@ -179,6 +198,7 @@ impl ChatWidget {
                     self.restore_composer_state(ThreadComposerState {
                         text: main.text,
                         shell_mode: None,
+                        disconnected_command: None,
                         text_elements: main.text_elements,
                         local_images: main.local_images,
                         remote_image_urls: main.remote_image_urls,

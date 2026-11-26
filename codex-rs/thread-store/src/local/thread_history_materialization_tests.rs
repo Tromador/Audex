@@ -1130,7 +1130,7 @@ async fn active_turn_stores_only_its_start_position() {
         })
     );
     assert!(prepared.model_context.iter().any(|item| {
-        matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(event)) if event.turn_id == "turn-1")
+        matches!(item, RolloutItem::EventMsg { event: EventMsg::TurnStarted(event), .. } if event.turn_id == "turn-1")
     }));
     // Another store may fork the persisted prefix while this store keeps the source writer open.
     let other_store = projection_store(home.path()).await;
@@ -2624,10 +2624,12 @@ async fn paused_projection_releases_writer_and_retains_progress_when_stopped() {
         )
         .expect("read batch");
         let consumer_store = Arc::clone(&store);
+        let consumer_path = rollout_path.clone();
         let consumer = tokio::spawn(async move {
             super::pipeline::apply_batches(
                 &consumer_store,
                 thread_id,
+                consumer_path.as_path(),
                 before.0 as u64,
                 /*initial_ordinal*/ 0,
                 receiver,
@@ -2731,7 +2733,7 @@ async fn sqlite_failure_does_not_fail_durable_jsonl_write() {
     assert!(items.iter().any(|item| {
         matches!(
             item,
-            RolloutItem::EventMsg(EventMsg::TurnStarted(event))
+            RolloutItem::EventMsg { event: EventMsg::TurnStarted(event), .. }
                 if event.turn_id == "turn-1"
         )
     }));
@@ -3196,7 +3198,11 @@ fn turn_started(turn_id: &str) -> RolloutItem {
 
 fn turn_started_with_root(turn_id: &str, root_turn_id: &str) -> RolloutItem {
     let mut item = turn_started(turn_id);
-    if let RolloutItem::EventMsg(EventMsg::TurnStarted(event)) = &mut item {
+    if let RolloutItem::EventMsg {
+        event: EventMsg::TurnStarted(event),
+        ..
+    } = &mut item
+    {
         event.root_turn_id = Some(root_turn_id.to_string());
     }
     item

@@ -8,8 +8,10 @@ use ratatui::style::Style;
 use ratatui::text::Span;
 
 use crate::color::blend;
+use crate::terminal_palette::StdoutColorLevel;
 use crate::terminal_palette::default_bg;
 use crate::terminal_palette::default_fg;
+use crate::terminal_palette::stdout_color_level;
 
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 
@@ -30,14 +32,13 @@ pub(super) fn shimmer_spans(text: &str) -> Vec<Span<'static>> {
     let pos_f =
         (elapsed_since_start().as_secs_f32() % sweep_seconds) / sweep_seconds * (period as f32);
     let pos = pos_f as usize;
-    let has_true_color = supports_color::on_cached(supports_color::Stream::Stdout)
-        .map(|level| level.has_16m)
-        .unwrap_or(false);
+    let has_true_color = stdout_color_level() == StdoutColorLevel::TrueColor;
     let band_half_width = 5.0;
 
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(chars.len());
-    let base_color = default_fg().unwrap_or((128, 128, 128));
-    let highlight_color = default_bg().unwrap_or((255, 255, 255));
+    let (base_color, highlight_color) = default_fg()
+        .zip(default_bg())
+        .unwrap_or(((128, 128, 128), (255, 255, 255)));
     for (i, ch) in chars.iter().enumerate() {
         let i_pos = i as isize + padding as isize;
         let pos = pos as isize;

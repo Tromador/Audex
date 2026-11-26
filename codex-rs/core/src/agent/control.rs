@@ -52,6 +52,7 @@ use futures::StreamExt;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Weak;
+use tracing::Instrument;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -72,6 +73,7 @@ mod budget;
 mod completion;
 mod delivery;
 mod execution;
+mod guardian_root_evidence;
 mod inspection;
 mod interrupt;
 mod legacy;
@@ -90,6 +92,8 @@ mod spawn_telemetry;
 mod target;
 mod user_authorization;
 mod watch;
+
+pub use guardian_root_evidence::GuardianRootEvidence;
 
 /// Per-session controller handle for a local agent tree.
 /// Handles retain a session identity and share their tree's `LocalAgentRuntime`.
@@ -677,14 +681,15 @@ impl LocalAgentControl {
         let Some(agent_graph_store) = state.agent_graph_store() else {
             return Ok(false);
         };
-        if let Err(err) = agent_graph_store
-            .upsert_thread_spawn_edge(
+        let span = tracing::info_span!("agent.spawn.upsert_thread_spawn_edge").or_current();
+        let upsert = span.in_scope(|| {
+            agent_graph_store.upsert_thread_spawn_edge(
                 parent_thread_id,
                 child_thread_id,
                 codex_agent_graph_store::ThreadSpawnEdgeStatus::Open,
             )
-            .await
-        {
+        });
+        if let Err(err) = upsert.instrument(span).await {
             warn!("failed to persist thread-spawn edge: {err}");
             return Err(CodexErr::Fatal(
                 "failed to persist spawned agent relationship".to_string(),

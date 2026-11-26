@@ -7,6 +7,14 @@ pub const TOOL_CALL_DURATION_METRIC: &str = "codex.tool.call.duration_ms";
 /// calls to compute a mean without averaging histogram export batches.
 pub const EXEC_COMMAND_DURATION_TOTAL_METRIC: &str = "codex.exec_command.duration_total_ms";
 pub const EXEC_COMMAND_COUNT_METRIC: &str = "codex.exec_command.calls";
+/// Initial output collection time reported by `exec_command`. The timer starts
+/// after the early-exit wait and can include draining output after exit.
+pub const EXEC_COMMAND_INITIAL_OUTPUT_COLLECTION_TOTAL_METRIC: &str =
+    "codex.exec_command.initial_output_collection_total_ms";
+/// Counts the same collections, even when they take less than a millisecond.
+/// Excludes intercepted patches, process manager errors and `write_stdin`.
+pub const EXEC_COMMAND_INITIAL_OUTPUT_COLLECTION_COUNT_METRIC: &str =
+    "codex.exec_command.initial_output_collection_calls";
 pub const TOOL_CALL_UNIFIED_EXEC_METRIC: &str = "codex.tool.unified_exec";
 pub const MULTI_AGENT_SPAWN_FAILURE_METRIC: &str = "codex.multi_agent.spawn.failure";
 pub const MULTI_AGENT_SPAWN_PHASE_DURATION_METRIC: &str =
@@ -91,11 +99,11 @@ pub const THREAD_STARTED_METRIC: &str = "codex.thread.started";
 pub const ADDITIONAL_CONTEXT_COUNT_METRIC: &str = "codex.additional_context";
 /// UTF-8 value bytes before/after truncation, excluding message wrappers; after includes the marker.
 pub const ADDITIONAL_CONTEXT_VALUE_BYTES_METRIC: &str = "codex.additional_context.value_bytes";
-/// Logarithmic byte buckets through 4 MiB, with a 4 KiB boundary near the truncation cap.
+/// Logarithmic byte buckets through 4 MiB, with boundaries near the previous and current truncation caps.
 pub static ADDITIONAL_CONTEXT_VALUE_BYTES_BUCKETS: LazyLock<Vec<f64>> = LazyLock::new(|| {
     let mut buckets = context_log_buckets(/*max_exponent*/ 22.0)
         .into_iter()
-        .chain([4096.0])
+        .chain([4096.0, 40_960.0])
         .collect::<Vec<_>>();
     buckets.sort_by(f64::total_cmp);
     buckets.dedup();

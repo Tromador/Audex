@@ -5,7 +5,6 @@ use codex_analytics::IncompleteReason;
 use codex_async_utils::THREAD_STACK_SIZE_BYTES;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::openai_models::GuardianScope;
-use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewDecision;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -56,20 +55,6 @@ pub(crate) fn decide_approval(
 ) -> futures::future::BoxFuture<'static, Option<ReviewDecision>> {
     let mut context: GuardianReviewContext = context.into();
     let request: ReviewAction = request.into();
-    let bind_reviewer = |session: &Session| {
-        session
-            .services
-            .thread_extension_data
-            .get::<Arc<dyn crate::guardian_review::AttachedReviewer>>()
-            .map(|reviewer| Arc::clone(reviewer.as_ref()).bind())
-    };
-    // Only Never can grant full access. Bind other requests before scheduling as usual.
-    let may_have_full_access = context.approval_policy == AskForApproval::Never;
-    let attached_reviewer = if may_have_full_access {
-        None
-    } else {
-        bind_reviewer(&session)
-    };
     // Bind the invocation before scheduling. Async review cleanup can outlive
     // the decision, but must not extend the time blocking this tool.
     let review_timing = if context
@@ -155,25 +140,38 @@ pub(crate) fn decide_approval(
             context.approval_policy,
             &turn.config.permissions.effective_permission_profile(),
         );
-        let attached_reviewer = if may_have_full_access && !full_access {
-            bind_reviewer(&session)
+        let attached_reviewer = if full_access {
+            None
         } else {
-            attached_reviewer
+            session
+                .services
+                .thread_extension_data
+                .get::<Arc<dyn crate::guardian_review::AttachedReviewer>>()
+                .map(|reviewer| Arc::clone(reviewer.as_ref()))
         };
         let mut require_synchronous_review =
             options.require_synchronous_review || attached_reviewer.is_some();
-        if let Some(assessment) = &context.serving_assessment {
+        let host_deadline = session.host_guardian_context().map(|_| {
+            codex_guardian_reviewer::ReviewDeadline::from_timeout(
+                turn.config.guardian_review_timeout,
+            )
+        });
+        if !require_synchronous_review && let Some(assessment) = &context.serving_assessment {
             let permissions = request.request.as_ref().ok().and_then(|request| {
                 super::permissions::for_environment(&context, request.target_environment_id()).ok()
             });
-            require_synchronous_review |= !assessment.authorization.local.retained_context_complete
+            require_synchronous_review = !assessment.authorization.local.retained_context_complete
                 || permissions.as_ref() != Some(&assessment.authorization.permissions)
-                || assessment.authorization
-                    != super::ScoreAuthorization::for_session(
+                || !codex_guardian_reviewer::with_root_evidence_limits(
+                    host_deadline,
+                    &cancellation,
+                    super::ScoreAuthorization::for_session(
                         &session,
                         &assessment.authorization.permissions,
-                    )
-                    .await;
+                    ),
+                )
+                .await
+                .is_ok_and(|current| assessment.authorization == current);
             // MCP prepares the call after the response is scored. The score must
             // also match the rules of the server that will handle the call.
             if !require_synchronous_review
@@ -220,6 +218,7 @@ pub(crate) fn decide_approval(
             full_access,
             cancellation: cancellation.clone(),
             timeout: turn.config.guardian_review_timeout,
+            host_deadline,
             // Keep the existing turn-level reporting policy during this ownership move.
             model: turn.model_info(),
             telemetry: &turn.session_telemetry,

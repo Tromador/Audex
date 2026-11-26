@@ -157,7 +157,7 @@ restrict_to_allowed_sources = true
 
 [marketplaces.allowed_sources.internal]
 source = "host_pattern"
-host_pattern = '^git\.example\.com$'
+host_pattern = '^(git\.example\.com|\[2001:db8::7\])$'
 url = "https://github.com/example/ignored.git"
 ref = "ignored"
 "#,
@@ -172,6 +172,13 @@ ref = "ignored"
         r"https://git.example.com/team\@plugins.git",
         r"https://git.example.com?repository=team\@plugins.git",
         "ssh://git@git.example.com/team/plugins.git",
+        "ssh://alice%40example.com@git.example.com/team/plugins.git",
+        "ssh://alice@example.com@git.example.com/team/plugins.git",
+        "ssh://team%2Bci@git.example.com:02222/team/my%20plugins.git",
+        "ssh://DOMAIN%5Cgit@git.example.com/team/plugins.git",
+        "ssh://git@[2001:db8:0:0:0:0:0:7]/team/plugins@[stable].git",
+        "ssh://git@git.example.com/team/plugins%40%5Bnext.git",
+        "git@git.example.com:team/plugins@[next.git",
         "git@git.example.com:team/plugins.git",
     ] {
         assert_eq!(
@@ -576,6 +583,28 @@ enabled = true
             .collect::<Vec<_>>(),
         vec!["sample@allowed".to_string()]
     );
+
+    let opt_ins = serde_json::from_value(serde_json::json!({
+        "sample@blocked": { "enabled": true },
+        "extra@allowed": {},
+        "extra@blocked": {},
+    }))
+    .expect("executor plugin settings");
+    let catalog = crate::PluginCatalogConfig::from_thread_and_executors(
+        &stack,
+        codex_home.path(),
+        [("a", &opt_ins), ("b", &opt_ins)],
+    );
+    // A shared policy decision for the same extra ID must preserve both opt-ins.
+    for environment in ["a", "b", "c"] {
+        assert!(catalog.includes(environment, "sample@allowed"));
+        assert!(!catalog.includes(environment, "sample@blocked"));
+        assert!(!catalog.includes(environment, "extra@blocked"));
+        assert_eq!(
+            catalog.includes(environment, "extra@allowed"),
+            environment != "c"
+        );
+    }
 
     let raw = stack.effective_user_config().expect("raw user config");
     assert!(raw["marketplaces"]["blocked"].is_table());

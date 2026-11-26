@@ -6,6 +6,8 @@
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::terminal_palette::StdoutColorLevel;
+use crate::terminal_palette::stdout_color_level;
 use crate::text_formatting::contains_rtl_or_arabic_number;
 use crate::tui::FrameRequester;
 use ratatui::style::Stylize;
@@ -38,6 +40,8 @@ pub(crate) enum ReducedMotionIndicator {
     StaticBullet,
 }
 
+pub(crate) const LOADING_FRAME_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Show the current loading glyph immediately and schedule the next frame.
 pub(crate) fn loading_glyph(
     started_at: Instant,
@@ -55,7 +59,6 @@ pub(crate) fn loading_glyph_with_delay(
     mode: MotionMode,
     requester: &FrameRequester,
 ) -> &'static str {
-    const FRAME_DURATION: Duration = Duration::from_millis(100);
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     if mode == MotionMode::Reduced {
         return "◌";
@@ -65,8 +68,8 @@ pub(crate) fn loading_glyph_with_delay(
         requester.schedule_frame_in(delay - elapsed);
         return "";
     }
-    requester.schedule_frame_in(FRAME_DURATION);
-    let frame = elapsed.as_millis() / FRAME_DURATION.as_millis();
+    requester.schedule_frame_in(LOADING_FRAME_INTERVAL);
+    let frame = elapsed.as_millis() / LOADING_FRAME_INTERVAL.as_millis();
     FRAMES[usize::try_from(frame).unwrap_or_default() % FRAMES.len()]
 }
 
@@ -100,10 +103,7 @@ pub(crate) fn shimmer_text(text: &str, motion_mode: MotionMode) -> Vec<Span<'sta
 
 fn animated_activity_indicator(start_time: Option<Instant>) -> Span<'static> {
     let elapsed = start_time.map(|st| st.elapsed()).unwrap_or_default();
-    if supports_color::on_cached(supports_color::Stream::Stdout)
-        .map(|level| level.has_16m)
-        .unwrap_or(false)
-    {
+    if stdout_color_level() == StdoutColorLevel::TrueColor {
         shimmer_spans("•")
             .into_iter()
             .next()

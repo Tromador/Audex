@@ -509,39 +509,6 @@ impl RolloutRecorder {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn list_archived_threads_from_state_db(
-        state_db_ctx: Option<StateDbHandle>,
-        config: &impl RolloutConfigView,
-        page_size: usize,
-        cursor: Option<&Cursor>,
-        sort_key: ThreadSortKey,
-        sort_direction: SortDirection,
-        allowed_sources: &[SessionSource],
-        model_providers: Option<&[String]>,
-        cwd_filters: Option<&[PathBuf]>,
-        default_provider: &str,
-        search_term: Option<&str>,
-    ) -> std::io::Result<ThreadsPage> {
-        Self::list_threads_with_db_fallback(
-            state_db_ctx,
-            config,
-            page_size,
-            cursor,
-            sort_key,
-            sort_direction,
-            allowed_sources,
-            model_providers,
-            cwd_filters,
-            default_provider,
-            ThreadListArchiveFilter::Archived,
-            ThreadListRepairMode::StateDbOnly,
-            search_term,
-            /*include_attached_threads*/ false,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
     async fn list_threads_with_db_fallback(
         state_db_ctx: Option<StateDbHandle>,
         config: &impl RolloutConfigView,
@@ -2245,7 +2212,7 @@ async fn resume_candidate_matches_cwd(
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::RetainedContext(_)
             | RolloutItem::SecurityRiskScore(_)
-            | RolloutItem::EventMsg(_) => None,
+            | RolloutItem::EventMsg { .. } => None,
         })
     {
         return cwd_matches(latest_turn_context_cwd.as_path(), cwd);

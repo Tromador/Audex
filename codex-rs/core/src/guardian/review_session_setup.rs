@@ -37,6 +37,7 @@ impl PreparedGuardianContext {
         config: Config,
         history: &ContextManager,
         node_repl_policy: &GuardianNodeReplPolicy,
+        uses_root_evidence: bool,
     ) -> anyhow::Result<Self> {
         let (reset_version, history_reset) = parent.history_reset().await;
         // Preparation may have raced with a history reset before capturing the reviewer context.
@@ -46,8 +47,11 @@ impl PreparedGuardianContext {
         let context_mode =
             GuardianContextMode::from_history(history.conversation_history_snapshot().as_ref());
         let context_policy = ReviewContextPolicy::for_context(context_mode, &config.features);
-        let root_review_version =
-            context_policy::root_review_version(context_policy, &parent).await;
+        let root_review_version = if uses_root_evidence {
+            context_policy::root_review_version(context_policy, &parent).await?
+        } else {
+            None
+        };
         let parent_compaction = context_policy.parent_compaction(history.annotated_items())?;
         let mut instructions = parent.inherited_instructions().await;
         context.capture_project_instructions(&parent).await;
@@ -61,6 +65,7 @@ impl PreparedGuardianContext {
         .with_environments(context.environments())
         .with_node_repl_policy_eligibility(context.model_info.computer_use_review_required())
         .with_node_repl_policy(node_repl_policy);
+        key.root_evidence = context.root_evidence.clone();
         key.root_review_version = root_review_version;
         key.parent_reset_version = history.reset_version;
         let inference = crate::guardian::GuardianInferenceContext::for_config(
@@ -163,6 +168,16 @@ impl PreparedGuardianContext {
             client_mcp_extensions: self.parent.services.client_mcp_extensions.clone(),
             ..crate::StartThreadOptions::new(config)
         };
+        if self
+            .context
+            .turn()
+            .config
+            .guardian_quotes_subagent_replies(&self.config.model_provider_id)
+        {
+            options
+                .thread_extension_init
+                .insert(crate::client::QuoteGuardianReplies);
+        }
         if let Some(inference) = &self.inference {
             options
                 .thread_extension_init
@@ -182,7 +197,13 @@ impl PreparedGuardianContext {
         cancellation: CancellationToken,
     ) -> GuardianReviewSession {
         let session = Arc::clone(&thread.session);
-        if self.parent.enabled(Feature::GuardianRecordedItems) {
+        if self.parent.enabled(Feature::GuardianRecordedItems)
+            && session
+                .services
+                .thread_extension_data
+                .get::<crate::guardian_review::ShadowReviewSession>()
+                .is_none()
+        {
             session
                 .parent_observer_event_tx
                 .get_or_init(|| self.parent.get_tx_event());
@@ -317,6 +338,12 @@ impl ReviewerRequest for PreparedReview {
                 .await
         {
             let outcome = invalidation.outcome;
+            if matches!(outcome, GuardianReviewSessionOutcome::TimedOut)
+                && result.outcome.is_recovered_denial()
+            {
+                // Keep the first denial and the interrupted turn's rollback or discard.
+                return result;
+            }
             result.analytics.context_changed |= invalidation.context_changed;
             result.disposition =
                 if matches!(outcome, GuardianReviewSessionOutcome::StaleAuthorization)
@@ -407,6 +434,7 @@ pub(in crate::guardian) async fn prepare_review(
         params.spawn_config.clone(),
         &params.parent_history,
         &params.node_repl_policy,
+        /*uses_root_evidence*/ true,
     )
     .await?;
     Ok(PreparedReview {
@@ -436,6 +464,7 @@ pub(super) fn prepare_prewarm(
 ) -> BoxFuture<'static, anyhow::Result<PreparedGuardianContext>> {
     Box::pin(async move {
         let context = GuardianReviewContext::from(turn);
+        let uses_root_evidence = matches!(retrieval, ReviewRetrieval::ConversationHistory);
         let config = guardian_review_session_config(&parent, &context, retrieval).await?;
         let history = parent.clone_history().await;
         PreparedGuardianContext::prepare(
@@ -444,6 +473,7 @@ pub(super) fn prepare_prewarm(
             config.spawn_config,
             &history,
             &config.node_repl_policy,
+            uses_root_evidence,
         )
         .await
     })

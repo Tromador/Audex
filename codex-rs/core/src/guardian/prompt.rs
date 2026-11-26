@@ -1,4 +1,5 @@
 use codex_extension_api::ConversationHistorySnapshot;
+use codex_guardian_context::AudioTranscript;
 use codex_guardian_context::CollectedContext;
 use codex_guardian_context::ContextProfile;
 use codex_guardian_context::GuardianRootMessage;
@@ -27,6 +28,23 @@ use super::GuardianApprovalRequest;
 use super::GuardianReviewContext;
 
 pub(super) use codex_guardian_reviewer::GUARDIAN_TRANSCRIPT_START;
+
+impl GuardianReviewContext {
+    fn native_agent_history_enabled(&self) -> bool {
+        let turn = self.turn();
+        turn.config.guardian_native_multi_agent_history_enabled()
+            && turn.multi_agent_version == codex_protocol::protocol::MultiAgentVersion::V2
+    }
+
+    pub(super) fn frame_native_agent_actions(&self) -> bool {
+        self.native_agent_history_enabled()
+            && self
+                .turn()
+                .config
+                .features
+                .enabled(codex_features::Feature::GuardianNativeActionFraming)
+    }
+}
 
 /// Selects transcript evidence using the checkpoint already loaded by the reviewer.
 pub(crate) enum GuardianTranscriptHistory<'a> {
@@ -106,10 +124,8 @@ pub(super) async fn collect_guardian_prompt_items_with_parent_turn(
     };
     let config = session.get_config().await;
     let root_authorization = session
-        .services
-        .agent_control
-        .get_guardian_package(session.thread_id)
-        .await
+        .guardian_root_snapshot()
+        .await?
         .and_then(|snapshot| snapshot.request_candidates);
     let budgeting = parent_context.map_or_else(
         || config.guardian_context_budgeting(),
@@ -148,11 +164,7 @@ pub(super) async fn collect_guardian_prompt_items_with_parent_turn(
     let mut profile = ContextProfile::synchronous();
     profile.transcript.entry_limits.node_repl_output_tokens = node_repl_result_token_limit;
     profile.transcript.options.native_multi_agent_namespace = parent_context
-        .is_some_and(|context| {
-            let turn = context.turn();
-            turn.config.guardian_native_multi_agent_history_enabled()
-                && turn.multi_agent_version == codex_protocol::protocol::MultiAgentVersion::V2
-        })
+        .is_some_and(GuardianReviewContext::native_agent_history_enabled)
         .then(|| {
             config
                 .multi_agent_v2
@@ -161,10 +173,16 @@ pub(super) async fn collect_guardian_prompt_items_with_parent_turn(
                 .filter(|namespace| !namespace.is_empty())
                 .unwrap_or_else(|| "functions".to_owned())
         });
+    profile.transcript.options.frame_native_agent_actions =
+        parent_context.is_some_and(GuardianReviewContext::frame_native_agent_actions);
     profile.transcript_format = match parent_context {
         Some(context) => context.turn().config.guardian_transcript_mode,
         None => config.guardian_transcript_mode,
     };
+    let recorded_root = parent_context
+        .and_then(|context| context.root_evidence.as_deref())
+        .map(super::recorded_tool_call::root_messages)
+        .unwrap_or_default();
     let sections = collect_guardian_context(SectionInput {
         target: profile.target,
         history: &GuardianReviewHistory {
@@ -174,7 +192,7 @@ pub(super) async fn collect_guardian_prompt_items_with_parent_turn(
         },
         transcript: &profile.transcript,
         is_selected_exec_output,
-        root_conversation: &[],
+        root_conversation: &recorded_root,
         root_conversation_candidates: root_authorization.as_ref(),
         trusted_user_answers: &trusted_user_inputs,
         planned_action: Some(&planned_action),
@@ -265,6 +283,13 @@ impl SectionHistory for GuardianReviewHistory<'_> {
 struct FilteredGuardianHistory<'a>(&'a dyn SectionHistory);
 
 impl SectionHistory for FilteredGuardianHistory<'_> {
+    fn audio_transcripts_for<'a>(
+        &'a self,
+        item: &'a ResponseItem,
+    ) -> Box<dyn Iterator<Item = AudioTranscript<'a>> + Send + 'a> {
+        self.0.audio_transcripts_for(item)
+    }
+
     fn items_with_sources(
         &self,
     ) -> Box<dyn Iterator<Item = (&ResponseItem, Option<&codex_history::RetainedSource>)> + Send + '_>

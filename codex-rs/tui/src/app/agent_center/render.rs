@@ -1,9 +1,14 @@
 //! Status tabs, task rows, the rename editor and details share a wide/narrow layout.
 
-use super::hints::hint_line;
 use super::*;
 use crate::bottom_pane::render_filled_tab_bar;
+use crate::footer_hint::Hint;
+use crate::footer_hint::shortcut;
 use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
+use crate::motion::LOADING_FRAME_INTERVAL;
+use crate::motion::loading_glyph_with_delay;
+use crate::style::accent_style;
+use crate::style::secondary_text_style;
 use crossterm::cursor::SetCursorStyle;
 use ratatui::widgets::WidgetRef;
 use unicode_segmentation::UnicodeSegmentation;
@@ -129,11 +134,13 @@ impl Renderable for AgentsOverviewView {
         let inset =
             |area: Rect| area.inner(Margin::new(/*horizontal*/ 2, /*vertical*/ 0));
         let footer_hints = self.center_footer_hints();
-        let state = self.state();
-        let filter_keys = if state.editing_metadata() {
-            String::new()
-        } else {
+        let mut state = self.state();
+        state.row_hits.clear();
+        let header_active = self.hint_focus.is_active() && !state.help;
+        let filter_keys = if header_active && !state.editing_metadata() {
             self.center_filter_hint()
+        } else {
+            String::new()
         };
         let grouping = match state.grouping {
             AgentsOverviewGrouping::Project => "Project",
@@ -144,6 +151,8 @@ impl Renderable for AgentsOverviewView {
         let group_key = self
             .agents_keymap
             .primary_hint("toggle_grouping", &self.agents_keymap.toggle_grouping)
+            .filter(|_| header_active && !state.task_actions_blocked())
+            .filter(|hint| self.editing_allows_hint(&state, *hint))
             .map(ShortcutHint::display_label)
             .unwrap_or_default();
         line(
@@ -168,8 +177,8 @@ impl Renderable for AgentsOverviewView {
             })
             .collect::<Vec<_>>();
         let mut tabs = inset(row(layout.header, /*offset*/ 1, /*height*/ 1));
-        let filter_hint = hint_line(&[(filter_keys, "filter".into())]);
-        if tabs.width >= 80 && filter_hint.width() > 0 {
+        if tabs.width >= 80 && !filter_keys.is_empty() {
+            let filter_hint = shortcut(&filter_keys, "filter");
             let hint_width = filter_hint.width() as u16;
             filter_hint.render(
                 Rect::new(tabs.right() - hint_width, tabs.y, hint_width, tabs.height),
@@ -177,12 +186,17 @@ impl Renderable for AgentsOverviewView {
             );
             tabs.width = tabs.width.saturating_sub(hint_width + 2);
         }
-        render_filled_tab_bar(
+        let targets = render_filled_tab_bar(
             &labels.iter().map(String::as_str).collect::<Vec<_>>(),
             state.status_filter,
             tabs,
             buf,
         );
+        if self.dock_focused == Some(false)
+            && let Some((_, tab)) = targets.iter().find(|(id, _)| *id == state.status_filter)
+        {
+            buf.set_style(*tab, crate::style::quiet_workspace_style());
+        }
         line(
             "─"
                 .repeat(usize::from(area.width.saturating_sub(/*rhs*/ 4)))
@@ -235,10 +249,47 @@ impl Renderable for AgentsOverviewView {
                 (failed && !state.loading).then(|| "Error loading tasks".to_owned())
             })
             .or_else(|| state.server_version_notice.clone());
-        if let Some(notice) = notice.filter(|_| !state.help) {
-            line(notice.dim(), inset(layout.footer), buf);
+        let footer = inset(layout.footer);
+        let progress = if state.help || state.connection_notice.is_some() || footer.is_empty() {
+            None
+        } else if let Some(opening) = state.opening_task {
+            Some(("Opening task…", opening.started_at))
+        } else if self.dock_motion.is_some() && history.is_none() && notice.is_none() {
+            let full_label = "Loading additional tasks…";
+            // Reserve a column each for the spinner and its trailing space.
+            let label = if full_label.width() + 2 <= usize::from(footer.width) {
+                full_label
+            } else {
+                "Loading tasks…"
+            };
+            state
+                .initial_discovery_started_at
+                .map(|started_at| (label, started_at))
         } else {
-            line(hint_line(&footer_hints), inset(layout.footer), buf);
+            None
+        };
+        if let Some((label, started_at)) = progress {
+            let glyph = self.dock_motion.as_ref().map_or("", |(motion, frames)| {
+                loading_glyph_with_delay(started_at, LOADING_FRAME_INTERVAL, *motion, frames)
+            });
+            let glyph = if glyph.is_empty() { " " } else { glyph };
+            line(
+                vec![
+                    Span::styled(glyph, accent_style()),
+                    " ".into(),
+                    Span::styled(label, secondary_text_style()),
+                ],
+                footer,
+                buf,
+            );
+        } else if let Some(notice) = notice.filter(|_| !state.help) {
+            line(notice.dim(), footer, buf);
+        } else {
+            let hints = footer_hints
+                .into_iter()
+                .map(|(key, label)| Hint::key(key, label));
+            let row = self.hint_focus.render_row(hints, footer.width);
+            line(row.line, footer, buf);
         }
         let help = state.help;
         drop(state);
@@ -265,7 +316,11 @@ impl Renderable for AgentsOverviewView {
                     .set_style(Style::default().dim());
             }
         }
-        self.render_center_rows(layout.list, buf);
+        self.render_center_rows(
+            layout.list,
+            buf,
+            /*progress_in_footer*/ progress.is_some(),
+        );
         if !layout.details.is_empty() {
             self.render_details(layout.details, buf);
         }

@@ -394,6 +394,7 @@ impl MessageProcessor {
                 thread_extensions(
                     config.as_ref(),
                     ThreadExtensionDependencies {
+                        thread_state_manager: thread_state_manager.clone(),
                         sample_responses: Arc::clone(&sample_responses),
                         event_sink: Arc::clone(&extension_event_sink),
                         auth_manager: auth_manager.clone(),
@@ -2108,6 +2109,12 @@ impl MessageProcessor {
             }
             ClientRequest::GetAccountTokenUsage { params, .. } => {
                 self.account_processor.get_account_token_usage(params).await
+            }
+            ClientRequest::AccountVoiceSettingsRead { .. } => {
+                self.account_processor.read_voice_settings().await
+            }
+            ClientRequest::AccountVoiceSettingsWrite { params, .. } => {
+                self.account_processor.write_voice_settings(params).await
             }
             ClientRequest::GetWorkspaceMessages { .. } => {
                 self.account_processor.get_workspace_messages().await

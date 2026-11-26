@@ -73,10 +73,7 @@ impl StartupRecovery {
     fn report(&self) {
         if !self.finished.swap(true, Ordering::Relaxed) {
             restore_terminal_before_fatal_exit();
-            #[allow(clippy::print_stderr)]
-            {
-                eprintln!("{}", self.message());
-            }
+            let _ = writeln!(std::io::stderr().lock(), "{}", self.message());
         }
     }
 }
@@ -129,7 +126,7 @@ pub(super) async fn prepare(
     strict_config: bool,
     target: &AppServerTarget,
     arg0_paths: &Arg0DispatchPaths,
-    source_bundle: CloudConfigBundleLoader,
+    mut source_bundle: CloudConfigBundleLoader,
     embedded_network_policy: &codex_app_server_client::EmbeddedNetworkPolicy,
 ) -> color_eyre::Result<(Config, CloudConfigBundleLoader, ManagedTuiWorktree)> {
     if let Some(id_or_name) = cli.fork_session_id.as_deref() {
@@ -202,11 +199,12 @@ pub(super) async fn prepare(
                 CloudConfigBundleLoader::default(),
             )
             .await;
-            let source_bundle = cloud_config_bundle_for_app_server_target(
+            source_bundle = cloud_config_bundle_for_app_server_target(
                 target,
                 &bootstrap,
                 &source.codex_home,
                 embedded_network_policy,
+                source_bundle.config_server_resolution(),
             )
             .await?;
             overrides.cwd = Some(cwd.into_path_buf());
@@ -214,7 +212,7 @@ pub(super) async fn prepare(
                 cli_overrides.clone(),
                 overrides.clone(),
                 loader_overrides.clone(),
-                source_bundle,
+                source_bundle.clone(),
                 strict_config,
             )
             .await;
@@ -279,6 +277,7 @@ pub(super) async fn prepare(
         &bootstrap,
         &source.codex_home,
         embedded_network_policy,
+        source_bundle.config_server_resolution(),
     )
     .await?;
     managed

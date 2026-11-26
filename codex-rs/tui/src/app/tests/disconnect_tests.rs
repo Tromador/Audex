@@ -19,7 +19,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 pub(super) fn normalize_reconnect_status(popup: &str) -> String {
     let status =
-        regex_lite::Regex::new(r"(?m)^[•◦] (Reconnecting to server…|Reconnect failed — check the endpoint, then relaunch) \([\dhms ]+\)").unwrap();
+        regex_lite::Regex::new(r"(?m)^[•◦] (Reconnecting to server…) \([\dhms ]+\)").unwrap();
     normalize_snapshot_paths(status.replace(popup, "• ${1} (<elapsed>)").into_owned())
 }
 
@@ -220,7 +220,7 @@ async fn lost_mutation_reply_preserves_work_without_resubmitting() -> Result<()>
             AppRunControl::Exit(ExitReason::UserRequested)
         ));
     }
-    for command in ["/exit", "/quit"] {
+    for command in ["/exit", "/quit", "/q"] {
         app.chat_widget
             .restore_user_message_to_composer(command.into());
         app.handle_tui_event(&mut tui, &mut session, TuiEvent::Key(KeyCode::Enter.into()))
@@ -442,6 +442,9 @@ where
             "initialize" => Some(json!({"result": {"userAgent": "reconnect-test/2.0.0"}})),
             "account/read" => {
                 Some(json!({"result": {"account": null, "requiresOpenaiAuth": false}}))
+            }
+            "modelProvider/list" => {
+                Some(json!({"error": {"code": -32601, "message": "Method not found"}}))
             }
             "model/list" => Some(json!({"result": {"data": [], "nextCursor": null}})),
             "collaborationMode/list" => Some(json!({"result": {"data": []}})),

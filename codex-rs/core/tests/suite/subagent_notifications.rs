@@ -1646,8 +1646,8 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
                 .multi_agent
                 .get_or_insert_with(MultiAgentMessages::default);
             multi_agent.role = Some(MultiAgentRoleMessages {
-                root: Some(format!("{model} root role.")),
-                subagent: Some(format!("{model} subagent role.")),
+                root: Some(format!("{model} root role.").into()),
+                subagent: Some(format!("{model} subagent role.").into()),
             });
             if matches!(
                 selection,
@@ -2047,8 +2047,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawn_agent_requested_model_and_reasoning_override_inherited_settings_without_role()
--> Result<()> {
+async fn spawn_agent_overrides_inherited_model_settings_without_role() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -2057,17 +2056,30 @@ async fn spawn_agent_requested_model_and_reasoning_override_inherited_settings_w
         json!({
             "message": CHILD_PROMPT,
             "model": REQUESTED_MODEL,
+            "service_tier": "flex",
             "reasoning_effort": REQUESTED_REASONING_EFFORT,
         }),
         |builder| {
-            builder.with_config(|config| {
-                config.agent_default_subagent_model = Some(INHERITED_MODEL.to_string());
-                config.agent_default_subagent_reasoning_effort = Some(ReasoningEffort::High);
-            })
+            builder
+                .with_pre_build_hook(|home| {
+                    std::fs::write(
+                        home.join("config.toml"),
+                        "[features.multi_agent_v2]
+enabled = false
+expose_spawn_agent_service_tier = true
+",
+                    )
+                    .expect("write V1 spawn settings");
+                })
+                .with_config(|config| {
+                    config.agent_default_subagent_model = Some(INHERITED_MODEL.to_string());
+                    config.agent_default_subagent_reasoning_effort = Some(ReasoningEffort::High);
+                })
         },
     )
     .await?;
 
+    assert_eq!(child_snapshot.service_tier.as_deref(), Some("flex"));
     assert_eq!(child_snapshot.model, REQUESTED_MODEL);
     assert_eq!(
         child_snapshot.reasoning_effort,
@@ -2439,15 +2451,19 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
         .get_rollout_items()
         .iter()
         .find_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::ItemCompleted(completed)) => match &completed.item {
+            RolloutItem::EventMsg {
+                event: EventMsg::ItemCompleted(completed),
+                ..
+            } => match &completed.item {
                 TurnItem::SubAgentActivity(activity) if activity.id == SPAWN_CALL_ID => {
                     Some((activity.model.clone(), activity.reasoning_effort.clone()))
                 }
                 _ => None,
             },
-            RolloutItem::EventMsg(EventMsg::SubAgentActivity(activity))
-                if activity.event_id == SPAWN_CALL_ID =>
-            {
+            RolloutItem::EventMsg {
+                event: EventMsg::SubAgentActivity(activity),
+                ..
+            } if activity.event_id == SPAWN_CALL_ID => {
                 Some((activity.model.clone(), activity.reasoning_effort.clone()))
             }
             _ => None,
@@ -2926,7 +2942,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
         assert!(
             !rollout.get_rollout_items().iter().any(|item| matches!(
                 item,
-                RolloutItem::EventMsg(EventMsg::SubAgentActivity(activity))
+                RolloutItem::EventMsg { event: EventMsg::SubAgentActivity(activity), .. }
                     if activity.kind == SubAgentActivityKind::Completed
             )),
             "legacy completed activity should not be persisted without its parent turn ID"
@@ -2935,14 +2951,16 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
             .get_rollout_items()
             .iter()
             .find_map(|item| match item {
-                RolloutItem::EventMsg(EventMsg::ItemCompleted(completed))
-                    if matches!(
-                        &completed.item,
-                        TurnItem::SubAgentActivity(SubAgentActivityItem {
-                            kind: SubAgentActivityKind::Completed,
-                            ..
-                        })
-                    ) =>
+                RolloutItem::EventMsg {
+                    event: EventMsg::ItemCompleted(completed),
+                    ..
+                } if matches!(
+                    &completed.item,
+                    TurnItem::SubAgentActivity(SubAgentActivityItem {
+                        kind: SubAgentActivityKind::Completed,
+                        ..
+                    })
+                ) =>
                 {
                     Some(completed)
                 }
@@ -3350,7 +3368,6 @@ async fn skill_instructions_in_parent_and_spawned_child(include_instructions: bo
         max_context_tokens: config.skill_max_context_tokens,
         bundled_skills_enabled: false,
         cloud_skill_enabled: false,
-        shadow_selection_enabled: false,
     });
     let builder = test_codex()
         .with_extensions(Arc::new(extensions.build()))

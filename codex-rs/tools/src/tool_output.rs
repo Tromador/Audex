@@ -1,3 +1,4 @@
+use codex_code_mode::CodeModeToolResult;
 use codex_protocol::models::AudioReference;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
@@ -76,8 +77,16 @@ pub trait ToolOutput: Send {
         None
     }
 
-    fn code_mode_result(&self, payload: &ToolPayload) -> JsonValue {
-        response_input_to_code_mode_result(self.to_response_item("", payload))
+    /// Returns the script-visible value with its format for Code Mode's output helpers.
+    fn code_mode_result(&self, payload: &ToolPayload) -> CodeModeToolResult {
+        CodeModeToolResult::from(response_input_to_code_mode_result(
+            self.to_response_item("", payload),
+        ))
+    }
+
+    /// Hands the final result to JavaScript, moving an already prepared value when possible.
+    fn into_code_mode_result(self: Box<Self>, payload: &ToolPayload) -> CodeModeToolResult {
+        self.code_mode_result(payload)
     }
 
     /// Returns the host-observed result fields for executed-tool passthrough.
@@ -138,8 +147,12 @@ where
         (**self).post_tool_use_response(call_id, payload)
     }
 
-    fn code_mode_result(&self, payload: &ToolPayload) -> JsonValue {
+    fn code_mode_result(&self, payload: &ToolPayload) -> CodeModeToolResult {
         (**self).code_mode_result(payload)
+    }
+
+    fn into_code_mode_result(self: Box<Self>, payload: &ToolPayload) -> CodeModeToolResult {
+        (*self).into_code_mode_result(payload)
     }
 
     fn tool_result_metadata(&self) -> ToolResultMetadata {
@@ -214,8 +227,8 @@ impl ToolOutput for JsonToolOutput {
         Some(self.value.clone())
     }
 
-    fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
-        self.value.clone()
+    fn code_mode_result(&self, _payload: &ToolPayload) -> CodeModeToolResult {
+        CodeModeToolResult::from(self.value.clone())
     }
 }
 
@@ -237,15 +250,20 @@ impl ToolOutput for codex_protocol::mcp::CallToolResult {
         }
     }
 
-    fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
-        let mut result = serde_json::to_value(self).unwrap_or_else(|err| {
-            JsonValue::String(format!("failed to serialize mcp result: {err}"))
-        });
+    fn code_mode_result(&self, _payload: &ToolPayload) -> CodeModeToolResult {
+        let mut result = match serde_json::to_value(self) {
+            Ok(value) => value,
+            Err(err) => {
+                return CodeModeToolResult::Json(JsonValue::String(format!(
+                    "failed to serialize mcp result: {err}"
+                )));
+            }
+        };
         // MCP result metadata is private to clients and must not reach Code Mode.
         if let JsonValue::Object(fields) = &mut result {
             fields.remove("_meta");
         }
-        result
+        CodeModeToolResult::McpCallToolResult(result)
     }
 }
 

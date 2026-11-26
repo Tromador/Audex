@@ -266,11 +266,11 @@ fn terminal_app_ssh_fallback_renders_inline_startup() {
     let pump = startup_test_pump(std::iter::empty());
     let owned_layout = super::layout::OwnedStartupLayout::new(&pump);
     let mut frames = Vec::new();
-    for terminal_app_over_ssh in [false, true] {
+    for prefer_inline_screen in [false, true] {
         let owned = crate::determine_alt_screen_mode(
             /*no_alt_screen*/ false,
             codex_config::types::AltScreenMode::Auto,
-            terminal_app_over_ssh,
+            prefer_inline_screen,
         );
         let renderable = if owned {
             crate::render::renderable::RenderableItem::Borrowed(&owned_layout)
@@ -307,7 +307,7 @@ fn terminal_app_ssh_fallback_renders_inline_startup() {
             .collect::<Vec<_>>()
             .join("\n");
         frames.push(format!(
-            "terminal_app_over_ssh={terminal_app_over_ssh}, owned={owned}\n{frame}"
+            "terminal_app_over_ssh={prefer_inline_screen}, owned={owned}\n{frame}"
         ));
     }
     insta::assert_snapshot!(
@@ -550,18 +550,17 @@ fn startup_draft_preserves_multiline_editing_without_submitting() {
 
 #[tokio::test(start_paused = true)]
 async fn startup_draft_preserves_non_bracketed_multiline_pastes_without_submitting() {
-    let events = "first line\n\nsecond line\nthird line"
-        .chars()
-        .map(|character| {
-            TuiEvent::Key(KeyEvent::new(
-                if character == '\n' {
-                    KeyCode::Enter
-                } else {
-                    KeyCode::Char(character)
-                },
-                KeyModifiers::NONE,
-            ))
-        });
+    let payload = "有几个问题:\n问:\nfirst line\n\nsecond line\nthird line";
+    let events = payload.chars().map(|character| {
+        TuiEvent::Key(KeyEvent::new(
+            if character == '\n' {
+                KeyCode::Enter
+            } else {
+                KeyCode::Char(character)
+            },
+            KeyModifiers::NONE,
+        ))
+    });
     let mut pump = startup_test_pump(events);
     let mut tui = crate::tui::test_support::make_test_tui().expect("create test terminal");
 
@@ -570,10 +569,7 @@ async fn startup_draft_preserves_non_bracketed_multiline_pastes_without_submitti
         .expect("preserve multiline non-bracketed paste");
     assert!(!pump.submission_pending);
 
-    assert_eq!(
-        pump.bottom_pane.composer_text(),
-        "first line\n\nsecond line\nthird line"
-    );
+    assert_eq!(pump.bottom_pane.composer_text(), payload);
     assert!(pump.app_event_rx.try_recv().is_err());
 
     pump.handle_event(
@@ -581,10 +577,7 @@ async fn startup_draft_preserves_non_bracketed_multiline_pastes_without_submitti
         TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
     )
     .expect("ignore standalone Enter after the paste finishes");
-    assert_eq!(
-        pump.bottom_pane.composer_text(),
-        "first line\n\nsecond line\nthird line"
-    );
+    assert_eq!(pump.bottom_pane.composer_text(), payload);
     assert!(pump.app_event_rx.try_recv().is_err());
 }
 

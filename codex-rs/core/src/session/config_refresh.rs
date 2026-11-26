@@ -77,6 +77,10 @@ impl Session {
             .unwrap_or_else(|_| requirements.approvals_reviewer.value());
         config.requested_approvals_reviewer = Some(requested);
         config.approvals_reviewer = reviewer;
+        let notify_contributors = configuration.step_settings.approvals_reviewer != reviewer
+            && !self.services.extensions.config_contributors().is_empty();
+        let previous_config =
+            notify_contributors.then(|| Self::build_effective_session_config(configuration));
         let previous = Arc::downgrade(current);
         let config = Arc::new(config);
         let snapshots = &mut state.guardian_config_snapshots;
@@ -100,7 +104,10 @@ impl Session {
                 .step_settings
                 .validate(&configuration.step_settings_constraints(&configuration.environments))
         });
-        match validation {
+        // The reviewer change is published even if the new policy blocks the current model.
+        let new_config =
+            notify_contributors.then(|| Self::build_effective_session_config(configuration));
+        let outcome = match validation {
             Ok(()) => {
                 if was_blocked && !state.shutting_down {
                     self.input_queue.pending_work_wake.notify_one();
@@ -111,7 +118,11 @@ impl Session {
                 warn!(%error, "Guardian policy blocks the current model");
                 ConfigRefreshOutcome::Rejected
             }
-        }
+        };
+        drop(binding);
+        drop(state);
+        self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
+        outcome
     }
 
     pub(crate) async fn refresh_runtime_config(
@@ -166,9 +177,9 @@ impl Session {
                             Constrained::allow_any(Default::default())
                         };
                     }
-                    config.config_layer_stack = config
+                    config
                         .config_layer_stack
-                        .with_mcp_requirements_from(&next_config.config_layer_stack);
+                        .refresh_mcp_requirements(&next_config.config_layer_stack);
                     if let Err(err) = config.features.refresh_mcp_features(&next_config.features) {
                         warn!(%err, "failed to apply managed MCP feature restrictions");
                         config.mcp_servers = Constrained::allow_any(Default::default());

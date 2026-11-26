@@ -245,6 +245,31 @@ fn loop_closes_and_light_themes_preserve_coverage() {
 }
 
 #[test]
+fn background_only_keeps_logo_visible_and_composer_shaded() {
+    let colors = terminal_palette::DefaultColors {
+        fg: None,
+        bg: (210, 221, 235),
+    };
+    terminal_palette::with_test_palette(Some(colors), || {
+        let area = Rect::new(
+            /*x*/ 0, /*y*/ 0, /*width*/ 48, /*height*/ 17,
+        );
+        let mut buffer = Buffer::empty(area);
+        let mut animation = EmptyStateAnimation::default();
+        animation.start_fresh();
+        animation.render_in(area, &mut buffer, Presentation::Animated);
+        let ink = buffer
+            .content
+            .iter()
+            .filter(|cell| cell.symbol() != " ")
+            .map(|cell| cell.fg)
+            .collect::<std::collections::HashSet<_>>();
+        let fill = crate::style::user_message_style().bg;
+        insta::assert_snapshot!(format!("Logo {ink:?}, composer {fill:?}"), @"Logo {Reset}, composer Some(Rgb(201, 212, 225))");
+    });
+}
+
+#[test]
 fn faded_presentation_settles_without_redraws_then_resumes() {
     let area = Rect::new(
         /*x*/ 0, /*y*/ 0, /*width*/ 48, /*height*/ 17,
@@ -422,6 +447,14 @@ fn onboarding_keeps_full_color_after_budget_and_pause() {
             );
             let start = Instant::now();
             let mut animation = EmptyStateAnimation::default();
+            // At 2x density, 22 × 51 physical pixels per cell are 11 × 25.5 logical pixels.
+            animation.renderer.get_or_insert_default().window_size =
+                Some(crossterm::terminal::WindowSize {
+                    columns: 80,
+                    rows: 40,
+                    width: 880,
+                    height: 1020,
+                });
             animation.start_fresh();
             let mut buffer = Buffer::empty(area);
             animation.render_in_at(area, &mut buffer, Presentation::Animated, start);

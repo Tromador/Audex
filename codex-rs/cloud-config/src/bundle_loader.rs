@@ -6,6 +6,7 @@ use crate::service::CLOUD_CONFIG_BUNDLE_TIMEOUT;
 use crate::service::CloudConfigBundleService;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigRequirementsToml;
+use codex_config::ConfigServerResolution;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthConfig;
 use codex_login::AuthManager;
@@ -24,12 +25,18 @@ const CONFIG_SERVER_LOGIN_FAILURE: &str =
 pub async fn managed_config_auth_manager(
     auth: AuthConfig,
     requirements: &ConfigRequirementsToml,
-) -> std::io::Result<Option<OAuthSessionManager>> {
+) -> std::io::Result<Option<(ConfigServerResolution, Option<OAuthSessionManager>)>> {
     let Some(service_config) = requirements.config_server.as_ref() else {
         return Ok(None);
     };
-    crate::config_server_auth_manager(service_config, auth.codex_home, &auth.auth_route_config)
-        .await
+    crate::config_server_auth_manager(
+        service_config,
+        auth.codex_home,
+        &auth.auth_route_config,
+        /*previous*/ None,
+    )
+    .await
+    .map(Some)
 }
 
 /// How to sign in when the config server has no saved OAuth grant.
@@ -43,11 +50,14 @@ pub async fn ensure_config_server_login(
     auth: AuthConfig,
     requirements: &ConfigRequirementsToml,
     method: ConfigServerLoginMethod,
-) -> std::io::Result<()> {
-    let Some(manager) = managed_config_auth_manager(auth, requirements).await? else {
-        return Ok(());
+) -> std::io::Result<Option<ConfigServerResolution>> {
+    let Some((resolution, manager)) = managed_config_auth_manager(auth, requirements).await? else {
+        return Ok(None);
     };
-    ensure_config_server_login_with_manager(&manager, method).await
+    if let Some(manager) = manager {
+        ensure_config_server_login_with_manager(&manager, method).await?;
+    }
+    Ok(Some(resolution))
 }
 
 pub(crate) async fn ensure_config_server_login_with_manager(
@@ -82,12 +92,14 @@ pub async fn managed_config_bundle_loader(
     codex_home: PathBuf,
     factory: HttpClientFactory,
     requirements: &ConfigRequirementsToml,
+    previous: Option<&ConfigServerResolution>,
 ) -> CloudConfigBundleLoader {
     if let Some(service_config) = requirements.config_server.as_ref() {
         return crate::config_server_bundle_loader(
             service_config.clone(),
             codex_home,
             &codex_login::AuthRouteConfig::from_http_client_factory(factory),
+            previous,
         )
         .await;
     }
@@ -109,12 +121,14 @@ pub async fn managed_config_bundle_loader_for_storage(
     auth_config: AuthConfig,
     requirements: &ConfigRequirementsToml,
     enable_codex_api_key_env: bool,
+    resolution: Option<&ConfigServerResolution>,
 ) -> std::io::Result<CloudConfigBundleLoader> {
     if let Some(service_config) = requirements.config_server.as_ref() {
         return Ok(crate::config_server_bundle_loader(
             service_config.clone(),
             auth_config.codex_home,
             &auth_config.auth_route_config,
+            resolution,
         )
         .await);
     }
@@ -205,6 +219,7 @@ pub async fn managed_config_bundle_loader_for_auth(
             config,
             requirements,
             /*enable_codex_api_key_env*/ false,
+            /*resolution*/ None,
         )
         .await;
     }

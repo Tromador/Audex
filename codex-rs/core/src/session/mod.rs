@@ -39,7 +39,6 @@ use crate::context::world_state::Placement;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context::world_state::WorldStateUpdate;
-use crate::context::world_state::WorldStateUpdateContent;
 use crate::context::world_state::split_prefix_updates;
 use crate::current_time::TimeProvider;
 use crate::environment_selection::TurnEnvironmentSnapshot;
@@ -89,6 +88,7 @@ use codex_features::Feature;
 use codex_features::Features;
 use codex_features::unstable_features_warning_event;
 use codex_history::HistoryInitialization;
+use codex_history::RolloutEventMetadata;
 use codex_history::RolloutItem;
 use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
@@ -126,7 +126,7 @@ use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::WebSearchMode;
-use codex_protocol::dynamic_tools::DynamicToolResponse;
+use codex_protocol::dynamic_tools::DynamicToolCallResult;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::EnteredReviewModeItem;
 use codex_protocol::items::ModelInvocationContext;
@@ -161,6 +161,7 @@ use codex_protocol::protocol::PrivateSessionEvent;
 use codex_protocol::protocol::PrivateSessionEventPayload;
 use codex_protocol::protocol::RawResponseItemEvent;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SpawnServiceTierOverride;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
@@ -237,6 +238,7 @@ use crate::config::StartedNetworkProxy;
 use crate::config::resolve_web_search_mode_for_turn;
 use crate::context_manager::ContextManager;
 use crate::context_manager::HistoryReplacement;
+use crate::context_manager::rejected_audio::RejectedAudioFileIds;
 use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerSource;
@@ -316,6 +318,8 @@ pub(crate) use self::input_queue::SubmittedAdditionalContext;
 pub(crate) use self::input_queue::TurnInput;
 pub(crate) use self::input_queue::TurnInputQueue;
 pub(crate) use self::input_queue::UserInputMetadata;
+use self::retained_context::AcceptedUserInputResponse;
+pub(crate) use self::retained_context::PendingUserInput;
 use self::review::spawn_review_thread;
 use self::session::AppServerClientMetadata;
 use self::session::Session;
@@ -342,7 +346,6 @@ use crate::mcp::McpThreadIdentity;
 use crate::rollout::map_session_init_error;
 use crate::session::startup_prewarm::SessionStartupPrewarmHandle;
 use crate::shell;
-use crate::state::AcceptedUserInputResponse;
 use crate::state::AutoCompactWindowIds;
 use crate::state::AutoCompactWindowSnapshot;
 use crate::state::PendingApproval;
@@ -525,7 +528,14 @@ impl From<CompactedHistoryMetadata> for CompactedHistoryInstallation<'_> {
     }
 }
 
+pub(crate) enum ChildServiceTier {
+    Requested(String),
+    /// Internal reload supplies the parent's defaults. Restore a child-owned choice from history.
+    Reload,
+}
+
 pub(crate) struct SessionSpawnArgs {
+    pub(crate) child_service_tier: Option<ChildServiceTier>,
     pub(crate) attached_thread: bool,
     pub(crate) startup: Option<Arc<startup::SessionStartup>>,
     pub(crate) config: Config,
@@ -724,6 +734,7 @@ impl Session {
             attached_thread,
             startup,
             config,
+            child_service_tier,
             request_country,
             prompt_cache_key,
             allow_provider_model_fallback,
@@ -984,19 +995,10 @@ impl Session {
         });
         // TODO (aibrahim): Consolidate config.model and config.model_reasoning_effort into config.collaboration_mode
         // to avoid extracting these fields separately and constructing CollaborationMode here.
+        let saved_settings = conversation_history.resumed_thread_settings();
         let persisted_collaboration_mode = match &conversation_history {
-            InitialHistory::Resumed(resumed) => resumed
-                .history
-                .iter()
-                .rev()
-                .find_map(|item| match item {
-                    RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
-                        if event.thread_id == Some(resumed.conversation_id) =>
-                    {
-                        Some(&event.thread_settings.collaboration_mode)
-                    }
-                    _ => None,
-                })
+            InitialHistory::Resumed(resumed) => saved_settings
+                .map(|settings| &settings.collaboration_mode)
                 .or_else(|| {
                     resumed
                         .history
@@ -1027,8 +1029,23 @@ impl Session {
                 /*developer_instructions*/ None,
             )
         });
+        let mut spawn_service_tier_override =
+            saved_settings.and_then(|settings| settings.spawn_service_tier_override.clone());
+        let service_tier = match child_service_tier {
+            Some(ChildServiceTier::Requested(tier)) => {
+                spawn_service_tier_override = Some(SpawnServiceTierOverride {
+                    inherited_service_tier: config.service_tier.clone(),
+                });
+                Some(tier)
+            }
+            Some(ChildServiceTier::Reload) if spawn_service_tier_override.is_some() => {
+                saved_settings.and_then(|settings| settings.service_tier.clone())
+            }
+            // A caller resuming a thread can explicitly change or clear its tier.
+            Some(ChildServiceTier::Reload) | None => config.service_tier.clone(),
+        };
         let initial_service_tier_warning = unsupported_service_tier_warning(
-            config.service_tier.as_deref(),
+            service_tier.as_deref(),
             &config.features,
             &model_info,
         );
@@ -1068,7 +1085,8 @@ impl Session {
                 request_country,
                 collaboration_mode,
                 reasoning_summary: config.model_reasoning_summary,
-                service_tier: config.service_tier.clone(),
+                service_tier,
+                spawn_service_tier_override,
                 personality: config.personality,
                 approval_policy: config.permissions.approval_policy.clone(),
                 approvals_reviewer: config.approvals_reviewer,
@@ -1842,10 +1860,10 @@ impl Session {
                 let turn_context = self.new_default_turn().await;
                 let rollout_items = resumed_history.history;
                 if matches!(
-                    rollout_items.iter().rev().find_map(|item| match item {
-                        RolloutItem::EventMsg(event) => agent_status_from_event(event),
-                        _ => None,
-                    }),
+                    rollout_items
+                        .iter()
+                        .rev()
+                        .find_map(|item| { item.event_msg().and_then(agent_status_from_event) }),
                     Some(AgentStatus::Interrupted)
                 ) {
                     self.agent_status.send_replace(AgentStatus::Interrupted);
@@ -1886,11 +1904,10 @@ impl Session {
                 let thread_id = self.thread_id();
                 let current_settings = self.thread_settings_snapshot().await;
                 let persisted_settings = rollout_items.iter().rev().find_map(|item| match item {
-                    RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
-                        if event.thread_id == Some(thread_id) =>
-                    {
-                        Some(&event.thread_settings)
-                    }
+                    RolloutItem::EventMsg {
+                        event: EventMsg::ThreadSettingsApplied(event),
+                        ..
+                    } if event.thread_id == Some(thread_id) => Some(&event.thread_settings),
                     _ => None,
                 });
                 // Persist changed effective settings even when no turn follows the resume.
@@ -2154,7 +2171,10 @@ impl Session {
 
     fn last_token_info_from_rollout(rollout_items: &[RolloutItem]) -> Option<TokenUsageInfo> {
         rollout_items.iter().rev().find_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.info.clone(),
+            RolloutItem::EventMsg {
+                event: EventMsg::TokenCount(ev),
+                ..
+            } => ev.info.clone(),
             _ => None,
         })
     }
@@ -2377,6 +2397,24 @@ impl Session {
             .resolve_model_info(self.services.models_manager.as_ref(), &overrides)
             .await
             .model
+    }
+
+    pub(crate) async fn configured_snapshot(&self) -> ThreadConfigSnapshot {
+        let state = self.state.lock().await;
+        let configuration = &state.session_configuration;
+        configuration.thread_config_snapshot(configuration.environments.clone())
+    }
+
+    pub(crate) async fn thread_view_settings(&self) -> crate::ThreadViewSettings {
+        let state = self.state.lock().await;
+        let configuration = &state.session_configuration;
+        let collaboration = &configuration.step_settings.collaboration_mode;
+        crate::ThreadViewSettings {
+            model: collaboration.model().to_string(),
+            reasoning_effort: collaboration.reasoning_effort(),
+            environments: configuration.environments.iter().map(Into::into).collect(),
+            session_source: configuration.session_source.clone(),
+        }
     }
 
     pub(crate) async fn thread_config_snapshot(&self) -> ThreadConfigSnapshot {
@@ -2767,7 +2805,7 @@ impl Session {
     }
 
     /// Persist the event to rollout and send it to clients.
-    pub(crate) async fn send_event(&self, turn_context: &TurnContext, mut msg: EventMsg) {
+    pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
         crate::agent::turn_metrics::record_terminal_event(turn_context, &msg);
         if let Some((item_id, started_at_ms)) = msg.command_approval_start() {
             // The client can see the command before execution. Keep its first start
@@ -2777,30 +2815,33 @@ impl Session {
                 .record_item_started(item_id.to_owned(), started_at_ms)
                 .await;
         }
-        if let EventMsg::TurnComplete(completed) = &msg
+        let metadata = if let EventMsg::TurnComplete(completed) = &msg
             && completed.error.is_some()
+            && let Some(rejected) = turn_context.extension_data.remove::<RejectedAudioFileIds>()
         {
+            let file_ids = Arc::unwrap_or_clone(rejected).0;
             self.state
                 .lock()
                 .await
                 .history
-                .record_rejected_file_audio(completed);
-        }
-        if let EventMsg::Error(error) = &mut msg
+                .extend_rejected_audio_file_ids(file_ids.iter().cloned());
+            Some(RolloutEventMetadata {
+                rejected_audio_file_ids: file_ids,
+            })
+        } else {
+            None
+        };
+        if let EventMsg::Error(error) = &msg
             && error
                 .codex_error_info
                 .as_ref()
                 .is_some_and(CodexErrorInfo::affects_turn_status)
         {
-            let mut terminal_error = turn_context.terminal_error.lock().await;
-            if let Some(previous) = terminal_error.as_ref() {
-                for file_id in &previous.rejected_audio_file_ids {
-                    if !error.rejected_audio_file_ids.contains(file_id) {
-                        error.rejected_audio_file_ids.push(file_id.clone());
-                    }
-                }
-            }
-            terminal_error.replace(error.clone());
+            turn_context
+                .terminal_error
+                .lock()
+                .await
+                .replace(error.clone());
         }
         let legacy_source = msg.clone();
         self.services
@@ -2831,7 +2872,7 @@ impl Session {
                 .analytics_events_client
                 .track_guardian_session_event(self.thread_id, &event);
         }
-        self.send_event_raw(event).await;
+        Box::pin(self.send_event_raw_with_persistence(event, /*persist*/ true, metadata)).await;
         self.maybe_publish_terminal_agent_result(turn_context, &legacy_source)
             .await;
         self.maybe_mirror_event_text_to_realtime(&legacy_source)
@@ -3006,7 +3047,12 @@ impl Session {
 
     pub(crate) async fn send_event_raw(&self, event: Event) {
         // Keep event persistence out of callers' stack frames.
-        Box::pin(self.send_event_raw_with_persistence(event, /*persist*/ true)).await;
+        Box::pin(
+            self.send_event_raw_with_persistence(
+                event, /*persist*/ true, /*metadata*/ None,
+            ),
+        )
+        .await;
     }
 
     /// Delivers an event without creating a local rollout for a thread that has not materialized.
@@ -3019,10 +3065,16 @@ impl Session {
                 true
             }
         };
-        self.send_event_raw_with_persistence(event, persist).await;
+        self.send_event_raw_with_persistence(event, persist, /*metadata*/ None)
+            .await;
     }
 
-    async fn send_event_raw_with_persistence(&self, event: Event, persist: bool) {
+    async fn send_event_raw_with_persistence(
+        &self,
+        event: Event,
+        persist: bool,
+        metadata: Option<RolloutEventMetadata>,
+    ) {
         let flush_guardian_completion = persist
             && matches!(event.msg, EventMsg::TurnComplete(_))
             && self.is_private_guardian_reviewer().await;
@@ -3054,7 +3106,10 @@ impl Session {
         }
         // Persist the event into rollout storage; the store applies its persistence policy.
         if persist {
-            let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
+            let rollout_items = vec![RolloutItem::EventMsg {
+                event: event.msg.clone(),
+                metadata,
+            }];
             self.persist_rollout_items(&rollout_items).await;
         }
         self.services
@@ -3701,48 +3756,76 @@ impl Session {
         }
     }
 
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "active turn checks and turn state updates must remain atomic"
-    )]
     pub(crate) async fn request_user_input(
         &self,
         turn_context: &TurnContext,
         call_id: String,
         args: RequestUserInputArgs,
-    ) -> Option<AcceptedUserInputResponse> {
+    ) -> Option<RequestUserInputResponse> {
+        self.prompt_user(turn_context, call_id, args, /*verify*/ false)
+            .await
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
+    pub(crate) async fn prompt_user(
+        &self,
+        turn_context: &TurnContext,
+        call_id: String,
+        args: RequestUserInputArgs,
+        verify: bool,
+    ) -> Option<RequestUserInputResponse> {
         let user_wait_owner = self.user_wait_timing_owner(turn_context, Some(&call_id));
-        let _elicitation = self.services.elicitations.register();
-        let sub_id = turn_context.sub_id.clone();
+        let elicitation = self.services.elicitations.register();
+        let sub_id = &turn_context.sub_id;
         let (tx_response, rx_response) = oneshot::channel();
-        let event_id = sub_id.clone();
+        let prompt = RequestUserInputEvent {
+            call_id,
+            turn_id: sub_id.clone(),
+            questions: args.questions,
+            is_blocking: args.is_blocking,
+            auto_resolution_ms: args.auto_resolution_ms,
+        };
+        // Roots that preserve review evidence verify the answer before the tool resumes.
+        let mut verify_on_return = verify.then(|| prompt.clone());
+        let verify_on_accept = verify_on_return.take_if(|_| self.preserve_review_writes);
         let prev_entry = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_user_input(sub_id, tx_response)
+                    ts.insert_pending_user_input(
+                        sub_id.clone(),
+                        PendingUserInput {
+                            tx_response,
+                            verify_on_accept,
+                        },
+                    )
                 }
                 None => None,
             }
         };
         if prev_entry.is_some() {
-            warn!("Overwriting existing pending user input for sub_id: {event_id}");
+            warn!("Overwriting existing pending user input for sub_id: {sub_id}");
         }
 
-        let event = EventMsg::RequestUserInput(RequestUserInputEvent {
-            call_id,
-            turn_id: turn_context.sub_id.clone(),
-            questions: args.questions,
-            is_blocking: args.is_blocking,
-            auto_resolution_ms: args.auto_resolution_ms,
-        });
         turn_context
             .turn_metadata_state
             .mark_user_input_requested_during_turn();
-        let _user_wait = self.start_user_wait_timing(turn_context, user_wait_owner.as_deref());
-        self.send_event(turn_context, event).await;
-        rx_response.await.ok()
+        let user_wait = self.start_user_wait_timing(turn_context, user_wait_owner.as_deref());
+        self.send_event(turn_context, EventMsg::RequestUserInput(prompt))
+            .await;
+        let mut accepted = rx_response.await.ok()?;
+        drop(user_wait);
+        drop(elicitation);
+        if let Some(recording) = accepted.recording.take() {
+            let _ = recording.await;
+        } else if let Some(event) = accepted.verified_answer(verify_on_return) {
+            self.record_retained_context(event).await;
+        }
+        Some(accepted.response)
     }
 
     #[expect(
@@ -3760,7 +3843,13 @@ impl Session {
                 Some(at) => {
                     let sender = at.turn_state.lock().await.remove_pending_user_input(sub_id);
                     match sender {
-                        Some(sender) => Some((sender, self.reserve_user_input_order().await)),
+                        Some(pending)
+                            if pending.verify_on_accept.is_some()
+                                && pending.tx_response.is_closed() =>
+                        {
+                            return;
+                        }
+                        Some(pending) => Some((pending, self.reserve_user_input_order().await)),
                         None => None,
                     }
                 }
@@ -3768,13 +3857,17 @@ impl Session {
             }
         };
         match entry {
-            Some((tx_response, acceptance_order)) => {
-                tx_response
-                    .send(AcceptedUserInputResponse {
-                        response,
-                        acceptance_order,
-                    })
-                    .ok();
+            Some((pending, acceptance_order)) => {
+                let mut accepted = AcceptedUserInputResponse {
+                    response,
+                    acceptance_order,
+                    recording: None,
+                };
+                // Publish the answer before waking the cancellable tool waiter.
+                if let Some(event) = accepted.verified_answer(pending.verify_on_accept) {
+                    accepted.recording = self.start_retained_context(event).await;
+                }
+                let _ = pending.tx_response.send(accepted);
             }
             None => {
                 warn!("No pending user input found for sub_id: {sub_id}");
@@ -3903,7 +3996,11 @@ impl Session {
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
     )]
-    pub async fn notify_dynamic_tool_response(&self, call_id: &str, response: DynamicToolResponse) {
+    pub async fn notify_dynamic_tool_response(
+        &self,
+        call_id: &str,
+        response: DynamicToolCallResult,
+    ) {
         let entry = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
@@ -4099,17 +4196,17 @@ impl Session {
         model_info: &ModelInfo,
         items: Vec<ResponseItemEnvelope>,
         image_preparations: Vec<ImagePreparationMetadata>,
-    ) {
+    ) -> u64 {
         // Ordinary history persistence retains its existing best-effort behavior.
-        let _ = self
-            .record_prepared_items(
-                turn_context,
-                model_info,
-                items,
-                image_preparations,
-                /*realtime*/ None,
-            )
-            .await;
+        self.record_prepared_items(
+            turn_context,
+            model_info,
+            items,
+            image_preparations,
+            /*realtime*/ None,
+        )
+        .await
+        .unwrap_or_default()
     }
 
     #[expect(
@@ -4123,7 +4220,7 @@ impl Session {
         mut items: Vec<ResponseItemEnvelope>,
         image_preparations: Vec<ImagePreparationMetadata>,
         realtime: Option<RealtimeRecord<'_>>,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<u64> {
         // Save the originating history budget for replay.
         // Preserve any existing tool-specific override.
         let policy: codex_utils_output_truncation::TruncationPolicy =
@@ -4143,20 +4240,21 @@ impl Session {
         let has_user_turn_boundary = items
             .iter()
             .any(|envelope| crate::context_manager::is_user_turn_boundary(&envelope.item));
-        // Thread settings precede the first accepted input. Keep the persistence lock
-        // through its seal, and clear the pending flag only after the seal succeeds.
-        let realtime_settings_guard = if realtime.is_some()
+        // Prepare settings before publishing review evidence so there is no await
+        // between recording the revision and handing the append to the session.
+        let prepare_before_recording = realtime.is_some() || self.preserve_review_writes;
+        let mut early_guard = if prepare_before_recording
             && has_user_turn_boundary
             && self.reference_context_item().await.is_none()
         {
-            Some(thread_settings::acquire_persistence_lock(self).await)
+            Some(thread_settings::acquire_owned_persistence_lock(self).await)
         } else {
             None
         };
-        let realtime_initial_settings = realtime_settings_guard.is_some()
+        let initial_settings_pending = early_guard.is_some()
             && self.reference_context_item().await.is_none()
             && self.state.lock().await.initial_settings_pending();
-        let realtime_settings_event = if realtime_initial_settings {
+        let mut early_settings = if initial_settings_pending {
             Some(thread_settings::applied_event(self).await)
         } else {
             None
@@ -4165,6 +4263,7 @@ impl Session {
             .iter()
             .map(|envelope| envelope.item.clone())
             .collect::<Vec<_>>();
+        let mut review_write = None;
         {
             let mut state = self.state.lock().await;
             let pending_orders = turn_context
@@ -4217,13 +4316,10 @@ impl Session {
                         &turn_context.sub_id,
                         envelope,
                         prepared,
-                        realtime_settings_event,
+                        early_settings.take(),
                         policy,
                     )
                     .await?;
-                if realtime_initial_settings {
-                    state.take_initial_settings_pending();
-                }
                 response_items = vec![envelope.item.clone()];
                 items = vec![envelope];
             } else if matches!(&realtime, Some(RealtimeRecord::Chunk)) {
@@ -4236,24 +4332,32 @@ impl Session {
                     .record_realtime_chunk_input(
                         &mut state,
                         envelope.clone(),
-                        realtime_settings_event,
+                        early_settings.take(),
                         policy,
                     )
                     .await?;
-                if realtime_initial_settings {
-                    state.take_initial_settings_pending();
-                }
                 response_items = vec![envelope.item];
             } else {
                 state
                     .pending_audio_duration_ids
                     .extend(file_audio::file_ids(&items).cloned());
-                state.history.record_annotated_items(&mut items, policy);
+                let ((), token) = self.record_review_evidence(&mut state.history, |history| {
+                    history.record_annotated_items(&mut items, policy);
+                });
+                review_write = token;
+            }
+            if initial_settings_pending {
+                state.take_initial_settings_pending();
             }
             state
                 .current_time_reminder
                 .note_recorded_items(&response_items);
         }
+        let recorded_through = items
+            .iter()
+            .filter_map(|item| item.metadata.as_ref()?.history_sequence)
+            .max()
+            .unwrap_or_default();
         for image in image_preparations {
             self.services
                 .analytics_events_client
@@ -4265,29 +4369,39 @@ impl Session {
         if let Some(RealtimeRecord::Handoff(prepared)) = &realtime {
             self.finish_realtime_handoff(prepared, &items[0]).await;
         } else if !matches!(&realtime, Some(RealtimeRecord::Chunk)) {
-            let settings_guard =
-                if has_user_turn_boundary && self.reference_context_item().await.is_none() {
-                    Some(thread_settings::acquire_persistence_lock(self).await)
-                } else {
-                    None
-                };
+            let settings_guard = if !prepare_before_recording
+                && has_user_turn_boundary
+                && self.reference_context_item().await.is_none()
+            {
+                Some(thread_settings::acquire_persistence_lock(self).await)
+            } else {
+                None
+            };
             let initial_settings = if settings_guard.is_some()
                 && self.reference_context_item().await.is_none()
                 && self.state.lock().await.take_initial_settings_pending()
             {
                 Some(thread_settings::applied_event(self).await)
             } else {
-                None
+                early_settings
             };
             let rollout_items = initial_settings
                 .into_iter()
                 .map(RolloutItem::EventMsg)
                 .chain(items.into_iter().map(RolloutItem::ResponseItem))
                 .collect::<Vec<_>>();
-            self.persist_rollout_items(&rollout_items).await;
+            if let Some(write) = review_write {
+                if let Some(recording) =
+                    self.start_review_write(rollout_items, write, early_guard.take())
+                {
+                    let _ = recording.await;
+                }
+            } else {
+                self.persist_rollout_items(&rollout_items).await;
+            }
             drop(settings_guard);
         }
-        drop(realtime_settings_guard);
+        drop(early_guard);
         if turn_context.config.memories.disable_on_external_context
             && let Some(item) = response_items
                 .iter()
@@ -4295,9 +4409,9 @@ impl Session {
         {
             mark_thread_memory_mode_polluted_if_external_context(self, turn_context, item).await;
         }
-        self.send_raw_response_items(turn_context, &response_items)
+        self.send_raw_response_items(&turn_context.sub_id, &response_items)
             .await;
-        Ok(())
+        Ok(recorded_through)
     }
 
     pub(crate) async fn record_step_world_state_if_changed(
@@ -4322,6 +4436,16 @@ impl Session {
                 .await;
         }
 
+        self.commit_world_state(world_state_snapshot, world_state_item)
+            .await;
+        Ok(Arc::new(world_state))
+    }
+
+    async fn commit_world_state(
+        &self,
+        world_state_snapshot: WorldStateSnapshot,
+        world_state_item: Option<WorldStateItem>,
+    ) {
         self.state
             .lock()
             .await
@@ -4332,7 +4456,6 @@ impl Session {
             self.persist_rollout_items(&[RolloutItem::WorldState(world_state_item)])
                 .await;
         }
-        Ok(Arc::new(world_state))
     }
 
     /// Retains the step captured for execution.
@@ -4407,10 +4530,17 @@ impl Session {
         .await
     }
 
-    fn inherits_root_service_tier(&self, session_source: &SessionSource) -> bool {
+    fn inherits_root_service_tier(&self, turn_context: &TurnContext) -> bool {
+        if turn_context
+            .initial_settings
+            .spawn_service_tier_override()
+            .is_some()
+        {
+            return false;
+        }
         match &self.agent_runtime {
             crate::agent::host::AgentRuntimeServices::Controller => matches!(
-                session_source,
+                turn_context.session_source,
                 SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
             ),
             crate::agent::host::AgentRuntimeServices::Host(_) => {
@@ -4453,7 +4583,7 @@ impl Session {
                     .then(|| self.services.turn_environments.configured_snapshot_now()),
             )
         };
-        if self.inherits_root_service_tier(&turn_context.session_source) {
+        if self.inherits_root_service_tier(&turn_context) {
             let root_service_tier = tokio::select! {
                 biased;
                 tier = crate::agent::host::service_tier(self, settings.selected().service_tier.clone()) => tier,
@@ -4969,9 +5099,12 @@ impl Session {
                 matches!(&installation, CompactedHistoryInstallation::Complete(..));
             let replacement = match installation {
                 CompactedHistoryInstallation::Complete(metadata, _) => {
-                    let context = state
-                        .additional_context
-                        .restore_compacted_items(state.history.annotated_items(), &mut items);
+                    let mut world_state_baseline = world_state_baseline;
+                    if let Some(previous) = state.history.world_state_baseline() {
+                        world_state_baseline.retain_input_context(previous);
+                    }
+                    let context = world_state_baseline
+                        .restore_input_context(state.history.annotated_items(), &mut items);
                     if !context.is_empty() {
                         items = compact::insert_initial_context_before_last_real_user_or_summary(
                             items, context,
@@ -5158,19 +5291,15 @@ impl Session {
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
-    async fn send_raw_response_items(&self, turn_context: &TurnContext, items: &[ResponseItem]) {
+    async fn send_raw_response_items(&self, sub_id: &str, items: &[ResponseItem]) {
         for item in items {
             self.services
                 .rollout_thread_trace
-                .record_history_item_accepted(
-                    &turn_context.sub_id,
-                    item,
-                    /*source_tool_call_id*/ None,
-                );
-            self.send_event(
-                turn_context,
-                EventMsg::RawResponseItem(RawResponseItemEvent { item: item.clone() }),
-            )
+                .record_history_item_accepted(sub_id, item, /*source_tool_call_id*/ None);
+            self.send_event_raw(Event {
+                id: sub_id.to_owned(),
+                msg: EventMsg::RawResponseItem(RawResponseItemEvent { item: item.clone() }),
+            })
             .await;
         }
     }
@@ -5485,31 +5614,38 @@ impl Session {
         let updates = prefix
             .into_iter()
             .map(WorldStateUpdate::prefix_item)
-            .chain(items.into_iter().map(|item| WorldStateUpdate {
-                placement: Placement::Standalone,
-                content: WorldStateUpdateContent::Item(Box::new(item)),
-            }))
+            .chain(items.into_iter().map(WorldStateUpdate::item))
             .collect();
         (updates, snapshot)
     }
 
-    #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) -> bool {
-        if let Some(live_thread) = self.live_thread()
+        Self::append_rollout_items(
+            self.live_thread(),
+            &self.services.local_agent_runtime,
+            self.thread_id,
+            items,
+        )
+        .await
+    }
+
+    #[tracing::instrument(name = "persist_rollout_items", level = "trace", skip_all, fields(item_count = items.len()))]
+    async fn append_rollout_items(
+        live_thread: Option<&LiveThread>,
+        runtime: &crate::agent::control::LocalAgentRuntime,
+        thread_id: ThreadId,
+        items: &[RolloutItem],
+    ) -> bool {
+        if let Some(live_thread) = live_thread
             && let Err(e) = live_thread.append_items(items).await
         {
             error!("failed to record rollout items: {e:#}");
-            if self
-                .services
-                .local_agent_runtime
-                .suspension_root()
-                .is_some()
-            {
-                self.services.local_agent_runtime.record_shutdown_failure(
+            if runtime.suspension_root().is_some() {
+                runtime.record_shutdown_failure(
                     crate::thread_manager::AgentTreeShutdownFailure::operation_failed(
                         "tree_suspension",
                         "append_history",
-                        Some(self.thread_id),
+                        Some(thread_id),
                         crate::thread_manager::thread_store_error_kind(&e),
                     ),
                 );
@@ -6219,6 +6355,17 @@ impl Session {
         self.ensure_rollout_materialized(PersistContext::Standard)
             .await;
         Some(rollout_path)
+    }
+
+    pub(crate) async fn pending_session_start_source(
+        &self,
+    ) -> Option<codex_hooks::SessionStartSource> {
+        self.state
+            .lock()
+            .await
+            .pending_session_start_sources
+            .front()
+            .copied()
     }
 
     pub(crate) async fn take_pending_session_start_source(

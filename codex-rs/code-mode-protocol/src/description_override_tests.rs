@@ -29,18 +29,18 @@ fn exec_override_renders_only_known_literal_placeholders() {
             UNIFIED_IMAGE_HELPER_DESCRIPTION,
         ),
     ] {
-        let (description, _) = build_exec_tool_description_and_definitions(
+        let (description, definitions) = build_exec_tool_description_and_definitions(
             &[],
             &[],
             &BTreeMap::new(),
             /*default_exec_yield_time_ms*/ 4567,
-            /*code_mode_only*/ false,
+            /*code_mode_only*/ true,
             image_detail_visibility,
             DeferredToolDiscovery::Catalog,
-            /*incremental_exec_enabled*/ false,
+            /*incremental_exec_enabled*/ true,
             Some(&CodeModeToolMessages {
                 exec: Some(ToolMessage {
-                    description: Some(" \nDefaults to 10000 ms. {{ default_exec_yield_time_ms }} ms.\n{{ image_helper }}\n{{ unknown }} {{default_exec_yield_time_ms}}\t ".to_string()),
+                    description: Some(" \nDefaults to 10000 ms. {{ default_exec_yield_time_ms }} ms.\n{{ image_helper }}\n{{ unknown }} {{default_exec_yield_time_ms}}\t ".into()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -50,9 +50,10 @@ fn exec_override_renders_only_known_literal_placeholders() {
         assert_eq!(
             description,
             format!(
-                " \nDefaults to 10000 ms. 4567 ms.\n{image_helper}\n{{{{ unknown }}}} {{{{default_exec_yield_time_ms}}}}\t \n\n{DEFERRED_NESTED_TOOLS_GUIDANCE}"
+                " \nDefaults to 10000 ms. 4567 ms.\n{image_helper}\n{{{{ unknown }}}} {{{{default_exec_yield_time_ms}}}}\t \n\n{DEFERRED_NESTED_TOOLS_GUIDANCE}\n\nShared MCP Types:\n```ts\n{MCP_TYPESCRIPT_PREAMBLE}\n```"
             ),
         );
+        assert!(image_helper.starts_with(&format!("`{}`: ", definitions.helper_signatures)));
     }
 }
 
@@ -71,13 +72,11 @@ fn exec_override_preserves_empty_and_whitespace_only_text() {
                 /*incremental_exec_enabled*/ false,
                 Some(&CodeModeToolMessages {
                     exec: Some(ToolMessage {
-                        description: Some(description_override.to_string()),
+                        description: Some(description_override.into()),
                         ..Default::default()
                     }),
-                    deferred_nested_tools_guidance: Some(
-                        "No deferred tools; omit this.".to_string()
-                    ),
-                    mcp_typescript_preamble: Some("No MCP tools; omit this.".to_string()),
+                    deferred_nested_tools_guidance: Some("No deferred tools; omit this.".into()),
+                    mcp_typescript_preamble: Some("No MCP tools; omit this.".into()),
                     ..Default::default()
                 }),
             )
@@ -164,11 +163,11 @@ fn exec_override_preserves_runtime_sections() {
                 /*incremental_exec_enabled*/ false,
                 Some(&CodeModeToolMessages {
                     exec: Some(ToolMessage {
-                        description: Some(String::new()),
+                        description: Some("".into()),
                         ..Default::default()
                     }),
-                    deferred_nested_tools_guidance: guidance.map(str::to_string),
-                    mcp_typescript_preamble: preamble.map(str::to_string),
+                    deferred_nested_tools_guidance: guidance.map(Into::into),
+                    mcp_typescript_preamble: preamble.map(Into::into),
                     ..Default::default()
                 }),
             )
@@ -213,11 +212,11 @@ fn ranked_search_guidance_honors_overrides() {
                 /*incremental_exec_enabled*/ false,
                 Some(&CodeModeToolMessages {
                     exec: Some(ToolMessage {
-                        description: Some(String::new()),
+                        description: Some("".into()),
                         ..Default::default()
                     }),
-                    deferred_nested_tools_guidance: guidance.map(str::to_string),
-                    mcp_typescript_preamble: Some(String::new()),
+                    deferred_nested_tools_guidance: guidance.map(Into::into),
+                    mcp_typescript_preamble: Some("".into()),
                     ..Default::default()
                 }),
             );
@@ -248,7 +247,7 @@ fn mcp_types_stay_stable_when_a_deferred_tool_changes_its_output_schema() {
             DeferredToolDiscovery::Catalog,
             /*incremental_exec_enabled*/ false,
             Some(&CodeModeToolMessages {
-                mcp_typescript_preamble: preamble.map(str::to_string),
+                mcp_typescript_preamble: preamble.map(Into::into),
                 ..Default::default()
             }),
         )
@@ -294,11 +293,11 @@ fn nested_guidance_survives_catalog_changes_and_respects_overrides() {
             /*incremental_exec_enabled*/ false,
             Some(&CodeModeToolMessages {
                 exec: Some(ToolMessage {
-                    description: Some(String::new()),
+                    description: Some("".into()),
                     ..Default::default()
                 }),
-                deferred_nested_tools_guidance: guidance.map(str::to_string),
-                mcp_typescript_preamble: Some(String::new()),
+                deferred_nested_tools_guidance: guidance.map(Into::into),
+                mcp_typescript_preamble: Some("".into()),
                 ..Default::default()
             }),
         )

@@ -25,6 +25,76 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
+async fn deferred_subagent_backfill_replays_parked_request() -> Result<()> {
+    let mut app = make_test_app().await;
+    let root_id = ThreadId::new();
+    attach_thread(&mut app, root_id);
+    app.primary_thread_id = Some(root_id);
+    app.active_thread_id = Some(root_id);
+    let child_id = ThreadId::new();
+    let backend_id = BackendId::new();
+    let (mut cloud, mut commands, _events) =
+        overview_session_stub(backend_id, ThreadParamsMode::Cloud);
+    let child = overview_thread(child_id, Some(root_id), "Child task", ThreadStatus::Idle);
+    let request = ServerRequest::ToolRequestUserInput {
+        request_id: RequestId::Integer(42),
+        params: ToolRequestUserInputParams {
+            thread_id: child_id.to_string(),
+            turn_id: "turn".into(),
+            item_id: "question".into(),
+            questions: Vec::new(),
+            is_blocking: true,
+            auto_resolution_ms: None,
+        },
+    };
+    app.agents_overview.dispatched_requests.insert(
+        child_id,
+        vec![BufferedServerRequest::new(
+            request.clone(),
+            &cloud.request_handle(),
+        )],
+    );
+    app.replay_agents_overview_requests(&cloud, root_id).await;
+    assert!(
+        app.agents_overview
+            .dispatched_requests
+            .contains_key(&child_id)
+    );
+
+    let serve_backfill = async {
+        let list = commands.recv().await.expect("loaded thread list request");
+        assert!(matches!(list.operation, CloudOperation::Request(request)
+            if matches!(request.as_ref(), ClientRequest::ThreadLoadedList { .. })));
+        list.response
+            .send(Ok(Ok(json!({"data": [child_id], "nextCursor": null}))))
+            .unwrap();
+        let read = commands.recv().await.expect("child thread read request");
+        assert!(matches!(read.operation, CloudOperation::Request(request)
+            if matches!(request.as_ref(), ClientRequest::ThreadRead { params, .. }
+                if params.thread_id == child.id && !params.include_turns)));
+        read.response
+            .send(Ok(Ok(json!({"thread": child, "readState": null}))))
+            .unwrap();
+    };
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let backfill = crate::boxed_future!(app.handle_event(
+        &mut tui,
+        &mut cloud,
+        AppEvent::BackfillResumedSubagents {
+            thread_id: root_id,
+            backend_id
+        },
+    ));
+    let (result, ()) = tokio::join!(backfill, serve_backfill);
+    result?;
+    assert!(
+        app.pending_app_server_requests
+            .contains_server_request(&request)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn overview_refresh_grows_visible_history_and_preserves_the_show_more_cursor() {
     let (client, mut commands, _events) = CloudClient::channel(/*capacity*/ 1);
     let handle = AppServerClient::Cloud(client).request_handle();
@@ -135,10 +205,39 @@ async fn overview_return_to_current_chat_cancels_the_cloud_list_and_allows_reope
             .unwrap();
         next_cloud_page(commands, /*cursor*/ None).await
     };
-    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let size = Size::new(/*width*/ 115, /*height*/ 12);
+    let mut tui = crate::tui::test_support::make_test_tui_with_size(size)?;
+    crate::app::test_support::enable_side_retention(&mut app)?;
+    app.local_settings.tui.animations = false;
+    tui.set_owned_screen(/*owned*/ true)?;
     for key in [KeyCode::Esc, KeyCode::Enter] {
+        if key == KeyCode::Enter {
+            // Escape closes the dock. Selection closes the original modal.
+            crate::app::test_support::use_modal_agents_overview(&mut app);
+        }
         app.open_agents_overview(&cloud);
         let held_list = tokio::time::timeout(timeout, next_list(&mut commands)).await?;
+        if key == KeyCode::Esc {
+            let frame = crate::app::test_support::side_frame(&mut app, &mut tui, size)?;
+            let screen = frame
+                .lines()
+                .filter_map(|row| row.split_once('│').map(|(left, _)| left.trim_end()))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .replace(&test_path_display("/tmp/project"), "/tmp/project");
+            insta::assert_snapshot!("initial_discovery_with_current_task", screen);
+            let view = app.agents_overview.workspace.view.as_ref().unwrap();
+            let footers = [30, 31].map(|width| {
+                super::command_center::screen(view, width, size.height)
+                    .lines()
+                    .last()
+                    .unwrap()
+                    .trim()
+                    .to_string()
+            });
+            assert_eq!(footers, ["◌ Loading tasks…", "◌ Loading additional tasks…"]);
+            assert_eq!(app.overview_selected_thread_id(), Some(thread_id));
+        }
         Box::pin(app.handle_tui_event(&mut tui, &mut cloud, TuiEvent::Key(key.into()))).await?;
         if key == KeyCode::Enter {
             tokio::time::timeout(timeout, async {
@@ -157,12 +256,13 @@ async fn overview_return_to_current_chat_cancels_the_cloud_list_and_allows_reope
             .await??;
         }
         assert!(held_list.response.is_closed());
-        assert!(!app.chat_widget.active_view_is(AGENTS_OVERVIEW_VIEW_ID));
+        assert!(app.overview_selected_index().is_none());
     }
 
     // The previous archive was observed, but its unarchive notification was missed.
     app.agents_overview.threads.remove(&thread_id);
     app.agents_overview.removed_threads.insert(thread_id);
+    crate::app::test_support::enable_side_retention(&mut app)?;
     app.open_agents_overview(&cloud);
     let reopened = tokio::time::timeout(timeout, next_list(&mut commands)).await?;
     let mut listed = current.clone();
@@ -204,7 +304,11 @@ async fn overview_return_to_current_chat_cancels_the_cloud_list_and_allows_reope
         )))
         .unwrap();
     finish_overview_refresh(&mut app, &cloud, &mut events).await;
-    assert!(app.chat_widget.active_view_is(AGENTS_OVERVIEW_VIEW_ID));
+    let screen = crate::app::test_support::side_frame(&mut app, &mut tui, size)?;
+    assert!(!screen.contains("Loading tasks"));
+    assert!(!screen.contains("Loading additional tasks"));
+    assert!(screen.contains("? help · esc back"));
+    assert_eq!(app.overview_selected_thread_id(), Some(thread_id));
     assert!(!app.agents_overview.refresh_failed_backends.contains(&owner));
     assert_eq!(
         app.agents_overview.threads[&thread_id],
@@ -627,6 +731,7 @@ async fn check_discovery(mixed_sources: bool) -> Result<()> {
                 thread.name = None;
                 thread.history_mode = ThreadHistoryMode::Paginated;
             }
+            thread.created_at -= 24 - index;
             thread.updated_at += 24 - index;
             thread.recency_at = Some(thread.updated_at);
             thread
@@ -665,6 +770,7 @@ async fn check_discovery(mixed_sources: bool) -> Result<()> {
         let (stream, _) = listener.accept().await?;
         let mut socket = tokio_tungstenite::accept_async(stream).await?;
         let mut cursors = Vec::new();
+        let mut created_first_pages = 0;
         while let Some(Ok(Message::Text(text))) = socket.next().await {
             let JSONRPCMessage::Request(request) = serde_json::from_str(&text)? else {
                 continue;
@@ -702,8 +808,15 @@ async fn check_discovery(mixed_sources: bool) -> Result<()> {
                             .await?;
                         continue;
                     }
-                    assert_eq!(params["sortKey"], "recency_at");
                     let limit = params["limit"].as_u64().unwrap() as usize;
+                    if limit == 100 {
+                        assert!(matches!(
+                            params["sortKey"].as_str(),
+                            Some("updated_at" | "created_at")
+                        ));
+                    } else {
+                        assert_eq!(params["sortKey"], "recency_at");
+                    }
                     assert!(params["searchTerm"].is_null());
                     {
                         let interactive = params["sourceKinds"] == json!([]);
@@ -711,6 +824,12 @@ async fn check_discovery(mixed_sources: bool) -> Result<()> {
                             .iter()
                             .filter(|row| matches!(row.source, SessionSource::Exec) != interactive)
                             .collect();
+                        if params["sortKey"] == "created_at" {
+                            if interactive && params["cursor"].is_null() {
+                                created_first_pages += 1;
+                            }
+                            source_rows.sort_by_key(|row| std::cmp::Reverse(row.created_at));
+                        }
                         if interactive && server_show_reopened_pin.load(Ordering::SeqCst) {
                             source_rows.insert(0, &reopened_pin);
                         }
@@ -754,6 +873,8 @@ async fn check_discovery(mixed_sources: bool) -> Result<()> {
                 ))
                 .await?;
         }
+        // One switch to Created, then one search typed in several edits.
+        assert_eq!(created_first_pages, 2);
         Ok::<_, color_eyre::Report>(cursors)
     });
     let mut session = AppServerSession::new(
@@ -811,6 +932,36 @@ async fn check_discovery(mixed_sources: bool) -> Result<()> {
     assert!(rendered.contains("All 11 "));
     assert!(rendered.contains("1 of 10"), "{rendered}"); // The pinned task has its own group.
     view.handle_key_event(KeyCode::Esc.into());
+
+    // The newest-created task is outside the first screen in updated order.
+    // Retain that screen and its selection while fetching the new first page.
+    view.handle_key_event(KeyCode::Char('/').into());
+    view.handle_paste("Task".into());
+    finish_history_search(&mut app, &mut tui, &mut session, &mut rx).await?;
+    view = app.agents_overview_view(browse_rows(), Some(ids[12]));
+    assert_eq!(view.thread_ids()[view.selected_index().unwrap()], ids[12]);
+    assert!(!view.thread_ids().contains(&ids[23]));
+    let old_id = app.agents_overview.search_id;
+    view.handle_key_event(KeyCode::Tab.into());
+    app.apply_agents_overview_search_page(
+        old_id,
+        owner,
+        Vec::new(),
+        Default::default(),
+        /*ok*/ false,
+    );
+    assert_eq!(view.thread_ids()[view.selected_index().unwrap()], ids[12]);
+    finish_history_search(&mut app, &mut tui, &mut session, &mut rx).await?;
+    view = app.agents_overview_view(browse_rows(), Some(ids[12]));
+    let order: Vec<_> = view
+        .visible_indices()
+        .into_iter()
+        .map(|index| view.rows[index].thread_id)
+        .collect();
+    assert_eq!(&order[..3], &[ids[1], ids[23], ids[22]]);
+    assert_eq!(view.thread_ids()[view.selected_index().unwrap()], ids[12]);
+    view.handle_key_event(KeyCode::Esc.into());
+    assert_eq!(app.agents_overview.threads, browse);
 
     if mixed_sources {
         // Queue Show more behind a metadata refresh before the archive creates a vacancy.
@@ -947,7 +1098,9 @@ async fn check_discovery(mixed_sources: bool) -> Result<()> {
     // Another CLI inserts a matching session ahead of the exhausted browse cursor.
     show_reopened_pin.store(true, Ordering::SeqCst);
     view.handle_key_event(KeyCode::Char('/').into());
-    view.handle_paste("DA7ABA5E-0000-4000".into());
+    for c in "DA7ABA5E-0000-4000".chars() {
+        view.handle_key_event(KeyCode::Char(c).into());
+    }
     finish_history_search(&mut app, &mut tui, &mut session, &mut rx).await?;
     assert_eq!(
         app.agents_overview

@@ -3,18 +3,30 @@ use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_parented_rollout_with_source;
 use app_test_support::create_fake_rollout;
+use codex_app_server_protocol::ClientInfo;
+use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ProjectCreateParams;
+use codex_app_server_protocol::ProjectCreateResponse;
+use codex_app_server_protocol::RawResponseCompletedNotification;
 use codex_app_server_protocol::ReviewDelivery;
 use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ReviewStartResponse;
 use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::SessionSource as ApiSessionSource;
+use codex_app_server_protocol::ThreadClosedNotification;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
+use codex_app_server_protocol::ThreadLoadedListResponse;
+use codex_app_server_protocol::ThreadMetadataUpdateParams;
+use codex_app_server_protocol::ThreadMetadataUpdateResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadUnsubscribeParams;
+use codex_app_server_protocol::ThreadUnsubscribeResponse;
+use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnSteerParams;
@@ -35,10 +47,91 @@ use tokio::time::timeout;
 use super::analytics::captured_analytics_events;
 use super::analytics::mount_analytics_capture;
 use super::analytics::wait_for_analytics_event;
+use super::analytics::wait_for_matching_analytics_event;
 
 // Bazel CI can spend tens of seconds starting app-server subprocesses or
 // processing turn RPCs under load.
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[tokio::test]
+async fn tui_reports_the_current_project_assignment_on_each_turn() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let model = responses::start_mock_server().await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&model.uri())
+        .with_root_config(&format!("chatgpt_base_url = \"{}\"", model.uri()))
+        .write(codex_home.path())?;
+    mount_analytics_capture(&model, codex_home.path()).await?;
+    let mut tui = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    tui.initialize_with_client_info(ClientInfo {
+        name: "codex-tui".into(),
+        version: "1".into(),
+        title: None,
+    })
+    .await?;
+
+    let ProjectCreateResponse { project } = tui
+        .request(|request_id| ClientRequest::ProjectCreate {
+            request_id,
+            params: ProjectCreateParams {
+                name: "Work".into(),
+                roots: vec![],
+                metadata: None,
+                idempotency_key: "work".into(),
+            },
+        })
+        .await?;
+    let ThreadStartResponse { thread, .. } = tui
+        .start_thread(ThreadStartParams {
+            project_id: Some(project.id),
+            ..Default::default()
+        })
+        .await?;
+    let check_turn = async |tui: &mut TestAppServer, prompt: &str, expected: &str| -> Result<()> {
+        let request = responses::mount_sse_once(&model, responses::sse_completed(prompt)).await;
+        let completed = tui
+            .start_turn_and_wait_for_completion(TurnStartParams {
+                thread_id: thread.id.clone(),
+                client_user_message_id: Some(prompt.into()),
+                input: vec![V2UserInput::Text {
+                    text: prompt.into(),
+                    text_elements: vec![],
+                }],
+                ..Default::default()
+            })
+            .await?;
+        let header = request
+            .single_request()
+            .header("x-codex-turn-metadata")
+            .expect("turn metadata");
+        assert_eq!(parse_json_header(&header)["workspace_kind"], expected);
+        let event = wait_for_matching_analytics_event(&model, DEFAULT_READ_TIMEOUT, |event| {
+            event["event_type"] == "codex_turn_event"
+                && event["event_params"]["turn_id"] == completed.turn.id
+        })
+        .await?;
+        assert_eq!(event["event_params"]["workspace_kind"], expected);
+        Ok(())
+    };
+
+    check_turn(&mut tui, "First", "project").await?;
+    check_turn(&mut tui, "Continue", "project").await?;
+
+    let update = tui
+        .send_thread_metadata_update_request(ThreadMetadataUpdateParams {
+            thread_id: thread.id.clone(),
+            project_id: Some(String::new()),
+            git_info: None,
+            daybreak_enabled: None,
+        })
+        .await?;
+    let _: ThreadMetadataUpdateResponse = tui.read_response(update).await?;
+    check_turn(&mut tui, "After move", "projectless").await
+}
 
 #[tokio::test]
 async fn turn_start_forwards_client_metadata_to_responses_request_v2() -> Result<()> {
@@ -110,6 +203,10 @@ async fn turn_start_forwards_client_metadata_to_responses_request_v2() -> Result
     .await??;
 
     let request = response_mock.single_request();
+    assert_eq!(
+        request.header("x-codex-exclude").as_deref(),
+        Some("tools,usage.attribution")
+    );
     let metadata = request
         .header("x-codex-turn-metadata")
         .as_deref()
@@ -624,13 +721,127 @@ async fn turn_steer_updates_client_metadata_on_follow_up_responses_request_v2(
     Ok(())
 }
 
-#[test_case::test_case(false, "none"; "legacy")]
-#[test_case::test_case(true, "none"; "v2 fresh")]
-#[test_case::test_case(true, "all"; "v2 fork")]
+#[tokio::test]
+async fn resumed_closed_subagent_retains_raw_usage_attribution() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .with_model("gpt-5.6-luna")
+        .with_root_config("thread_unload_delay_secs = 0")
+        .with_extra_config("[features.multi_agent_v2]\nenabled = false")
+        .write(codex_home.path())?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let parent = app
+        .start_thread(ThreadStartParams {
+            experimental_raw_events: true,
+            ..Default::default()
+        })
+        .await?
+        .thread;
+    let turn = |thread_id: &str, prompt: &str| TurnStartParams {
+        thread_id: thread_id.to_owned(),
+        input: vec![V2UserInput::Text {
+            text: prompt.to_owned(),
+            text_elements: vec![],
+        }],
+        ..Default::default()
+    };
+    let tool = |name: &str, args: serde_json::Value| {
+        responses::sse(vec![
+            responses::ev_function_call_with_namespace(
+                name,
+                "multi_agent_v1",
+                name,
+                &args.to_string(),
+            ),
+            responses::ev_completed(name),
+        ])
+    };
+    responses::mount_sse_sequence(
+        &server,
+        vec![
+            tool("spawn_agent", json!({"message": "Inspect the example"})),
+            responses::sse_completed("done-1"),
+            responses::sse_completed("done-2"),
+        ],
+    )
+    .await;
+    app.start_turn_and_wait_for_completion(turn(&parent.id, "Spawn a child"))
+        .await?;
+    let child_turn: TurnCompletedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        app.read_notification("turn/completed"),
+    )
+    .await??;
+    let child_id = child_turn.thread_id;
+
+    responses::mount_sse_sequence(
+        &server,
+        vec![
+            tool("close_agent", json!({"target": child_id})),
+            responses::sse_completed("closed"),
+        ],
+    )
+    .await;
+    app.start_turn_and_wait_for_completion(turn(&parent.id, "Close the child"))
+        .await?;
+    // Resume from the child's subscription after both original runtimes are gone.
+    let id = app
+        .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
+            thread_id: parent.id.clone(),
+        })
+        .await?;
+    let _: ThreadUnsubscribeResponse = app.read_response(id).await?;
+    let closed: ThreadClosedNotification =
+        timeout(DEFAULT_READ_TIMEOUT, app.read_notification("thread/closed")).await??;
+    assert_eq!(closed.thread_id, parent.id);
+    let id = app
+        .send_thread_loaded_list_request(Default::default())
+        .await?;
+    let loaded: ThreadLoadedListResponse = app.read_response(id).await?;
+    assert!(loaded.data.is_empty());
+
+    let id = app
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: child_id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadResumeResponse = app.read_response(id).await?;
+    let request = responses::mount_sse_once(&server, responses::sse_completed("resumed")).await;
+    app.clear_message_buffer();
+    app.start_turn_and_wait_for_completion(turn(&child_id, "Continue"))
+        .await?;
+    assert_eq!(
+        request
+            .single_request()
+            .header("x-codex-exclude")
+            .as_deref(),
+        Some("tools")
+    );
+    let raw: RawResponseCompletedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        app.read_notification("rawResponse/completed"),
+    )
+    .await??;
+    assert_eq!(raw.response_id, "resumed");
+    Ok(())
+}
+
+#[test_case::test_case(false, "none", false; "legacy")]
+#[test_case::test_case(true, "none", false; "v2 fresh")]
+#[test_case::test_case(true, "all", false; "v2 fork")]
+#[test_case::test_case(true, "none", true; "v2 fresh with raw events")]
 #[tokio::test]
 async fn subagents_inherit_spawn_metadata_without_live_parent_updates(
     multi_agent_v2: bool,
     fork_turns: &str,
+    experimental_raw_events: bool,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -703,7 +914,10 @@ async fn subagents_inherit_spawn_metadata_without_live_parent_updates(
         .await?;
 
     let thread_req = app_server
-        .send_thread_start_request_with_auto_env(ThreadStartParams::default())
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            experimental_raw_events,
+            ..Default::default()
+        })
         .await?;
     let ThreadStartResponse { thread, .. } =
         timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(thread_req)).await??;
@@ -770,6 +984,17 @@ async fn subagents_inherit_spawn_metadata_without_live_parent_updates(
     )
     .await?;
 
+    let expected_exclusions = if experimental_raw_events {
+        "tools"
+    } else {
+        "tools,usage.attribution"
+    };
+    for handshake in server.handshakes() {
+        assert_eq!(
+            handshake.header("x-codex-exclude").as_deref(),
+            Some(expected_exclusions)
+        );
+    }
     for request in [&child_first, &grandchild] {
         let body = request.body_json();
         let tools = body["input"]

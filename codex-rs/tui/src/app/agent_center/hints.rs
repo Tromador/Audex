@@ -4,22 +4,6 @@ use super::*;
 use crate::key_hint;
 use crate::shortcut_help::Group;
 use crate::shortcut_help::Shortcut;
-use crate::style::footer_hint_label_style;
-
-pub(super) fn hint_line(items: &[(String, String)]) -> Line<'static> {
-    let mut line = Line::default();
-    for (key, label) in items.iter().filter(|(key, _)| !key.is_empty()) {
-        if !line.spans.is_empty() {
-            line.spans.push("  ".dim());
-        }
-        line.spans.extend(key_hint::key_label_spans(key));
-        line.spans.push(Span::styled(
-            format!(" {label}"),
-            footer_hint_label_style().not_bold(),
-        ));
-    }
-    line
-}
 
 impl AgentsOverviewView {
     fn center_list_hint(&self, action: ListAction) -> Option<ShortcutHint> {
@@ -178,6 +162,16 @@ impl AgentsOverviewView {
         {
             hints.push(("?".into(), "help".into()));
         }
+        if state.searching
+            && state.rename_target.is_none()
+            && state.connection_notice.is_none()
+            && self.search_sort_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        {
+            hints.push((
+                "Tab".into(),
+                format!("sort ({})", state.search_sort.label()),
+            ));
+        }
         let cancel = if state.help {
             self.keymap.primary_hint(ListAction::Cancel)
         } else if state.editing_metadata() || self.can_return_to_chat {
@@ -185,7 +179,7 @@ impl AgentsOverviewView {
         } else {
             None
         };
-        if let Some(hint) = cancel {
+        if let Some(hint) = cancel.filter(|hint| self.editing_allows_hint(&state, *hint)) {
             hints.push((hint.display_label(), "back".into()));
         }
         if state.help {
@@ -202,16 +196,15 @@ impl AgentsOverviewView {
                 hints.push((navigation, "move".into()));
             }
         }
-        if let Some(hint) = self.center_list_hint(ListAction::Accept) {
-            hints.push((
-                hint.display_label(),
-                if state.rename_target.is_some() {
-                    "rename"
-                } else {
-                    "open"
-                }
-                .into(),
-            ));
+        if let Some(hint) = self
+            .center_list_hint(ListAction::Accept)
+            .filter(|hint| self.editing_allows_hint(&state, *hint))
+        {
+            let action = match self.selected {
+                _ if state.rename_target.is_some() => "rename",
+                _ => "open",
+            };
+            hints.push((hint.display_label(), action.into()));
         }
         if !state.editing_metadata()
             && let Some(hint) = self

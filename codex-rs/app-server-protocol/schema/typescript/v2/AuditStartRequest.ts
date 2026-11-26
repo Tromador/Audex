@@ -8,7 +8,11 @@ export type AuditStartRequest = { input: AuditInput,
 /**
  * Base directory for the operator's relative paths.
  */
-cwd: string, brief: string, reviewers: Array<AuditReviewer>,
+cwd: string,
+/**
+ * Source conversation for an MCP-backed target preflight; never shown to reviewers.
+ */
+originThreadId?: string, brief: string, reviewers: Array<AuditReviewer>,
 /**
  * Operator-named UTF-8 guidance file, read once at start.
  */

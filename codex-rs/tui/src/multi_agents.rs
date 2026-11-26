@@ -4,6 +4,11 @@
 //! picker entries, and the fast-switch keyboard shortcuts. Higher-level coordination, such as
 //! deciding which thread becomes active or when a thread closes, stays in [`crate::app::App`].
 
+#[path = "multi_agents_history.rs"]
+mod history;
+pub(crate) use history::CollabHistoryCell;
+pub(crate) use history::tool_call_history_cell;
+
 use crate::history_cell::LabeledToolCell;
 use crate::history_cell::WebHyperlinkHistoryCell;
 use crate::style::accent_color;
@@ -61,6 +66,15 @@ pub(crate) struct AgentMetadata {
     pub(crate) agent_nickname: Option<String>,
     /// Agent type shown in brackets when present, for example `worker`.
     pub(crate) agent_role: Option<String>,
+}
+
+impl AgentMetadata {
+    fn nickname(&self) -> Option<&str> {
+        self.agent_nickname
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -204,7 +218,7 @@ pub(crate) fn spawn_request_summary(item: &ThreadItemPayload) -> Option<SpawnReq
     }
 }
 
-pub(crate) fn tool_call_history_cell(
+fn render_tool_call(
     item: &ThreadItemPayload,
     cached_spawn_request: Option<&SpawnRequestSummary>,
     mut agent_metadata: impl FnMut(ThreadId) -> AgentMetadata,
@@ -266,6 +280,15 @@ pub(crate) fn tool_call_history_cell(
                 )
             }
         }),
+        CollabAgentTool::Wait if receiver_thread_ids.is_empty() && agents_states.is_empty() => {
+            let title = match status {
+                CollabAgentToolCallStatus::InProgress => "Waiting",
+                CollabAgentToolCallStatus::Completed => "Waited",
+                CollabAgentToolCallStatus::Failed => "Failed to wait",
+                CollabAgentToolCallStatus::Interrupted => "Interrupted",
+            };
+            Some(collab_event(title_text(title), Vec::new()))
+        }
         CollabAgentTool::Wait => {
             if matches!(status, CollabAgentToolCallStatus::InProgress) {
                 Some(waiting_begin(receiver_thread_ids, &mut agent_metadata))
@@ -508,7 +531,7 @@ fn parse_thread_id(thread_id: &str) -> Option<ThreadId> {
 fn agent_label(thread_id: ThreadId, metadata: &AgentMetadata) -> AgentLabel<'_> {
     AgentLabel {
         thread_id: Some(thread_id),
-        nickname: metadata.agent_nickname.as_deref(),
+        nickname: metadata.nickname(),
         role: metadata.agent_role.as_deref(),
     }
 }
@@ -520,8 +543,7 @@ fn agent_label_line(agent: AgentLabel<'_>) -> HyperlinkLine {
 }
 
 fn append_agent(line: &mut HyperlinkLine, agent: AgentLabel<'_>) {
-    let nickname = agent.nickname.map(str::trim).filter(|n| !n.is_empty());
-    let name = if let Some(nickname) = nickname {
+    let name = if let Some(nickname) = agent.nickname {
         nickname.to_string().bold()
     } else if let Some(id) = agent.thread_id {
         Span::from(id.to_string())
@@ -841,8 +863,33 @@ mod tests {
         )
         .expect("close item renders");
 
+        let waits_without_targets = [
+            CollabAgentToolCallStatus::InProgress,
+            CollabAgentToolCallStatus::Completed,
+            CollabAgentToolCallStatus::Failed,
+            CollabAgentToolCallStatus::Interrupted,
+        ]
+        .map(|status| {
+            tool_call_history_cell(
+                &ThreadItemPayload::CollabAgentToolCall {
+                    id: "wait-without-targets".to_string(),
+                    tool: CollabAgentTool::Wait,
+                    status,
+                    sender_thread_id: sender_thread_id.to_string(),
+                    receiver_thread_ids: Vec::new(),
+                    prompt: None,
+                    model: None,
+                    reasoning_effort: None,
+                    agents_states: HashMap::new(),
+                },
+                /*cached_spawn_request*/ None,
+                |thread_id| metadata_for(thread_id, robie_id, bob_id),
+            )
+            .expect("wait without targets renders")
+        });
         let snapshot = [spawn, send, waiting, finished, close]
             .iter()
+            .chain(&waits_without_targets)
             .map(cell_to_text)
             .collect::<Vec<_>>()
             .join("\n\n");
@@ -950,7 +997,7 @@ mod tests {
     fn resume_cell(
         status: CollabAgentToolCallStatus,
         agent_status: CollabAgentStatus,
-    ) -> LabeledToolCell<WebHyperlinkHistoryCell> {
+    ) -> CollabHistoryCell {
         let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000001")
             .expect("valid sender thread id");
         let robie_id = ThreadId::from_string("00000000-0000-0000-0000-000000000002")

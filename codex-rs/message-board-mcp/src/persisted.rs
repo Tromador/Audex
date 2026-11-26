@@ -1,21 +1,24 @@
 //! Reads persisted membership without starting runtimes or modifying Codex's registry.
-//! Standalone posts use system time; Core notification delivery is a separate integration.
+//! Posts use system time and optionally deliver notices through the existing app-server RPC.
 
 use chrono::DateTime;
 use chrono::Utc;
 use codex_message_board::MessageBoardHost;
 use codex_message_board::NotificationDelivery;
 use codex_message_board::PostPreview;
+use codex_message_board_mcp::AppServerNotifications;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use futures::future::BoxFuture;
 use sqlx::SqlitePool;
+use std::sync::Arc;
 
 pub(super) struct PersistedHost {
     pub registry: SqlitePool,
     pub root: ThreadId,
+    pub app_server: Option<Arc<AppServerNotifications>>,
 }
 
 impl MessageBoardHost for PersistedHost {
@@ -87,10 +90,16 @@ LIMIT 2
 
     fn notify(
         &self,
-        _recipient: ThreadId,
-        _post: PostPreview,
+        recipient: ThreadId,
+        post: PostPreview,
     ) -> BoxFuture<'_, Result<NotificationDelivery>> {
-        Box::pin(async { Ok(NotificationDelivery::SkippedInactive) })
+        Box::pin(async move {
+            let Some(app_server) = &self.app_server else {
+                return Ok(NotificationDelivery::SkippedInactive);
+            };
+            let path = self.agent_path(recipient).await?;
+            app_server.notify(recipient, path, post).await
+        })
     }
 }
 

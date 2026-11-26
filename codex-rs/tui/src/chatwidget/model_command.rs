@@ -23,7 +23,8 @@ struct ModelCommand {
 }
 
 fn parse_model_command_args(args: &str) -> Result<ModelCommandArgs, String> {
-    let parsed = slash_command_args::parse(args, &["--reasoning", "--speed"], &[], &[])?;
+    let parsed =
+        slash_command_args::parse_settings(args, crate::slash_command::SlashCommand::Model)?;
     if let Some(unexpected) = parsed.positionals.get(1) {
         return Err(format!(
             "Unexpected argument '{unexpected}'. Use '--reasoning=<level>' or '--speed=<tier>'."
@@ -134,7 +135,7 @@ fn resolve_model_command(chat: &ChatWidget, args: &str) -> Result<ModelCommand, 
         .clone()
         .unwrap_or_else(|| chat.selected_model().to_owned());
     let Some(model) =
-        chat.model_catalog.models.iter().find(|model| {
+        chat.model_catalog.models().iter().find(|model| {
             model.model == model_name && (args.model.is_none() || model.show_in_picker)
         })
     else {

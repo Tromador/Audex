@@ -38,11 +38,14 @@ impl App {
                 } else {
                     match self.chat_widget.paste_image(context, text_fallback) {
                         Ok(()) => {}
-                        Err(PasteImageError::NoImage(_)) if text_fallback.is_some() => {
+                        Err(err) if text_fallback.is_some() && err.allows_text_fallback() => {
+                            let image_error = matches!(err, PasteImageError::ImageReadFailed(_))
+                                .then(|| format!("Failed to paste image: {err}"));
                             self.start_clipboard_text_paste(
                                 tui,
                                 PasteSource::Clipboard,
                                 text_fallback,
+                                image_error,
                             );
                         }
                         Err(err) => {
@@ -101,7 +104,7 @@ impl App {
                 if self.backtrack.overlay_preview_active {
                     self.close_transcript_overlay(tui);
                 }
-                self.transcript_view.jump_to_latest();
+                self.transcript_view.finish_select_copy();
                 self.backtrack.select_exit_key = pending_exit_key;
             }
         }

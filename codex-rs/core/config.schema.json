@@ -934,6 +934,9 @@
             "code_mode_interrupt": {
               "type": "boolean"
             },
+            "code_mode_mcp_result_dedup": {
+              "type": "boolean"
+            },
             "code_mode_only": {
               "type": "boolean"
             },
@@ -1010,6 +1013,9 @@
               "type": "boolean"
             },
             "default_mode_request_user_input": {
+              "type": "boolean"
+            },
+            "defer_image_generation": {
               "type": "boolean"
             },
             "defer_mailbox_preemption": {
@@ -1093,6 +1099,9 @@
             "guardian_include_additional_context": {
               "type": "boolean"
             },
+            "guardian_native_action_framing": {
+              "type": "boolean"
+            },
             "guardian_native_multi_agent_history": {
               "type": "boolean"
             },
@@ -1122,6 +1131,9 @@
             },
             "guardianv3": {
               "$ref": "#/definitions/FeatureToml_for_GuardianV3ConfigToml"
+            },
+            "guardianv3_shadow": {
+              "type": "boolean"
             },
             "hooks": {
               "type": "boolean"
@@ -1370,7 +1382,7 @@
               "type": "boolean"
             },
             "send_message_to_user_async": {
-              "type": "boolean"
+              "$ref": "#/definitions/FeatureToml_for_SendMessageToUserAsyncConfigToml"
             },
             "shell_snapshot": {
               "type": "boolean"
@@ -1412,6 +1424,9 @@
               "type": "boolean"
             },
             "standalone_web_search": {
+              "type": "boolean"
+            },
+            "statsig_gates": {
               "type": "boolean"
             },
             "steer": {
@@ -1992,6 +2007,16 @@
         },
         {
           "$ref": "#/definitions/RuntimeAgentInstancesConfigToml"
+        }
+      ]
+    },
+    "FeatureToml_for_SendMessageToUserAsyncConfigToml": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/definitions/SendMessageToUserAsyncConfigToml"
         }
       ]
     },
@@ -2662,6 +2687,13 @@
         },
         {
           "properties": {
+            "additionalContextLimit": {
+              "description": "Approximate token threshold for spilling plaintext `additionalContext` to disk. Defaults to 2,500. For MCP hooks, `0` and values above 10,000 trigger a warning and use 10,000. Command hooks can disable spilling with `0` or set a higher threshold. The MCP ceiling mirrors the current default tool-output budget and may change in the future. Encrypted hook output has a separate byte limit.",
+              "format": "uint",
+              "maximum": 10000.0,
+              "minimum": 1.0,
+              "type": "integer"
+            },
             "input": {
               "additionalProperties": true,
               "default": {},
@@ -3508,6 +3540,10 @@
         },
         "expose_spawn_agent_model_overrides": {
           "description": "Exposes `model` and `reasoning_effort` on the multi-agent v2 spawn tool and adds corresponding guidance to root and subagent usage hints.",
+          "type": "boolean"
+        },
+        "expose_spawn_agent_service_tier": {
+          "description": "Allow V1 and V2 `spawn_agent` to select a `service_tier` for one child. Defaults to false.",
           "type": "boolean"
         },
         "hide_spawn_agent_metadata": {
@@ -4713,9 +4749,6 @@
         },
         "version": {
           "$ref": "#/definitions/RealtimeConversationVersion"
-        },
-        "voice": {
-          "$ref": "#/definitions/RealtimeVoice"
         }
       },
       "type": "object"
@@ -4724,46 +4757,6 @@
       "enum": [
         "webrtc",
         "websocket"
-      ],
-      "type": "string"
-    },
-    "RealtimeVoice": {
-      "enum": [
-        "alloy",
-        "arbor",
-        "ash",
-        "aube",
-        "ballad",
-        "breeze",
-        "bubbie",
-        "cedar",
-        "coral",
-        "cove",
-        "echo",
-        "ember",
-        "haetsal",
-        "hanul",
-        "himari",
-        "juniper",
-        "leher",
-        "maple",
-        "marin",
-        "miko",
-        "neer",
-        "porto",
-        "rindo",
-        "rio",
-        "rivage",
-        "sage",
-        "selva",
-        "shimmer",
-        "sol",
-        "sonna",
-        "spruce",
-        "tinta",
-        "vale",
-        "verse",
-        "viola"
       ],
       "type": "string"
     },
@@ -5041,6 +5034,25 @@
             "$ref": "#/definitions/AbsolutePathBuf"
           },
           "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "SendMessageToUserAsyncConfigToml": {
+      "additionalProperties": false,
+      "description": "Controls which agents can send async user messages and how they call the tool.",
+      "properties": {
+        "direct_only": {
+          "description": "Keep async user messages top-level only (default). Set to false to follow the session's tool mode.",
+          "type": "boolean"
+        },
+        "root_agent": {
+          "description": "Sets the root agent's feature flag, just like the plain boolean shorthand. The model catalog can still enable the tool for the root when this is false.",
+          "type": "boolean"
+        },
+        "subagents": {
+          "description": "Allow spawned subagents to use the tool independently of `root_agent` and the model catalog. Defaults to false.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -5510,8 +5522,8 @@
           "type": "boolean"
         },
         "collapse_turn_details": {
-          "default": false,
-          "description": "Summarize tool calls and collapse completed turns in the full-screen transcript. Defaults to `false`.",
+          "default": true,
+          "description": "Summarize tool calls and collapse completed turns in the full-screen transcript. Defaults to `true`.",
           "type": "boolean"
         },
         "copy_on_select": {
@@ -8312,6 +8324,9 @@
         "code_mode_interrupt": {
           "type": "boolean"
         },
+        "code_mode_mcp_result_dedup": {
+          "type": "boolean"
+        },
         "code_mode_only": {
           "type": "boolean"
         },
@@ -8388,6 +8403,9 @@
           "type": "boolean"
         },
         "default_mode_request_user_input": {
+          "type": "boolean"
+        },
+        "defer_image_generation": {
           "type": "boolean"
         },
         "defer_mailbox_preemption": {
@@ -8471,6 +8489,9 @@
         "guardian_include_additional_context": {
           "type": "boolean"
         },
+        "guardian_native_action_framing": {
+          "type": "boolean"
+        },
         "guardian_native_multi_agent_history": {
           "type": "boolean"
         },
@@ -8500,6 +8521,9 @@
         },
         "guardianv3": {
           "$ref": "#/definitions/FeatureToml_for_GuardianV3ConfigToml"
+        },
+        "guardianv3_shadow": {
+          "type": "boolean"
         },
         "hooks": {
           "type": "boolean"
@@ -8748,7 +8772,7 @@
           "type": "boolean"
         },
         "send_message_to_user_async": {
-          "type": "boolean"
+          "$ref": "#/definitions/FeatureToml_for_SendMessageToUserAsyncConfigToml"
         },
         "shell_snapshot": {
           "type": "boolean"
@@ -8790,6 +8814,9 @@
           "type": "boolean"
         },
         "standalone_web_search": {
+          "type": "boolean"
+        },
+        "statsig_gates": {
           "type": "boolean"
         },
         "steer": {

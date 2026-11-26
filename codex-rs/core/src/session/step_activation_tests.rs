@@ -2,6 +2,7 @@ use super::*;
 use crate::McpRefreshReason;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::agents_md_manager::SessionInstructions;
+use crate::context::UserGoalUpdate;
 use crate::session::Submission;
 use crate::session::handlers::submission_loop;
 use crate::session::step_context::StepContext;
@@ -48,6 +49,7 @@ use codex_protocol::openai_models::ModelTokenBudgetConfig;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::TurnAbortReason;
 use pretty_assertions::assert_eq;
@@ -418,6 +420,77 @@ impl ModelsManager for GatedModelsManager {
     }
 }
 
+#[tokio::test]
+async fn thread_metadata_and_goal_recording_do_not_resolve_the_selected_model() {
+    let (mut session, _) = make_session_and_context().await;
+    let (tx_event, rx_event) = async_channel::unbounded();
+    session.tx_event = tx_event;
+    let (models, lookup) = GatedModelsManager::new(activation_models());
+    session.services.models_manager = models;
+    let configuration = &mut session.state.get_mut().session_configuration;
+    let settings = Arc::make_mut(&mut configuration.step_settings);
+    settings.collaboration_mode = settings.collaboration_mode.with_updates(
+        Some(MODEL_B.to_owned()),
+        /*effort*/ None,
+        /*developer_instructions*/ None,
+    );
+    settings.service_tier = Some("unsupported".into());
+
+    // The first lookup of MODEL_B blocks until we release it.
+    let local = tokio::select! {
+        snapshot = session.configured_snapshot() => snapshot,
+        _ = lookup.started.notified() => panic!("thread metadata requested model info"),
+    };
+    assert_eq!(local.model, MODEL_B);
+    assert_eq!(local.service_tier.as_deref(), Some("unsupported"));
+
+    let view = tokio::select! {
+        settings = session.thread_view_settings() => settings,
+        _ = lookup.started.notified() => panic!("list settings requested model info"),
+    };
+    assert_eq!(
+        view,
+        crate::ThreadViewSettings {
+            model: local.model.clone(),
+            reasoning_effort: local.reasoning_effort.clone(),
+            environments: local
+                .environment_selections()
+                .iter()
+                .map(Into::into)
+                .collect(),
+            session_source: local.session_source.clone(),
+        },
+    );
+
+    let update = UserGoalUpdate::Set {
+        objective: Some("Keep the existing tests".into()),
+        status: None,
+    };
+    tokio::select! {
+        result = session.record_user_goal_update(update) => result.expect("record goal"),
+        _ = lookup.started.notified() => panic!("goal recording requested model info"),
+    }
+    let event = rx_event.try_recv().expect("goal event");
+    let EventMsg::RawResponseItem(raw) = event.msg else {
+        panic!("expected raw goal instruction");
+    };
+    assert_eq!(raw.item.turn_id(), Some(event.id.as_str()));
+    assert!(
+        UserGoalUpdate::message_text(&raw.item)
+            .unwrap()
+            .contains("Keep the existing tests")
+    );
+    assert_eq!(
+        session.clone_history().await.raw_items().last(),
+        Some(&raw.item)
+    );
+
+    lookup.release();
+    let effective = session.thread_config_snapshot().await;
+    assert_eq!(effective.model, local.model);
+    assert_eq!(effective.service_tier, None);
+}
+
 struct ActivationFixture {
     session: Arc<Session>,
     turn: Arc<TurnContext>,
@@ -542,9 +615,9 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
             enabled: false,
             use_history_notes_extension: false,
             reminder_threshold_tokens: 2_000,
-            reminder_message_template: "{n_remaining} tokens remain.".to_string(),
-            guidance_message: format!("Guidance for {}.", model.slug),
-            auto_compact_fallback_prompt: "Save state before rollover.".to_string(),
+            reminder_message_template: "{n_remaining} tokens remain.".into(),
+            guidance_message: format!("Guidance for {}.", model.slug).into(),
+            auto_compact_fallback_prompt: "Save state before rollover.".into(),
             auto_compact_fallback_buffer_tokens: 4_000,
         });
     }
@@ -569,7 +642,7 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
         .model_messages
         .as_mut()
         .expect("model messages")
-        .instructions_template = Some("Destination-model instructions.".to_string());
+        .instructions_template = Some("Destination-model instructions.".into());
     let expected_destination = destination.clone();
     let ActivationFixture {
         session,
@@ -1359,8 +1432,8 @@ async fn parent_fallback_policy_uses_both_config_lifetimes(
     let mut live_config = admitted_config.clone();
     live_config.guardian_policy_config = live_policy.map(str::to_string);
     let (mut admitted, mut destination) = safety_models();
-    parent_review_messages(&mut admitted).policy = Some("catalog policy A".to_string());
-    parent_review_messages(&mut destination).policy = Some("catalog policy B".to_string());
+    parent_review_messages(&mut admitted).policy = Some("catalog policy A".into());
+    parent_review_messages(&mut destination).policy = Some("catalog policy B".into());
     assert_eq!(
         check_legacy_model_safety(
             &admitted,
@@ -1387,24 +1460,24 @@ async fn parent_fallback_preserves_explicit_empty_and_bundled_defaults() {
     let check = |destination: &CatalogModel| {
         check_legacy_model_safety(&admitted, &admitted, destination, &config, &config)
     };
-    parent_review_messages(&mut destination).policy = Some(defaults.policy.to_string());
+    parent_review_messages(&mut destination).policy = Some(defaults.policy.into());
     parent_review_messages(&mut destination).policy_template =
-        Some(defaults.policy_template.to_string());
+        Some(defaults.policy_template.into());
     assert_eq!(check(&destination), Ok(()));
-    parent_review_messages(&mut destination).policy_template = Some(String::new());
+    parent_review_messages(&mut destination).policy_template = Some("".into());
     assert_eq!(
         check(&destination),
         Err("the destination changes the Guardian parent-fallback policy template".to_string())
     );
     parent_review_messages(&mut destination).policy_template = None;
-    parent_review_messages(&mut destination).policy = Some(String::new());
+    parent_review_messages(&mut destination).policy = Some("".into());
     assert_eq!(
         check(&destination),
         Err("the destination changes the Guardian parent-fallback policy".to_string())
     );
     parent_review_messages(&mut destination).policy = None;
     assert_eq!(check(&destination), Ok(()));
-    parent_review_messages(&mut destination).node_repl_policy = Some(String::new());
+    parent_review_messages(&mut destination).node_repl_policy = Some("".into());
     assert_eq!(
         check(&destination),
         Err("the destination changes the Guardian parent-fallback node REPL policy".to_string())
@@ -1418,10 +1491,10 @@ async fn unchanged_explicit_reviewer_does_not_use_parent_policy() {
     for model in [&mut admitted, &mut destination] {
         model.auto_review_model_override = Some("shared-reviewer".to_string());
     }
-    parent_review_messages(&mut admitted).policy = Some("catalog policy A".to_string());
-    parent_review_messages(&mut destination).policy = Some("catalog policy B".to_string());
-    parent_review_messages(&mut destination).policy_template = Some(String::new());
-    parent_review_messages(&mut destination).node_repl_policy = Some(String::new());
+    parent_review_messages(&mut admitted).policy = Some("catalog policy A".into());
+    parent_review_messages(&mut destination).policy = Some("catalog policy B".into());
+    parent_review_messages(&mut destination).policy_template = Some("".into());
+    parent_review_messages(&mut destination).node_repl_policy = Some("".into());
     assert_eq!(
         check_legacy_model_safety(
             &admitted,
@@ -1435,7 +1508,7 @@ async fn unchanged_explicit_reviewer_does_not_use_parent_policy() {
 }
 
 #[test_case(GuardianV2ModelConfig {
-    classifier_instructions: Some("Review the complete action.".to_string()),
+    classifier_instructions: Some("Review the complete action.".into()),
     ..Default::default()
 }; "classifier instructions")]
 #[test_case(GuardianV2ModelConfig {
@@ -1448,7 +1521,7 @@ async fn unchanged_explicit_reviewer_does_not_use_parent_policy() {
 }; "classifier effort")]
 #[test_case(GuardianV2ModelConfig {
     transcript: Some(GuardianV2TranscriptModelConfig {
-        sources: Some(vec!["reasoning".to_string()]),
+        sources: Some(vec!["reasoning".into()]),
         ..Default::default()
     }),
     ..Default::default()

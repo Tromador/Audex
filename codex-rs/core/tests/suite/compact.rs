@@ -1,9 +1,15 @@
 use anyhow::Result;
 use anyhow::anyhow;
+use codex_config::LoaderOverrides;
+use codex_config::loader::load_guardian_policy_snapshot;
+use codex_config::test_support::CloudConfigBundleFixture;
+use codex_core::ConfigRefreshOutcome;
 use codex_core::TurnInputRequest;
+use codex_core::TurnStartOptions;
 use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_core::compact::SUMMARY_PREFIX;
 use codex_core::config::Config;
+use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_login::CodexAuth;
@@ -26,6 +32,7 @@ use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AdditionalContextEntry;
 use codex_protocol::protocol::AdditionalContextKind;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
@@ -49,6 +56,8 @@ use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::mount_models_once;
 use core_test_support::responses::strip_response_item_ids_from_json;
 use core_test_support::skip_if_no_network;
+use core_test_support::streaming_sse::StreamingSseChunk;
+use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
@@ -917,6 +926,86 @@ async fn compact_hooks_respect_matchers_and_post_runs_after_compaction() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guardian_rejected_compaction_leaves_the_active_turn_running() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let (server, _) = start_streaming_sse_server(vec![vec![StreamingSseChunk {
+        gate: Some(gate),
+        body: sse(vec![ev_completed("active-turn")]),
+    }]])
+    .await;
+    let test = test_codex()
+        .with_config(|config| config.features.disable(Feature::TokenBudget).unwrap())
+        .build_with_streaming_server(&server)
+        .await?;
+    let codex = &test.codex;
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Keep this turn running".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    server.wait_for_request_count(/*count*/ 1).await;
+
+    let model = &test.session_configured.model;
+    let requirements = CloudConfigBundleFixture::loader_with_enterprise_requirement(format!(
+        "allowed_approvals_reviewers = ['user']\n[auto_review]\nrequired_on_models = [{model:?}]"
+    ));
+    let policy = load_guardian_policy_snapshot(
+        LOCAL_FS.as_ref(),
+        test.config.codex_home.as_path(),
+        &LoaderOverrides::without_managed_config_for_tests(),
+        &requirements,
+        /*revision*/ 1,
+    )
+    .await?;
+    assert_eq!(
+        codex.refresh_guardian_policy(&policy).await,
+        ConfigRefreshOutcome::Rejected
+    );
+
+    codex.submit(Op::Compact).await?;
+    let rejection = wait_for_event(codex, |event| {
+        matches!(event, EventMsg::Warning(warning) if warning.message.starts_with("Cannot start /compact."))
+            || matches!(event, EventMsg::TurnAborted(_) | EventMsg::TurnComplete(_) | EventMsg::Error(_))
+    })
+    .await;
+    let EventMsg::Warning(rejection) = rejection else {
+        anyhow::bail!(
+            "expected a compaction rejection while the turn was active, got {rejection:?}"
+        );
+    };
+    assert_eq!(
+        rejection.message,
+        format!("Cannot start /compact. To use model `{model}`, you need to use auto review.")
+    );
+    release.send(()).expect("active request is still sampling");
+    let outcome = wait_for_event(codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_))
+    })
+    .await;
+    assert!(
+        matches!(&outcome, EventMsg::TurnComplete(done) if done.error.is_none()),
+        "{outcome:?}"
+    );
+
+    codex.submit(Op::Compact).await?;
+    let idle_rejection = wait_for_event(codex, |event| {
+        matches!(event, EventMsg::Error(_) | EventMsg::Warning(_))
+    })
+    .await;
+    let EventMsg::Error(idle_rejection) = idle_rejection else {
+        anyhow::bail!("expected an idle compaction error, got {idle_rejection:?}");
+    };
+    assert_eq!(idle_rejection.message, rejection.message);
+    assert_eq!(
+        codex.agent_status().await,
+        AgentStatus::Errored(rejection.message)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_compact_uses_custom_prompt() {
     skip_if_no_network!();
 
@@ -1050,12 +1139,13 @@ async fn additional_context_survives_compaction(remote: bool) -> Result<()> {
     let untrusted = |value: &str| {
         AdditionalContextEntry::new(value.to_owned(), AdditionalContextKind::Untrusted)
     };
+    let app = "🧭".repeat(10_000);
     let mut context = BTreeMap::from([
         ("page".to_owned(), untrusted("old selection")),
         ("removed".to_owned(), untrusted("closed tab")),
         (
             "app".to_owned(),
-            AdditionalContextEntry::new("editor".to_owned(), AdditionalContextKind::Application),
+            AdditionalContextEntry::new(app.clone(), AdditionalContextKind::Application),
         ),
     ]);
     let submit = async |prompt: &str, context| -> Result<()> {
@@ -1094,9 +1184,9 @@ async fn additional_context_survives_compaction(remote: bool) -> Result<()> {
     let app_messages = follow_up
         .message_input_texts("developer")
         .into_iter()
-        .filter(|text| text == "<app>editor</app>")
+        .filter(|text| text.starts_with("<app>"))
         .collect::<Vec<_>>();
-    assert_eq!(app_messages, ["<app>editor</app>"]);
+    assert_eq!(app_messages, [format!("<app>{app}</app>")]);
     // The context belongs to the compacted window, before the preserved second prompt.
     let input = follow_up.input();
     let second_prompt = input
@@ -3779,6 +3869,12 @@ async fn pre_sampling_compact_advised_errors_fall_back_then_retry_on_selected_mo
     let server = MockServer::start().await;
     let previous_model = "gpt-5.4";
     let selected_model = "gpt-5.2";
+    let output_schema = json!({
+        "type": "object",
+        "properties": {"passed": {"type": "boolean"}},
+        "required": ["passed"],
+        "additionalProperties": false,
+    });
     let _models_mock = mount_models_once(
         &server,
         ModelsResponse {
@@ -3794,7 +3890,7 @@ async fn pre_sampling_compact_advised_errors_fall_back_then_retry_on_selected_mo
         .set_body_json(json!({ "error": { "code": "server_is_overloaded" } }));
     let mut responses = vec![
         sse_response(sse(vec![
-            ev_assistant_message("m1", "before switch"),
+            ev_assistant_message("m1", r#"{"passed":true}"#),
             ev_completed_with_tokens("r1", /*total_tokens*/ 120_000),
         ])),
         overload.clone(), // Old model: initial attempt and two retries.
@@ -3806,7 +3902,7 @@ async fn pre_sampling_compact_advised_errors_fall_back_then_retry_on_selected_mo
         responses.extend([
             sse_response(remote_v2_compaction_response()),
             sse_response(sse(vec![
-                ev_assistant_message("m3", "after switch"),
+                ev_assistant_message("m3", r#"{"passed":true}"#),
                 ev_completed_with_tokens("r3", /*total_tokens*/ 100),
             ])),
         ]);
@@ -3826,11 +3922,17 @@ async fn pre_sampling_compact_advised_errors_fall_back_then_retry_on_selected_mo
         .await
         .expect("build codex");
     test.codex
-        .start_or_steer_turn(disabled_permission_user_turn(
-            "before switch",
-            test.cwd.path().to_path_buf(),
-            previous_model.to_string(),
-        ))
+        .start_or_steer_turn(
+            disabled_permission_user_turn(
+                "before switch",
+                test.cwd.path().to_path_buf(),
+                previous_model.to_string(),
+            )
+            .on_start(TurnStartOptions {
+                final_output_json_schema: Some(output_schema.clone()),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("submit first turn");
     wait_for_event(&test.codex, |event| {
@@ -3838,11 +3940,17 @@ async fn pre_sampling_compact_advised_errors_fall_back_then_retry_on_selected_mo
     })
     .await;
     test.codex
-        .start_or_steer_turn(disabled_permission_user_turn(
-            "after switch",
-            test.cwd.path().to_path_buf(),
-            selected_model.to_string(),
-        ))
+        .start_or_steer_turn(
+            disabled_permission_user_turn(
+                "after switch",
+                test.cwd.path().to_path_buf(),
+                selected_model.to_string(),
+            )
+            .on_start(TurnStartOptions {
+                final_output_json_schema: Some(output_schema.clone()),
+                ..Default::default()
+            }),
+        )
         .await
         .expect("submit selected-model turn");
     if selected_model_failures < 3 {
@@ -3887,6 +3995,26 @@ async fn pre_sampling_compact_advised_errors_fall_back_then_retry_on_selected_mo
         expected_models.push(selected_model); // Sampling after compaction succeeds.
     }
     assert_eq!(actual_models, expected_models);
+    let expected_format = json!({
+        "type": "json_schema",
+        "name": "codex_output_schema",
+        "strict": true,
+        "schema": output_schema,
+    });
+    let mut expected_formats = vec![expected_format.clone(); 4];
+    expected_formats.extend(vec![Value::Null; 3]);
+    if selected_model_failures < 3 {
+        expected_formats.push(expected_format);
+    }
+    assert_eq!(
+        request_log
+            .requests()
+            .iter()
+            .map(|request| request.body_json()["text"]["format"].clone())
+            .collect::<Vec<_>>(),
+        expected_formats,
+        "compaction retries must use each model's capability without changing normal sampling",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4768,9 +4896,10 @@ async fn auto_compact_persists_rollout_entries() {
                 turn_context_count += 1;
             }
             RolloutItem::Compacted(_) => saw_compaction = true,
-            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(applied))
-                if saw_compaction && checkpoint.is_none() =>
-            {
+            RolloutItem::EventMsg {
+                event: EventMsg::ThreadSettingsApplied(applied),
+                ..
+            } if saw_compaction && checkpoint.is_none() => {
                 checkpoint = Some((applied.thread_id, applied.thread_settings));
             }
             _ => {}

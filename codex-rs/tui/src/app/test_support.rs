@@ -15,6 +15,16 @@ use codex_models_manager::test_support::get_model_offline_for_tests;
 pub(crate) use super::cloud_switch_wait::ClipboardHandoff;
 pub(crate) use super::cloud_switch_wait::wait_for_cloud_switch;
 
+/// Opt in to testing the original Command Center modal through the chat widget.
+pub(super) fn use_modal_agents_overview(app: &mut App) {
+    app.config
+        .features
+        .disable(Feature::TuiWorkspace)
+        .expect("disable TUI workspace for the modal fixture");
+    app.cli_kv_overrides
+        .push(("features.tui_workspace".to_owned(), false.into()));
+}
+
 pub(super) fn enable_side_retention(app: &mut App) -> Result<()> {
     app.config.features.enable(Feature::TuiWorkspace)?;
     app.local_settings.transcript_mode = crate::transcript_mode::TranscriptMode::Owned;
@@ -47,6 +57,7 @@ pub(crate) async fn make_test_app() -> Box<App> {
         statusline_metrics: Default::default(),
         provider_writes: HashMap::new(),
         feature_write_lock: Arc::default(),
+        voice_settings_pending: false,
         config_notification_test_generation: 0,
         config_notification_test_pending: None,
         model_catalog: chat_widget.model_catalog(),
@@ -90,6 +101,7 @@ pub(crate) async fn make_test_app() -> Box<App> {
         transcript_reflow: TranscriptReflowState::default(),
         initial_history_replay_buffer: None,
         pending_thread_switch_resets: 0,
+        pending_input_drain: None,
         scrollback_has_older_history: false,
         enhanced_keys_supported: false,
         keymap: crate::keymap::RuntimeKeymap::defaults(),
@@ -112,7 +124,7 @@ pub(crate) async fn make_test_app() -> Box<App> {
             platform_default: true,
             ssh: false,
             wsl: false,
-            vscode: crate::tui::VscodeDetection::Other,
+            owner: crate::terminal_capabilities::PasteOwner::Application,
         },
         reconnect: Default::default(),
         daemon_cli_executable: None,
@@ -136,6 +148,7 @@ pub(crate) async fn make_test_app() -> Box<App> {
         side_threads: HashMap::new(),
         saved_openings: Default::default(),
         sidebars: HashMap::new(),
+        model_preview_load: None,
         side_companions: HashMap::new(),
         zoomed_thread: None,
         exact_sidebar_width: None,
@@ -145,7 +158,6 @@ pub(crate) async fn make_test_app() -> Box<App> {
         sidebar_press: None,
         abandoned_side_threads: HashSet::new(),
         active_thread_id: None,
-        active_thread_rx: None,
         primary_thread_id: None,
         last_subagent_backfill_attempt: None,
         primary_session_configured: None,

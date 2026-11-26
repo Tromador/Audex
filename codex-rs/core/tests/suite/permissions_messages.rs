@@ -90,8 +90,8 @@ fn model_with_approval_messages(
     let mut model = model_info_from_slug(slug);
     model.model_messages = Some(ModelMessages {
         approvals: Some(ApprovalMessages {
-            on_request: Some(on_request.to_string()),
-            on_request_auto_review: Some(on_request_auto_review.to_string()),
+            on_request: Some(on_request.into()),
+            on_request_auto_review: Some(on_request_auto_review.into()),
             ..Default::default()
         }),
         ..Default::default()
@@ -189,9 +189,9 @@ async fn catalog_approval_instruction_parts_are_sent_in_initial_permissions(
     .await;
     let model_slug = "catalog-approvals-model";
     let heading =
-        |value: &str| (!matches!(case, ApprovalInstructionCase::Absent)).then(|| value.to_string());
+        |value: &str| (!matches!(case, ApprovalInstructionCase::Absent)).then(|| value.into());
     let sandbox = PermissionMessages {
-        read_only: Some(String::new()),
+        read_only: Some("".into()),
         ..Default::default()
     };
     let mut model = model_info_from_slug(model_slug);
@@ -199,7 +199,7 @@ async fn catalog_approval_instruction_parts_are_sent_in_initial_permissions(
     model.model_messages = Some(ModelMessages {
         approvals: Some(ApprovalMessages {
             on_request_auto_review: matches!(case, ApprovalInstructionCase::Complete)
-                .then(|| "Complete catalog approval instructions".to_string()),
+                .then(|| "Complete catalog approval instructions".into()),
             request_permissions: heading("Catalog permission tool"),
             auto_review_suffix: heading("Catalog automatic review"),
             ..Default::default()
@@ -342,7 +342,7 @@ async fn catalog_non_on_request_approval_messages_are_sent_in_initial_permission
         (
             AskForApproval::Never,
             ApprovalMessages {
-                never: Some("catalog never approval instructions".to_string()),
+                never: Some("catalog never approval instructions".into()),
                 ..Default::default()
             },
             "catalog never approval instructions",
@@ -351,7 +351,7 @@ async fn catalog_non_on_request_approval_messages_are_sent_in_initial_permission
         (
             AskForApproval::UnlessTrusted,
             ApprovalMessages {
-                unless_trusted: Some("catalog unless-trusted approval instructions".to_string()),
+                unless_trusted: Some("catalog unless-trusted approval instructions".into()),
                 ..Default::default()
             },
             "catalog unless-trusted approval instructions",
@@ -412,7 +412,7 @@ async fn catalog_permission_message_is_sent_initially_and_after_model_change() -
         PermissionMessages {
             danger_full_access: None,
             workspace_write: None,
-            read_only: Some("model A permissions: {{ network_access }}".to_string()),
+            read_only: Some("model A permissions: {{ network_access }}".into()),
             approved_prefixes: None,
             writable_root: None,
             writable_roots: None,
@@ -424,7 +424,7 @@ async fn catalog_permission_message_is_sent_initially_and_after_model_change() -
         PermissionMessages {
             danger_full_access: None,
             workspace_write: None,
-            read_only: Some("model B permissions: {{ network_access }}".to_string()),
+            read_only: Some("model B permissions: {{ network_access }}".into()),
             approved_prefixes: None,
             writable_root: None,
             writable_roots: None,
@@ -477,8 +477,15 @@ async fn catalog_permission_message_is_sent_initially_and_after_model_change() -
     Ok(())
 }
 
+#[test_case(None, /*scoped*/ false; "keeps_bundled_unscoped_guidance")]
+#[test_case(None, /*scoped*/ true; "keeps_bundled_scoped_guidance")]
+#[test_case(Some(""), /*scoped*/ false; "omits_blank_unscoped_guidance")]
+#[test_case(Some(""), /*scoped*/ true; "omits_blank_scoped_guidance")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn empty_catalog_permission_message_preserves_approval_instructions() -> Result<()> {
+async fn empty_catalog_permission_message_with_never_approval(
+    never_approval: Option<&str>,
+    scoped: bool,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -488,21 +495,27 @@ async fn empty_catalog_permission_message_preserves_approval_instructions() -> R
     )
     .await;
     let model_slug = "empty-catalog-permissions-model";
-    let model = model_with_permission_messages(
-        model_slug,
-        PermissionMessages {
-            danger_full_access: None,
-            workspace_write: None,
-            read_only: Some(String::new()),
-            approved_prefixes: None,
-            writable_root: None,
-            writable_roots: None,
+    let mut model = model_info_from_slug(model_slug);
+    model.model_messages = Some(ModelMessages {
+        permissions: Some(PermissionMessages {
+            read_only: Some("".into()),
             ..Default::default()
-        },
-    );
+        }),
+        approvals: Some(ApprovalMessages {
+            never: never_approval.map(Into::into),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
     let mut builder = test_codex()
         .with_model(model_slug)
         .with_config(move |config| {
+            if scoped {
+                config
+                    .features
+                    .enable(Feature::PerEnvironmentContext)
+                    .expect("per-environment context should be available");
+            }
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
             config
                 .permissions
@@ -512,15 +525,23 @@ async fn empty_catalog_permission_message_preserves_approval_instructions() -> R
                 models: vec![model],
             });
         });
-    let test = builder.build(&server).await?;
+    let test = builder.build_with_auto_env(&server).await?;
 
     submit_text_turn(&test, "hello").await?;
 
     let permissions = permissions_texts(&req.single_request());
-    assert_eq!(permissions.len(), 1);
-    assert!(permissions[0].contains("Approval policy is currently never"));
-    assert!(!permissions[0].contains("Filesystem sandboxing defines"));
-    assert!(!permissions[0].contains("`sandbox_mode`"));
+    if never_approval == Some("") {
+        assert_eq!(permissions, Vec::<String>::new());
+    } else {
+        assert_eq!(permissions.len(), 1);
+        assert_eq!(
+            permissions[0].starts_with("<permissions instructions><"),
+            scoped,
+        );
+        assert!(permissions[0].contains("Approval policy is currently never"));
+        assert!(!permissions[0].contains("Filesystem sandboxing defines"));
+        assert!(!permissions[0].contains("`sandbox_mode`"));
+    }
     Ok(())
 }
 
@@ -916,7 +937,7 @@ const WORKSPACE_PERMISSIONS_PREFIX: &str = concat!(
 #[test_case(
     1,
     PermissionMessages {
-        denied_reads: Some("## Catalog denied reads\n{{ denied_reads }}\nCatalog footer.".to_string()),
+        denied_reads: Some("## Catalog denied reads\n{{ denied_reads }}\nCatalog footer.".into()),
         ..Default::default()
     },
     " The writable root is {roots}.",
@@ -933,9 +954,9 @@ const WORKSPACE_PERMISSIONS_PREFIX: &str = concat!(
 #[test_case(
     1,
     PermissionMessages {
-        writable_root: Some("Catalog single: {{ roots }}!".to_string()),
-        writable_roots: Some("Catalog plural: {{ roots }}!".to_string()),
-        denied_reads: Some("## Catalog denied reads\n{{ denied_reads }}\nCatalog footer.".to_string()),
+        writable_root: Some("Catalog single: {{ roots }}!".into()),
+        writable_roots: Some("Catalog plural: {{ roots }}!".into()),
+        denied_reads: Some("## Catalog denied reads\n{{ denied_reads }}\nCatalog footer.".into()),
         ..Default::default()
     },
     "Catalog single: {roots}!",
@@ -945,9 +966,9 @@ const WORKSPACE_PERMISSIONS_PREFIX: &str = concat!(
 #[test_case(
     2,
     PermissionMessages {
-        writable_root: Some("Catalog single: {{ roots }}!".to_string()),
-        writable_roots: Some("Catalog plural: {{ roots }}!".to_string()),
-        denied_reads: Some("## Catalog denied reads\n{{ denied_reads }}\nCatalog footer.".to_string()),
+        writable_root: Some("Catalog single: {{ roots }}!".into()),
+        writable_roots: Some("Catalog plural: {{ roots }}!".into()),
+        denied_reads: Some("## Catalog denied reads\n{{ denied_reads }}\nCatalog footer.".into()),
         ..Default::default()
     },
     "Catalog plural: {roots}!",

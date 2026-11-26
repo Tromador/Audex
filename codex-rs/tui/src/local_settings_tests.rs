@@ -7,6 +7,8 @@ use codex_config::types::RightClickPaste;
 use codex_config::types::SessionPickerViewMode;
 use codex_config::types::StatusLineSelection;
 use codex_terminal_detection::Multiplexer;
+use codex_terminal_detection::TerminalInfo;
+use codex_terminal_detection::TerminalName;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -131,6 +133,7 @@ show_tooltips = false
 show_server_version_notice = false
 auto_recap = false
 fullscreen_transcript = true
+collapse_turn_details = false
 mouse_scroll_speed = 0.5
 copy_on_select = "never"
 copy_on_select_clear_selection = true
@@ -193,6 +196,7 @@ fast_default_opt_out = true
         assert_eq!(config.startup_warnings, Vec::<String>::new());
         assert_eq!(config.tui_mouse_scroll_speed, Some(1.5));
         assert!(config.tui_fullscreen_transcript);
+        assert_eq!(config.tui_collapse_turn_details, config_text.is_empty());
         let bootstrap = crate::legacy_core::config::load_config_toml_with_layer_stack(
             home.path(),
             Some(&project_cwd),
@@ -475,7 +479,9 @@ async fn copy_on_select_respects_terminal_defaults_and_config_overrides() -> any
                 term: None,
             };
             assert_eq!(
-                local.copy_on_select(&terminal),
+                local.copy_on_select_with(
+                    crate::terminal_capabilities::forwards_copy_shortcut_for(&terminal)
+                ),
                 match expected {
                     CopyOnSelect::Auto => default_enabled,
                     CopyOnSelect::Always => true,

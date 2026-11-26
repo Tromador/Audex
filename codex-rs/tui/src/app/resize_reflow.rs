@@ -93,8 +93,7 @@ impl App {
         cell: &dyn HistoryCell,
         width: u16,
     ) -> Vec<HyperlinkLine> {
-        let mut display =
-            cell.display_hyperlink_lines_for_mode(width, self.chat_widget.history_render_mode());
+        let mut display = cell.scrollback_lines(width, self.chat_widget.history_render_mode());
         if !display.is_empty() && !cell.is_stream_continuation() {
             if self.has_emitted_history_lines {
                 display.insert(/*index*/ 0, HyperlinkLine::new(Line::from("")));
@@ -225,7 +224,7 @@ impl App {
             return;
         }
 
-        let max_rows = crate::resize_reflow_cap::resize_reflow_max_rows(
+        let max_rows = crate::terminal_capabilities::resize_reflow_max_rows(
             self.local_settings.terminal_resize_reflow(),
         );
         if let Some(buffer) = &mut self.initial_history_replay_buffer {
@@ -272,7 +271,7 @@ impl App {
     }
 
     fn resize_reflow_max_rows(&self) -> Option<usize> {
-        crate::resize_reflow_cap::resize_reflow_max_rows(
+        crate::terminal_capabilities::resize_reflow_max_rows(
             self.local_settings.terminal_resize_reflow(),
         )
     }
@@ -288,23 +287,6 @@ impl App {
                 .saturating_sub(viewport_height)
                 .max(/*other*/ 1),
         );
-    }
-
-    fn clear_terminal_for_resize_replay(&mut self, tui: &mut tui::Tui) -> Result<()> {
-        if tui.is_owned_screen() || tui.has_deferred_thread_switch_clear() {
-            return Ok(());
-        }
-        if tui.is_alt_screen_active() {
-            tui.terminal.clear_visible_screen()?;
-        } else {
-            tui.terminal.clear_scrollback_and_visible_screen_ansi()?;
-        }
-        let mut area = tui.terminal.viewport_area;
-        if area.y > 0 {
-            area.y = 0;
-            tui.terminal.set_viewport_area(area);
-        }
-        Ok(())
     }
 
     /// Finish stream consolidation by repairing any resize work that happened during streaming.
@@ -457,7 +439,13 @@ impl App {
             tui.terminal.last_known_screen_size,
             &tui.frame_requester(),
         );
-        if should_rebuild_transcript {
+        if should_rebuild_transcript && tui.has_deferred_replay_clear() {
+            // The live tail may already be gone. Replace its queued replay at the
+            // new width in this frame, without waiting for the resize debounce.
+            if !self.transcript_cells.is_empty() {
+                self.transcript_reflow.schedule_immediate();
+            }
+        } else if should_rebuild_transcript {
             // Resize-sensitive history inserts queued before this frame may be wrapped for the old
             // viewport or targeted at rows no longer visible. Drop them and let resize reflow
             // rebuild from transcript cells.
@@ -482,7 +470,13 @@ impl App {
             self.discard_scrollback_render_work(tui);
             return Ok(());
         }
-        let Some(deadline) = self.transcript_reflow.pending_until() else {
+        let Some(deadline) = self
+            .transcript_reflow
+            .pending_until()
+            .into_iter()
+            .chain(self.transcript_reflow.refill_deadline)
+            .min()
+        else {
             return Ok(());
         };
         let now = Instant::now();
@@ -530,6 +524,7 @@ impl App {
             tui.frame_requester().schedule_frame();
             return Ok(terminal_width);
         }
+        let flushing_refill = self.transcript_reflow.refill_deadline.take().is_some();
         let width = self.chat_widget.history_wrap_width(terminal_width.0);
         if self.transcript_cells.is_empty() {
             // Drop any queued pre-resize/pre-consolidation inserts before rebuilding from cells.
@@ -543,27 +538,15 @@ impl App {
         let reflowed_lines = reflow_result.lines;
         let reflowed_rows = reflowed_lines.len();
 
-        // Drop any queued pre-resize/pre-consolidation inserts before rebuilding from cells.
-        tui.clear_pending_history_lines();
-        self.clear_terminal_for_resize_replay(tui)?;
-
         self.deferred_history_lines.clear();
-        if !reflowed_lines.is_empty() {
-            tui.insert_history_hyperlink_lines_with_wrap_policy(
-                reflowed_lines,
-                self.history_line_wrap_policy(),
-            );
-        }
+        tui.queue_history_replay(reflowed_lines, self.history_line_wrap_policy());
         self.last_rendered_history_tail = self
             .native_history
             .replayable_cells(&self.transcript_cells)
             .iter()
             .rev()
             .find_map(|cell| {
-                let lines = cell.display_hyperlink_lines_for_mode(
-                    width,
-                    self.chat_widget.history_render_mode(),
-                );
+                let lines = cell.scrollback_lines(width, self.chat_widget.history_render_mode());
                 (!lines.is_empty()).then(|| super::history_ui::RenderedHistoryTail {
                     cell: Arc::downgrade(cell),
                     lines,
@@ -578,7 +561,10 @@ impl App {
         if self.pending_thread_usage_history_refresh {
             self.refresh_thread_usage_history_tail(tui)?;
         }
-        self.request_scrollback_history_top_up(reflowed_rows);
+        // When flushing a partial refill, the next request is in flight or just failed.
+        if !flushing_refill {
+            self.request_scrollback_history_top_up(reflowed_rows);
+        }
 
         Ok(terminal_width)
     }
@@ -627,6 +613,7 @@ impl App {
             return Ok(());
         }
         self.native_history.replayed();
+        self.transcript_reflow.refill_deadline = None;
         let width = self.chat_widget.history_wrap_width(terminal_width.0);
         let reflowed_lines = if self.transcript_cells.is_empty() {
             self.reset_history_emission_state();
@@ -635,16 +622,8 @@ impl App {
             self.render_transcript_lines_for_reflow(width).lines
         };
 
-        tui.clear_pending_history_lines();
-        self.clear_terminal_for_resize_replay(tui)?;
-
         self.deferred_history_lines.clear();
-        if !reflowed_lines.is_empty() {
-            tui.insert_history_hyperlink_lines_with_wrap_policy(
-                reflowed_lines,
-                self.history_line_wrap_policy(),
-            );
-        }
+        tui.queue_history_replay(reflowed_lines, self.history_line_wrap_policy());
 
         Ok(())
     }
@@ -677,8 +656,7 @@ impl App {
         while start > 0 {
             start -= 1;
             let cell = self.transcript_cells[start].clone();
-            let lines = cell
-                .display_hyperlink_lines_for_mode(width, self.chat_widget.history_render_mode());
+            let lines = cell.scrollback_lines(width, self.chat_widget.history_render_mode());
             rendered_rows += lines.len();
             cell_displays.push_front(ReflowCellDisplay {
                 lines,
@@ -702,10 +680,7 @@ impl App {
             start -= 1;
             let cell = self.transcript_cells[start].clone();
             cell_displays.push_front(ReflowCellDisplay {
-                lines: cell.display_hyperlink_lines_for_mode(
-                    width,
-                    self.chat_widget.history_render_mode(),
-                ),
+                lines: cell.scrollback_lines(width, self.chat_widget.history_render_mode()),
                 is_stream_continuation: cell.is_stream_continuation(),
             });
         }

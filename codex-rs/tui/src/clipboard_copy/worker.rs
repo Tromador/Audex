@@ -243,13 +243,7 @@ impl ClipboardWorker {
                         format,
                         || setup.begin_delivery(),
                         |text| {
-                            let target = if std::env::var_os("TMUX").is_some() {
-                                super::Osc52Target::Tmux
-                            } else if std::env::var_os("STY").is_some() {
-                                super::Osc52Target::Screen
-                            } else {
-                                super::Osc52Target::Direct
-                            };
+                            let target = super::Osc52Target::detect();
                             terminal_sequence.set(Some(super::osc52_sequence(text, target)?));
                             Ok(())
                         },
@@ -421,7 +415,7 @@ impl ClipboardWorker {
                             });
                             match primary {
                                 Some(result) if destination == CopyDestination::Primary => {
-                                    (result.map(|_| super::CopyOutcome::Requested), None)
+                                    (result.map(|_| super::CopyOutcome::Unconfirmed(None)), None)
                                 }
                                 // Unavailable PRIMARY must not break configured CLIPBOARD copy.
                                 _ => copy(&text, format, &setup),

@@ -393,6 +393,15 @@ pub(crate) struct McpConnectionSet {
 }
 
 impl McpConnectionSet {
+    pub(crate) fn needs_request_auth_refresh(&self) -> bool {
+        self.servers.values().any(|view| {
+            view.connection
+                .identity
+                .as_ref()
+                .is_some_and(McpServerConnectionIdentity::needs_request_auth_refresh)
+        })
+    }
+
     fn server(&self, key: &McpServerKey) -> Option<&McpServerView> {
         self.servers.get(key)
     }
@@ -670,21 +679,23 @@ impl McpConnectionSet {
             } else {
                 static_chatgpt_auth_provider.clone()
             };
-            // If Codex Apps has an env bearer token, that is its auth path. Do
-            // not also attach the ambient CodexAuth provider.
-            let runtime_auth_provider =
-                if server_name == CODEX_APPS_MCP_SERVER_NAME && uses_env_bearer_token {
-                    None
-                } else {
-                    chatgpt_auth_provider_for_server(&server, chatgpt_auth_provider).map(
-                        |provider| match (openai_runtime, auth) {
-                            (Some(runtime), Some(auth)) => {
-                                crate::auth::McpAuthProvider::runtime(runtime.clone(), auth.clone())
-                            }
-                            _ => crate::auth::McpAuthProvider::Credentials(provider),
-                        },
-                    )
-                };
+            let runtime_auth_provider = if let Some(provider) = server.request_auth_provider() {
+                Some(crate::auth::McpAuthProvider::Credentials(Arc::new(
+                    provider.clone(),
+                )))
+            } else if server_name == CODEX_APPS_MCP_SERVER_NAME && uses_env_bearer_token {
+                // The configured bearer token supplies auth for this connection.
+                None
+            } else {
+                chatgpt_auth_provider_for_server(&server, chatgpt_auth_provider).map(|provider| {
+                    match (openai_runtime, auth) {
+                        (Some(runtime), Some(auth)) => {
+                            crate::auth::McpAuthProvider::runtime(runtime.clone(), auth.clone())
+                        }
+                        _ => crate::auth::McpAuthProvider::Credentials(provider),
+                    }
+                })
+            };
             let discover_local_stdio = config.client.discover_local_stdio
                 && server.can_discover_local_stdio(&server_name, runtime_auth_provider.as_ref());
             let protocol_mode = if discover_local_stdio {
@@ -732,7 +743,8 @@ impl McpConnectionSet {
                 McpServerTransportConfig::Stdio { .. } => server.stdio_protocol_mode(protocol_mode),
             };
             let mut tool_catalog_cache_context = LazyCell::new(|| {
-                if server_name == CODEX_APPS_MCP_SERVER_NAME
+                if server.request_auth_provider().is_some()
+                    || server_name == CODEX_APPS_MCP_SERVER_NAME
                     || server.requires_read_only_mcp_tools()
                     || matches!(configured_config.auth, McpServerAuth::EmaAuth)
                 {
@@ -936,6 +948,7 @@ impl McpConnectionSet {
                                                 .scoped_environment_id()
                                                 .map(str::to_owned),
                                             status,
+                                            duration_ms: None,
                                         },
                                     )
                                     .await;
@@ -993,10 +1006,12 @@ impl McpConnectionSet {
                 } else {
                     (None, None)
                 };
+            let initial_measurement = Arc::new(OnceLock::new());
             let mut async_managed_client = AsyncManagedClient::new(
                 ema_auth.clone(),
                 server_key.clone(),
                 startup_submit_id.clone(),
+                Arc::clone(&initial_measurement),
                 server,
                 store_mode,
                 keyring_backend_kind,
@@ -1083,6 +1098,7 @@ impl McpConnectionSet {
                             server: server_name.clone(),
                             environment_id: server_key.scoped_environment_id().map(str::to_owned),
                             status: McpStartupStatus::Starting,
+                            duration_ms: None,
                         },
                     )
                     .await;
@@ -1152,6 +1168,9 @@ impl McpConnectionSet {
                         }
                     };
 
+                    let duration_ms = initial_measurement
+                        .get()
+                        .and_then(|measurement| measurement.duration_ms_for(&status));
                     let _ = emit_update(
                         submit_id.as_str(),
                         tx_event,
@@ -1159,6 +1178,7 @@ impl McpConnectionSet {
                             server: server_name.clone(),
                             environment_id: server_key.scoped_environment_id().map(str::to_owned),
                             status,
+                            duration_ms,
                         },
                     )
                     .await;
@@ -1212,6 +1232,7 @@ impl McpConnectionSet {
                             server: server.name().to_owned(),
                             environment_id: server.scoped_environment_id().map(str::to_owned),
                             status: McpStartupStatus::Starting,
+                            duration_ms: None,
                         },
                     )
                     .await;
@@ -1241,6 +1262,7 @@ impl McpConnectionSet {
                             server: key.name().to_owned(),
                             environment_id: key.scoped_environment_id().map(str::to_owned),
                             status: McpStartupStatus::Ready,
+                            duration_ms: None,
                         },
                     )
                     .await;

@@ -187,7 +187,7 @@ impl App {
         let Some((id, area)) = self.passive_link_drag else {
             return Ok(false);
         };
-        if self.conversation_focus_available(tui) {
+        if self.conversation_focus_available(tui) && !crate::tui::mouse_capture_disabled() {
             match event {
                 TuiEvent::Draw => {
                     if let Some(companion) = self.side_companions.get_mut(&id)
@@ -235,6 +235,8 @@ impl App {
     }
 
     pub(super) fn refresh_link_hover(&self, tui: &mut Tui) -> std::io::Result<()> {
+        let viewport = tui.terminal.last_known_screen_size.into();
+        let mut sidebar_divider = false;
         let shape = if tui
             .link_hover
             .mouse
@@ -243,14 +245,25 @@ impl App {
             || self.overlay.is_some()
         {
             PointerShape::Default
+        } else if let Some(drag) = self.divider_drag {
+            sidebar_divider = !drag.is_center();
+            PointerShape::Resize
         } else if self.conversation_focus_available(tui)
-            && (self.divider_drag.is_some()
-                || tui.link_hover.mouse.is_some_and(|mouse| {
-                    self.conversation_frame
-                        .divider_area()
-                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into()))
-                        && self.divider_is_settled(tui, tui.terminal.last_known_screen_size.into())
-                }))
+            && tui.link_hover.mouse.is_some_and(|mouse| {
+                self.conversation_frame
+                    .divider_area()
+                    .is_some_and(|area| area.contains((mouse.column, mouse.row).into()))
+                    && self.divider_is_settled(tui, viewport)
+            })
+        {
+            sidebar_divider = true;
+            PointerShape::Resize
+        } else if self
+            .hover_pointer(tui, tui.link_hover.mouse)
+            .is_some_and(|mouse| {
+                self.center_divider_area(viewport)
+                    .is_some_and(|area| area.contains((mouse.column, mouse.row).into()))
+            })
         {
             PointerShape::Resize
         } else if self.chat_widget.no_modal_or_popup_active()
@@ -263,7 +276,10 @@ impl App {
         } else {
             PointerShape::Default
         };
-        if (shape == PointerShape::Resize) != (tui.link_hover.shape == PointerShape::Resize) {
+        if sidebar_divider != tui.link_hover.sidebar_divider
+            || (shape == PointerShape::Resize) != (tui.link_hover.shape == PointerShape::Resize)
+        {
+            tui.link_hover.sidebar_divider = sidebar_divider;
             tui.frame_requester().schedule_frame();
         }
         tui.link_hover.shape = shape;

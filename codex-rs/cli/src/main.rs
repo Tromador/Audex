@@ -42,7 +42,6 @@ use std::io::IsTerminal;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
-use supports_color::Stream;
 
 #[cfg(all(
     target_os = "linux",
@@ -111,7 +110,6 @@ use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::user_input::UserInput;
-use codex_terminal_detection::TerminalName;
 
 /// Codex CLI
 ///
@@ -788,7 +786,7 @@ fn handle_app_exit(
             eprintln!("{warning}");
         }
     } else {
-        let color_enabled = supports_color::on(Stream::Stdout).is_some();
+        let color_enabled = codex_tui::stdout_supports_color();
         for line in exit_info.format_exit_messages(color_enabled) {
             println!("{line}");
         }
@@ -1135,9 +1133,11 @@ async fn dispatch_cli(
         interactive.no_daemon |= options.no_daemon;
     }
     let root_strict_config = interactive.strict_config;
-    interactive
-        .shared
-        .take_auto_review_config_overrides(&mut root_config_overrides);
+    if !matches!(subcommand, Some(Subcommand::Resume(_))) {
+        interactive
+            .shared
+            .take_auto_review_config_overrides(&mut root_config_overrides);
+    }
     reject_root_strict_config_for_subcommand(root_strict_config, &subcommand)?;
     if let Some(subcommand) = subcommand.as_ref() {
         profile_v2_for_subcommand(&interactive, subcommand)?;
@@ -1424,7 +1424,9 @@ async fn dispatch_cli(
                                 continue;
                             }
                             let value = if let Some(table) = value.as_table() {
-                                let Some(enabled) = table.get("enabled") else {
+                                let Some(enabled) =
+                                    table.get(codex_features::feature_toggle_field(name))
+                                else {
                                     continue;
                                 };
                                 enabled
@@ -2239,9 +2241,6 @@ async fn run_debug_prompt_input_command(
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: config.bundled_skills_enabled(),
             cloud_skill_enabled: config.cloud_skill_enabled,
-            shadow_selection_enabled: config
-                .features
-                .enabled(codex_features::Feature::SkillSearch),
         }
     });
     let prompt_input = codex_core::build_prompt_input(
@@ -2571,21 +2570,18 @@ async fn run_interactive_tui(
         interactive.prompt = Some(prompt.replace("\r\n", "\n").replace('\r', "\n"));
     }
 
-    let terminal_info = codex_terminal_detection::terminal_info();
-    if terminal_info.name == TerminalName::Dumb {
+    if let Some(reason) = codex_tui::interactive_terminal_warning() {
         if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
-            return Ok(AppExitInfo::fatal(
-                "TERM is set to \"dumb\". Refusing to start the interactive TUI because no terminal is available for a confirmation prompt (stdin/stderr is not a TTY). Run in a supported terminal or unset TERM.",
-            ));
+            return Ok(AppExitInfo::fatal(format!(
+                "{reason}. Refusing to start the interactive TUI because no terminal is available for a confirmation prompt (stdin/stderr is not a TTY). Run in a supported terminal or unset TERM."
+            )));
         }
 
-        eprintln!(
-            "WARNING: TERM is set to \"dumb\". Codex's interactive TUI may not work in this terminal."
-        );
+        eprintln!("WARNING: {reason}. Codex's interactive TUI may not work in this terminal.");
         if !confirm("Continue anyway? [y/N]: ")? {
-            return Ok(AppExitInfo::fatal(
-                "Refusing to start the interactive TUI because TERM is set to \"dumb\". Run in a supported terminal or unset TERM.",
-            ));
+            return Ok(AppExitInfo::fatal(format!(
+                "Refusing to start the interactive TUI because {reason}. Run in a supported terminal or unset TERM."
+            )));
         }
     }
 
@@ -2707,6 +2703,26 @@ fn finalize_resume_interactive(
     interactive.resume_session_id = resume_session_id;
     interactive.resume_show_all = show_all;
     interactive.resume_include_non_interactive = include_non_interactive;
+
+    // Extract the preset before merging launch flags so it cannot erase root permissions
+    // or force an embedded server. Keep its position relative to explicit -c overrides.
+    if interactive.auto_review || resume_cli.auto_review {
+        let overrides_root_permissions = resume_cli.auto_review;
+        let mut config = root_config_overrides.clone();
+        interactive
+            .shared
+            .take_auto_review_config_overrides(&mut config);
+        config
+            .raw_overrides
+            .extend(resume_cli.config_overrides.raw_overrides.iter().cloned());
+        resume_cli
+            .shared
+            .take_auto_review_config_overrides(&mut config);
+        interactive.resume_approval_preset = Some(codex_tui::ResumeApprovalPreset {
+            config,
+            overrides_root_permissions,
+        });
+    }
 
     // Merge resume-scoped flags and overrides with highest precedence.
     merge_interactive_cli_flags(&mut interactive, resume_cli);
@@ -2986,16 +3002,12 @@ enabled = true
     fn finalize_resume_from_args(args: &[&str]) -> TuiCli {
         let cli = MultitoolCli::try_parse_from(args).expect("parse");
         let MultitoolCli {
-            mut interactive,
-            config_overrides: mut root_overrides,
+            interactive,
+            config_overrides: root_overrides,
             subcommand,
             feature_toggles: _,
             remote: _,
         } = cli;
-        interactive
-            .shared
-            .take_auto_review_config_overrides(&mut root_overrides);
-
         let Subcommand::Resume(ResumeCommand {
             session_id,
             last,
@@ -3404,8 +3416,11 @@ enabled = true
             interactive.approval_policy,
             Some(codex_utils_cli::ApprovalModeCliArg::Never)
         );
+        assert!(interactive.config_overrides.raw_overrides.is_empty());
+        let preset = interactive.resume_approval_preset.unwrap();
+        assert!(!preset.overrides_root_permissions);
         assert_eq!(
-            interactive.config_overrides.raw_overrides,
+            preset.config.raw_overrides,
             vec![
                 r#"approvals_reviewer="auto_review""#.to_string(),
                 r#"approval_policy="on-request""#.to_string(),
@@ -3415,23 +3430,30 @@ enabled = true
     }
 
     #[test]
-    fn later_approve_for_me_overrides_root_tui_approval_policy() {
+    fn resume_preset_preserves_root_permissions_for_later_sessions() {
         let interactive = finalize_resume_from_args(&[
             "codex",
             "--ask-for-approval",
             "never",
+            "--sandbox",
+            "read-only",
             "resume",
             "--approve-for-me",
         ]);
-
-        assert!(interactive.approval_policy.is_none());
-        assert_eq!(
-            interactive.config_overrides.raw_overrides,
-            vec![
-                r#"approvals_reviewer="auto_review""#.to_string(),
-                r#"approval_policy="on-request""#.to_string(),
-                r#"sandbox_mode="workspace-write""#.to_string(),
-            ]
+        assert_matches!(
+            interactive.approval_policy,
+            Some(codex_utils_cli::ApprovalModeCliArg::Never)
+        );
+        assert_matches!(
+            interactive.sandbox_mode,
+            Some(codex_utils_cli::SandboxModeCliArg::ReadOnly)
+        );
+        assert!(interactive.config_overrides.raw_overrides.is_empty());
+        assert!(
+            interactive
+                .resume_approval_preset
+                .unwrap()
+                .overrides_root_permissions
         );
     }
 

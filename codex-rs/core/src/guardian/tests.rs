@@ -206,7 +206,7 @@ fn guardian_exec_command_request(id: &str) -> GuardianApprovalRequest {
 }
 
 #[tokio::test]
-async fn isolated_review_returns_assessment_for_prepared_action() -> anyhow::Result<()> {
+async fn review_returns_assessment_for_prepared_action() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
     let assessment = serde_json::json!({
@@ -244,12 +244,12 @@ async fn isolated_review_returns_assessment_for_prepared_action() -> anyhow::Res
         session,
     };
     let result = input
-        .assess_isolated(
+        .assess_with_transcript_reviewer(
             codex_guardian_reviewer::ReviewDeadline::Unlimited,
             &CancellationToken::new(),
         )
         .await
-        .expect("isolated assessment");
+        .expect("Guardian assessment");
     assert_eq!(result, serde_json::from_value(assessment)?);
     let request = mock.single_request();
     let rendered = serde_json::to_string(&request.input())?;
@@ -791,6 +791,7 @@ async fn guardian_mcp_uses_thread_permissions_for_an_unavailable_captured_enviro
         Arc::clone(&turn),
         &turn.initial_settings,
         &captured,
+        /*reviewed_action_root_turn_id*/ None,
     );
     let collected = collect_guardian_prompt_items_with_parent_turn(
         &session,
@@ -1360,7 +1361,7 @@ async fn guardian_reuse_respects_effective_policy_and_personality_opt_out(
         .auto_review
         .as_mut()
         .unwrap()
-        .policy = Some("changed action policy".to_string());
+        .policy = Some("changed action policy".into());
     let mut different_personality = changed_policy.clone();
     different_personality.personality = Some(codex_protocol::config_types::Personality::Pragmatic);
     let mut omit_personality = different_personality.clone();

@@ -1,4 +1,9 @@
 import type {
+  CodeElement,
+  ColElement,
+  BoxElement,
+  BadgeElement,
+  SpacerElement,
   Color,
   RowElement,
   StatuslineItemId,
@@ -42,10 +47,54 @@ export function render(state: StatuslineState): UiTree {
   return { type: "row", props: { gap: 1, wrap: "wrap", justify: "between" }, children };
 }
 
+const indented: UiTree = { type: "text", props: { preserveWhitespace: true }, children: ["  ready"] };
+
+const summary: UiTree = { type: "text", props: { maxLines: 2 }, children: ["build results"] };
+
+const spacer: SpacerElement = { type: "spacer" };
+const emptySpacer: SpacerElement = { ...spacer, children: [] };
+// @ts-expect-error A spacer has no contents.
+const invalidSpacer: SpacerElement = { ...spacer, children: ["x"] };
+
+const badge: BadgeElement = { type: "badge", children: ["queued"] };
+const passing: BadgeElement = { ...badge, props: { color: "success" }, children: ["passing"] };
+// @ts-expect-error Badges accept semantic colors.
+const invalidBadge: BadgeElement = { ...badge, props: { color: "red" } };
+
+const stacked: BoxElement = { type: "box", props: { gap: 1 }, children: [summary, indented] };
+const horizontal: BoxElement = { ...stacked, props: { gap: 0, direction: "row", justify: "end" } };
+const responsive = (compact: boolean): BoxElement => ({
+  ...stacked,
+  props: { gap: 1, direction: compact ? "col" : "row" },
+});
+const responsiveAlignment = (compact: boolean): BoxElement["props"] =>
+  compact ? { gap: 1 } : { gap: 1, direction: "row", justify: "end" };
+// @ts-expect-error Omitted direction defaults to a column.
+const implicitColumn: BoxElement["props"] = { gap: 1, justify: "end" };
+const invalidResponsive = (compact: boolean): BoxElement["props"] =>
+  // @ts-expect-error The column branch cannot carry row-only props.
+  ({ gap: 1, direction: compact ? "col" : "row", wrap: "wrap" });
+// @ts-expect-error Boxes require a gap in either direction.
+const missingBoxGap: BoxElement = { ...stacked, props: { direction: "col" } };
+
+const command: CodeElement = {
+  type: "code",
+  children: ["cargo ", null, { type: "bold", children: [" test"] }],
+};
+// @ts-expect-error Code requires a child list.
+const invalidCode: CodeElement = { type: "code", children: "cargo test" };
+
 // @ts-expect-error The snapshot emits the canonical ID even when config used an alias.
 const alias: StatuslineItemId = "project-root";
 // @ts-expect-error Row props require a gap in terminal columns.
 const missingGap: RowElement = { type: "row", props: {}, children: [] };
+const twoLines: ColElement = {
+  type: "col",
+  props: { gap: 0 },
+  children: [command, { type: "text", children: ["75%"] }],
+};
+// @ts-expect-error Column props require a gap in terminal rows.
+const missingColGap: ColElement = { type: "col", props: {}, children: [] };
 // @ts-expect-error Color literals begin with a hash or match one of the named tokens.
 const invalidColor: Color = "ff00bb";
 

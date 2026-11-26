@@ -56,6 +56,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_models_manager::manager::ModelCatalogSettings;
 use codex_models_manager::model_info::model_info_from_slug;
+use codex_prompts::ResolvedIncrementalToolMessages;
 use codex_protocol::AgentPath;
 use codex_protocol::RequestCountry;
 use codex_protocol::ResponseItemId;
@@ -567,7 +568,6 @@ async fn on_event_updates_status_from_task_complete() {
                 misalignment: None,
                 message: "denied".to_string(),
                 codex_error_info: None,
-                rejected_audio_file_ids: Vec::new(),
             }),
             AgentStatus::Errored("denied".to_string()),
         ),
@@ -592,7 +592,6 @@ async fn on_event_updates_status_from_error() {
         misalignment: None,
         message: "boom".to_string(),
         codex_error_info: None,
-        rejected_audio_file_ids: Vec::new(),
     }));
 
     let expected = AgentStatus::Errored("boom".to_string());
@@ -2443,6 +2442,7 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix(
                 ThreadSettingsAppliedEvent {
                     thread_id: Some(parent_thread_id),
                     thread_settings: ThreadSettingsSnapshot {
+                        spawn_service_tier_override: None,
                         disabled_plugin_ids: Vec::new(),
                         guardian_retention: None,
                         model: "parent-only-model".to_string(),
@@ -2562,9 +2562,10 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix(
         !copied_prefix.iter().any(|line| {
             matches!(
                 &line.item,
-                RolloutItem::EventMsg(
-                    EventMsg::ItemCompleted(_) | EventMsg::ThreadSettingsApplied(_)
-                )
+                RolloutItem::EventMsg {
+                    event: EventMsg::ItemCompleted(_) | EventMsg::ThreadSettingsApplied(_),
+                    ..
+                }
             )
         }),
         "copied non-structural presentation and metadata records should not enter the child rollout"
@@ -3334,7 +3335,9 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
         tools: Arc::from([serde_json::json!({"type": "function", "name": "compacted_tool"})]),
     };
     let tools_update = ContextualUserFragment::into(IncrementalToolsUpdate(
-        codex_prompts::ResolvedIncrementalToolMessages::default().tool_update_hint,
+        ResolvedIncrementalToolMessages::default()
+            .tool_update_hint
+            .as_cow(),
     ));
     let replacement_history = vec![
         tools_update.clone(),
@@ -3911,7 +3914,9 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
         ]);
         rollout_items.push(rollout_response_item(ContextualUserFragment::into(
             IncrementalToolsUpdate(
-                codex_prompts::ResolvedIncrementalToolMessages::default().tool_update_hint,
+                ResolvedIncrementalToolMessages::default()
+                    .tool_update_hint
+                    .as_cow(),
             ),
         )));
         rollout_items.push(rollout_response_item(ResponseItem::AdditionalTools {

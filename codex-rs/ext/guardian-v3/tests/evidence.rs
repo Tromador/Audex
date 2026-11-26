@@ -1,8 +1,6 @@
 //! Captured originals preserve attribution, complete contents and a fixed history boundary.
 
-use codex_context_fragments::AdditionalContextUserFragment;
 use codex_context_fragments::AnnotatedContent;
-use codex_context_fragments::ContextualUserFragment;
 use codex_context_fragments::message_from_parts;
 use codex_guardian_v3::EvidenceCursor;
 use codex_guardian_v3::OriginalEvidence;
@@ -20,6 +18,8 @@ use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::ContentItemMetadata;
+use codex_protocol::models::ImageDetail;
+use codex_protocol::models::local_image_content_items;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
@@ -33,16 +33,14 @@ use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadStore;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::path::Path;
 use std::sync::Arc;
 
-#[tokio::test]
-async fn captures_originals_without_generated_context_or_later_appends() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let owner = ThreadId::new();
+async fn create_store(path: &Path, owner: ThreadId) -> anyhow::Result<LocalThreadStore> {
     let store = LocalThreadStore::new(
         LocalThreadStoreConfig {
-            codex_home: dir.path().to_path_buf(),
-            sqlite: SqliteConfig::new_for_testing(dir.path().to_path_buf().try_into()?),
+            codex_home: path.to_path_buf(),
+            sqlite: SqliteConfig::new_for_testing(path.to_path_buf().try_into()?),
             default_model_provider_id: "test-provider".into(),
         },
         /*state_db*/ None,
@@ -71,12 +69,20 @@ async fn captures_originals_without_generated_context_or_later_appends() -> anyh
             initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
-                cwd: Some(dir.path().to_path_buf()),
+                cwd: Some(path.to_path_buf()),
                 model_provider: "test-provider".into(),
                 memory_mode: ThreadMemoryMode::Disabled,
             },
         })
         .await?;
+    Ok(store)
+}
+
+#[tokio::test]
+async fn captures_originals_without_generated_context_or_later_appends() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let owner = ThreadId::new();
+    let store = create_store(dir.path(), owner).await?;
     let user = ResponseItemEnvelope {
         item: serde_json::from_value(json!({"type":"message","id":"user-1","role":"user",
             "content":[{"type":"input_text","text":"é🙂".repeat(15_000)}]}))?,
@@ -95,8 +101,13 @@ async fn captures_originals_without_generated_context_or_later_appends() -> anyh
     let result = ResponseItemEnvelope::new(serde_json::from_value(json!({
         "type":"function_call_output","call_id":"call-1","output":"/workspace"
     }))?);
-    let generated = ResponseItemEnvelope::new(ContextualUserFragment::into(
-        AdditionalContextUserFragment::new("environment".into(), "Generated context".into()),
+    let generated = ResponseItemEnvelope::new(message_from_parts(
+        "user",
+        vec![AnnotatedContent::text(
+            "<external_environment>Generated context</external_environment>",
+            ContentItemKind("additional_content.environment".into()),
+            ContentItemMetadata::harness(),
+        )],
     ));
     let mut summary = assistant.clone();
     summary.metadata = Some(CodexHarnessMetadata {
@@ -313,6 +324,85 @@ Approved action: {"action":{"command":"write /workspace/report.txt"},"outcome":"
     let before = cursor.clone();
     assert!(cursor.capture(&store).await.is_err());
     assert_eq!(cursor, before);
+    store.shutdown_thread(owner).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn user_images_do_not_block_later_evidence() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let owner = ThreadId::new();
+    let store = create_store(dir.path(), owner).await?;
+    let mut cursor = EvidenceCursor::at_thread_ready(
+        &store,
+        owner,
+        ThreadHistoryMode::Paginated,
+        HistoryInitialization::New,
+    )
+    .await?;
+    let user = |order, parts| {
+        RolloutItem::ResponseItem(ResponseItemEnvelope {
+            item: message_from_parts("user", parts),
+            metadata: Some(CodexHarnessMetadata {
+                user_input_order: Some(order),
+                ..Default::default()
+            }),
+        })
+    };
+    let text = |text: &str| {
+        AnnotatedContent::text(
+            text,
+            ContentItemKind("user.text".into()),
+            ContentItemMetadata::user(),
+        )
+    };
+    let screenshot = local_image_content_items(
+        Path::new("release.png"),
+        format!("data:image/png;base64,{}", "A".repeat(128 * 1024)),
+        Some(1),
+        ImageDetail::Auto,
+    );
+    let mut mixed = vec![text("Release policy:")];
+    mixed.extend(screenshot.into_iter().map(|part| {
+        AnnotatedContent::from_parts(
+            part,
+            ContentItemKind("user.image".into()),
+            ContentItemMetadata::user(),
+        )
+    }));
+    mixed.push(text("Do not deploy."));
+    let image_only = AnnotatedContent::from_parts(
+        serde_json::from_value(json!({"type":"input_image","file_id":"file-screenshot"}))?,
+        ContentItemKind("user.image".into()),
+        ContentItemMetadata::user(),
+    );
+    let later = user(3, vec![text("Wait for approval.")]);
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id: owner,
+            items: vec![user(1, mixed), user(2, vec![image_only]), later.clone()],
+        })
+        .await?;
+    store
+        .persist_thread(owner, PersistContext::Standard)
+        .await?;
+    store.flush_thread(owner).await?;
+
+    let capture = cursor.capture(&store).await?;
+    let actual = capture
+        .records()
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        actual,
+        [
+            json!({"id":{"ordinal":1},"original": user(1, vec![text("Release policy:"), text("Do not deploy.")])}),
+            json!({"id":{"ordinal":3},"original": later}),
+        ]
+    );
+    cursor.acknowledge(&capture, capture.records().len())?;
+    assert_eq!(cursor, EvidenceCursor::from_now(&store, owner).await?);
     store.shutdown_thread(owner).await?;
     Ok(())
 }

@@ -33,6 +33,7 @@ fn settings_item(
         ThreadSettingsAppliedEvent {
             thread_id,
             thread_settings: ThreadSettingsSnapshot {
+                spawn_service_tier_override: None,
                 disabled_plugin_ids: Vec::new(),
                 guardian_retention: None,
                 model: "gpt-5".to_string(),
@@ -250,7 +251,11 @@ fn an_unattributed_snapshot_restores_only_portable_read_only_permissions() {
         PersistedResumeSettings::from_history(std::slice::from_ref(&item), thread_id),
         Some(expected)
     );
-    let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut item else {
+    let RolloutItem::EventMsg {
+        event: EventMsg::ThreadSettingsApplied(event),
+        ..
+    } = &mut item
+    else {
         unreachable!("fixture must be a settings update");
     };
     event.thread_settings.permission_profile = PermissionProfile::Disabled;

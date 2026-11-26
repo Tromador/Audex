@@ -1,5 +1,5 @@
 //! Draw sidebar tabs and hit-test the same visible cells. When space runs out,
-//! keep the selected tab visible and reserve the add button at the right edge.
+//! keep the selected tab visible and reserve the add and hide buttons at the right edge.
 //! A one-column gap separates tabs and is excluded from their click targets.
 
 use ratatui::buffer::Buffer;
@@ -19,6 +19,7 @@ pub(crate) enum SidebarTab {
 
 /// Adjacent tabs have one unpainted, noninteractive terminal column between them.
 const TAB_GAP: u16 = 1;
+const CLOSE_WIDTH: u16 = 3;
 const MIN_TAB_WIDTH: u16 = 12;
 const MAX_TAB_WIDTH: u16 = 22;
 
@@ -41,6 +42,7 @@ pub(crate) enum TabTarget<Id> {
     Close(Id),
     Overflow { tab: Id, glyph: &'static str },
     Add,
+    Hide,
 }
 
 impl<'a, Id: Copy + Eq> TabStrip<'a, Id> {
@@ -50,8 +52,9 @@ impl<'a, Id: Copy + Eq> TabStrip<'a, Id> {
 
     pub(crate) fn strip_targets(self, area: Rect) -> Vec<(TabTarget<Id>, Rect)> {
         let width = area.width.saturating_sub(1);
-        let plus = width.min(3);
-        let available = width - plus;
+        let hide = width.min(3);
+        let plus = (width - hide).min(3);
+        let available = width - plus - hide;
         let height = area.height.min(1);
         let rect = |offset, width| Rect::new(area.x + offset, area.y, width, height);
         let mut targets = Vec::new();
@@ -64,6 +67,9 @@ impl<'a, Id: Copy + Eq> TabStrip<'a, Id> {
             let space = available - 2 * gutter;
             let width = space.min(preferred);
             let count = usize::from((space + TAB_GAP) / (width + TAB_GAP)).min(self.ids.len());
+            // Use spare space for the extra close cells without reducing the number of tabs.
+            let room_per_tab = (space + TAB_GAP) / count as u16 - TAB_GAP;
+            let width = (width + CLOSE_WIDTH - 1).min(room_per_tab);
             let start = self
                 .selected_index()
                 .map_or(0, |index| (index + 1).saturating_sub(count));
@@ -80,7 +86,7 @@ impl<'a, Id: Copy + Eq> TabStrip<'a, Id> {
             }
             let mut x = gutter;
             for &id in &self.ids[start..end] {
-                let close = u16::from(width >= 3);
+                let close = CLOSE_WIDTH * u16::from(width > CLOSE_WIDTH);
                 let label = width - close;
                 targets.push((TabTarget::Tab(id), rect(x, label)));
                 if close > 0 {
@@ -98,7 +104,12 @@ impl<'a, Id: Copy + Eq> TabStrip<'a, Id> {
                 ));
             }
         }
-        targets.push((TabTarget::Add, rect(available, plus)));
+        if plus > 0 {
+            targets.push((TabTarget::Add, rect(available, plus)));
+        }
+        if hide > 0 {
+            targets.push((TabTarget::Hide, rect(available + plus, hide)));
+        }
         targets
     }
 
@@ -133,32 +144,19 @@ impl<'a, Id: Copy + Eq> TabStrip<'a, Id> {
         let targets = self.strip_targets(area);
         for &(target, rect) in &targets {
             let hovered = pointer.is_some_and(|point| rect.contains(point));
-            let quiet = if hovered { hover } else { rest };
+            let tab_style = |id| match (
+                Some(id) == self.selected && selected_state != TabState::Absent,
+                hovered,
+            ) {
+                (true, true) => crate::style::hover_style(selected_style),
+                (true, false) => selected_style,
+                (false, true) => hover,
+                (false, false) => rest,
+            };
             match target {
-                TabTarget::Tab(id) => {
-                    let tab_style =
-                        if Some(id) == self.selected && selected_state != TabState::Absent {
-                            if hovered {
-                                crate::style::hover_style(selected_style)
-                            } else {
-                                selected_style
-                            }
-                        } else {
-                            quiet
-                        };
-                    paint(id, rect, tab_style, buf);
-                }
+                TabTarget::Tab(id) => paint(id, rect, tab_style(id), buf),
                 TabTarget::Close(id) => {
-                    let close = if Some(id) == self.selected && selected_state != TabState::Absent {
-                        if hovered {
-                            crate::style::hover_style(selected_style)
-                        } else {
-                            selected_style
-                        }
-                    } else {
-                        quiet
-                    };
-                    Line::from("×").style(close).render(rect, buf);
+                    Line::from(" × ").style(tab_style(id)).render(rect, buf);
                 }
                 TabTarget::Overflow { glyph, .. } => {
                     let arrow = if hovered {
@@ -172,14 +170,36 @@ impl<'a, Id: Copy + Eq> TabStrip<'a, Id> {
                     let add = match (hovered, add_state) {
                         (true, TabState::Active) => crate::style::hover_style(style(add_state)),
                         (true, TabState::Inactive | TabState::Absent) => hover,
-                        (false, TabState::Active | TabState::Inactive | TabState::Absent) => {
-                            style(add_state)
-                        }
+                        (false, _) => style(add_state),
                     };
-                    Line::from(" + ").style(add).render(rect, buf);
+                    paint_control("+", rect, add, buf);
                 }
+                TabTarget::Hide => paint_toggle("›", rect, hovered, buf),
             }
         }
         targets
     }
+}
+
+/// Paint a sidebar visibility control using the same style in open and collapsed layouts.
+pub(crate) fn paint_toggle(glyph: &str, area: Rect, hovered: bool, buf: &mut Buffer) {
+    let normal = crate::style::secondary_text_style()
+        .bg(Color::Reset)
+        .not_underlined()
+        .not_reversed();
+    let style = if hovered {
+        crate::style::hover_style(normal.fg(Color::Reset))
+    } else {
+        normal
+    };
+    paint_control(glyph, area, style, buf);
+}
+
+fn paint_control(glyph: &str, area: Rect, style: Style, buf: &mut Buffer) {
+    let text = if area.width >= 3 {
+        format!(" {glyph} ")
+    } else {
+        glyph.to_owned()
+    };
+    Line::from(text).style(style).render(area, buf);
 }

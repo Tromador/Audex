@@ -66,7 +66,6 @@ members = [
     "exec-server/tests/support",
     "execpolicy",
     "execpolicy-rules",
-    "ext/agent",
     "ext/agent-message-board",
     "ext/connectors",
     "ext/extension-api",
@@ -100,6 +99,7 @@ members = [
     "model-provider-info",
     "mxc-sandbox",
     "models-manager",
+    "network-policy-types",
     "network-proxy",
     "ollama",
     "process-hardening",
@@ -136,6 +136,7 @@ members = [
     "utils/cargo-bin",
     "git-utils",
     "utils/cache",
+    "utils/cached-str",
     "utils/critical-path",
     "utils/git-discovery",
     "utils/head-tail-buffer",
@@ -144,7 +145,6 @@ members = [
     "utils/home-dir",
     "utils/process",
     "utils/pty",
-    "utils/readiness",
     "utils/redacted-string",
     "utils/rustls-provider",
     "utils/string",
@@ -164,6 +164,7 @@ members = [
     "codex-client",
     "codex-api",
     "state",
+    "statsig",
     "terminal-detection",
     "test-binary-support",
     "thread-manager-sample",
@@ -173,6 +174,7 @@ members = [
     "uds",
     "codex-experimental-api-macros",
     "plugin",
+    "plugin-archive-verification",
     "model-provider",
 ]
 resolver = "2"
@@ -285,11 +287,13 @@ codex-mcp-extension = { path = "ext/mcp" }
 codex-model-provider-info = { path = "model-provider-info" }
 codex-models-manager = { path = "models-manager" }
 codex-mxc-sandbox = { path = "mxc-sandbox" }
+codex-network-policy-types = { path = "network-policy-types" }
 codex-network-proxy = { path = "network-proxy" }
 codex-ollama = { path = "ollama" }
 codex-otel = { path = "otel" }
 codex-otel-trace-websocket = { path = "otel-trace-websocket" }
 codex-plugin = { path = "plugin" }
+codex-plugin-archive-verification = { path = "plugin-archive-verification" }
 codex-model-provider = { path = "model-provider" }
 codex-process-hardening = { path = "process-hardening" }
 codex-protocol = { path = "protocol" }
@@ -308,6 +312,7 @@ codex-shell-command = { path = "shell-command" }
 codex-skills-extension = { path = "ext/skills" }
 codex-skills = { path = "skills" }
 codex-state = { path = "state" }
+codex-statsig = { path = "statsig" }
 codex-terminal-detection = { path = "terminal-detection" }
 codex-test-binary-support = { path = "test-binary-support" }
 codex-thread-context-ids = { path = "thread-context-ids" }
@@ -322,6 +327,7 @@ codex-utils-absolute-path = { path = "utils/absolute-path" }
 codex-utils-approval-presets = { path = "utils/approval-presets" }
 codex-utils-audio = { path = "utils/audio" }
 codex-utils-cache = { path = "utils/cache" }
+codex-utils-cached-str = { path = "utils/cached-str" }
 codex-utils-cargo-bin = { path = "utils/cargo-bin" }
 codex-utils-cli = { path = "utils/cli" }
 codex-utils-critical-path = { path = "utils/critical-path" }
@@ -368,6 +374,7 @@ async-io = "2.6.0"
 async-stream = "0.3.6"
 aws-config = "1"
 aws-credential-types = "1"
+aws-lc-rs = "1.18.1"
 aws-sigv4 = "1"
 aws-smithy-runtime-api = { version = "1", features = ["client", "http-1x"] }
 aws-smithy-types = { version = "1", features = ["http-body-1-x"] }
@@ -416,6 +423,7 @@ gix = { version = "0.89.0", default-features = false, features = ["sha1"] }
 gix-url = "0.40.0"
 glob = "0.3"
 globset = "0.4"
+hex = "0.4.3"
 hmac = "0.12.1"
 http = "1.3.1"
 httpdate = "1.0.3"
@@ -425,6 +433,7 @@ iana-time-zone = "0.1.64"
 icu_decimal = "2.1"
 icu_locale_core = "2.1"
 icu_provider = { version = "2.1", features = ["sync"] }
+icu_properties = "2.2"
 ignore = "0.4.30"
 image = { version = "^0.25.9", default-features = false }
 include_dir = "0.7.4"
@@ -533,6 +542,7 @@ sqlx-macros = { version = "=0.9.0", default-features = false, features = ["deriv
 # Preserve the target driver's query-description support without building it on the host.
 sqlx-sqlite = { version = "=0.9.0", default-features = false, features = ["offline"] }
 starlark = { version = "0.14.2", default-features = false }
+string_cache = "0.11"
 strum = "0.27.2"
 strum_macros = "0.28.0"
 supports-color = "3.0.2"

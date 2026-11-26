@@ -12,14 +12,23 @@ use std::task::Poll;
 
 use crate::context::ContextualUserFragment;
 use crate::context::UserGoalUpdate;
+use crate::context_manager::ContextManager;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
 use codex_history::RetainedContextEvent;
 use codex_history::RetainedUserMessage;
 use codex_history::RolloutItem;
+use codex_history::VerifiedAnswer;
+use codex_history::VerifiedQuestionAnswer;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::request_user_input::RequestUserInputEvent;
+use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_thread_store::PersistContext;
+use codex_utils_output_truncation::TruncationPolicy;
+use futures::FutureExt;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::task::TaskTracker;
@@ -28,6 +37,65 @@ use tokio_util::task::task_tracker::TaskTrackerToken;
 use super::Session;
 use super::TurnContext;
 use super::thread_settings;
+
+pub(crate) struct PendingUserInput {
+    pub(super) tx_response: oneshot::Sender<AcceptedUserInputResponse>,
+    pub(super) verify_on_accept: Option<RequestUserInputEvent>,
+}
+
+pub(super) struct AcceptedUserInputResponse {
+    pub(super) response: RequestUserInputResponse,
+    /// Order reserved when the host accepts this response.
+    pub(super) acceptance_order: u64,
+    /// Dropping the waiter detaches the session's history append.
+    pub(super) recording: Option<JoinHandle<()>>,
+}
+
+impl AcceptedUserInputResponse {
+    pub(super) fn verified_answer(
+        &self,
+        prompt: Option<RequestUserInputEvent>,
+    ) -> Option<RetainedContextEvent> {
+        let prompt = prompt?;
+        let questions = prompt
+            .questions
+            .into_iter()
+            .filter_map(|question| {
+                let response = self.response.answers.get(&question.id)?;
+                let answers = response
+                    .answers
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|answer| !answer.trim().is_empty())
+                    .collect::<Vec<_>>();
+                if answers.is_empty() {
+                    return None;
+                }
+                let mut question_text = question.question;
+                for option in question
+                    .options
+                    .into_iter()
+                    .flatten()
+                    .filter(|option| response.answers.contains(&option.label))
+                {
+                    question_text.push_str(&format!("\n{}: {}", option.label, option.description));
+                }
+                Some(VerifiedQuestionAnswer {
+                    question: question_text,
+                    answer: answers.join("\n"),
+                })
+            })
+            .collect::<Vec<_>>();
+        (!questions.is_empty()).then_some(RetainedContextEvent::VerifiedAnswer {
+            answer: VerifiedAnswer {
+                turn_id: prompt.turn_id,
+                call_id: prompt.call_id,
+                questions,
+            },
+            acceptance_order: Some(self.acceptance_order),
+        })
+    }
+}
 
 /// Only unrecorded starts need a reservation; abandoned entries expire with the turn.
 #[derive(Default)]
@@ -85,14 +153,12 @@ impl Session {
         &self,
         update: UserGoalUpdate,
     ) -> std::io::Result<()> {
-        // Goal metadata must not initialize a model step, even on a goal-first thread.
-        // Keep context construction off callers' stacks, including the TUI RPC dispatcher.
-        let context = Box::pin(self.new_inject_items_context()).await;
+        let sub_id = self.next_internal_sub_id();
         // Earlier Code Mode messages may need the persistence lock before this can return.
         let user_input_order = self.reserve_user_input_order().await;
         let _guard = thread_settings::acquire_persistence_lock(self).await;
         let mut item = ContextualUserFragment::into(update);
-        Self::stamp_response_item_for_history(&mut item, &context.sub_id);
+        Self::stamp_response_item_for_history(&mut item, &sub_id);
         self.assign_missing_response_item_id(&mut item);
         let mut item = ResponseItemEnvelope {
             item,
@@ -117,9 +183,10 @@ impl Session {
             .await?;
         self.state.lock().await.history.record_annotated_items(
             std::slice::from_mut(&mut item),
-            context.model_info().truncation_policy.into(),
+            // This is a user message. Only tool outputs use the truncation policy.
+            TruncationPolicy::Bytes(0),
         );
-        self.send_raw_response_items(&context, std::slice::from_ref(&item.item))
+        self.send_raw_response_items(&sub_id, std::slice::from_ref(&item.item))
             .await;
         Ok(())
     }
@@ -155,20 +222,78 @@ impl Session {
         pending.clone()
     }
 
-    pub(crate) async fn record_retained_context(&self, mut event: RetainedContextEvent) {
+    pub(crate) async fn record_retained_context(&self, event: RetainedContextEvent) {
+        if let Some(recording) = self.start_retained_context(event).await {
+            let _ = recording.await;
+        }
+    }
+
+    pub(super) async fn start_retained_context(
+        &self,
+        mut event: RetainedContextEvent,
+    ) -> Option<JoinHandle<()>> {
         // Share the checkpoint persistence lock so a fact cannot land on the wrong side
         // of the checkpoint/suffix boundary. Ephemeral threads use the same live state.
-        let _guard = thread_settings::acquire_persistence_lock(self).await;
-        if self
-            .state
-            .lock()
-            .await
-            .history
-            .record_retained_context_for_persistence(&mut event)
-        {
-            self.persist_rollout_items(&[RolloutItem::RetainedContext(event)])
-                .await;
+        let guard = thread_settings::acquire_owned_persistence_lock(self).await;
+        let write = {
+            let mut state = self.state.lock().await;
+            let (recorded, write) = self.record_review_evidence(&mut state.history, |history| {
+                history.record_retained_context_for_persistence(&mut event)
+            });
+            if !recorded {
+                return None;
+            }
+            write
+        };
+        let item = RolloutItem::RetainedContext(event);
+        if let Some(write) = write {
+            return self.start_review_write(vec![item], write, Some(guard));
         }
+        self.persist_rollout_items(&[item]).await;
+        None
+    }
+
+    /// Only opted-in roots retain changed evidence through cancellation.
+    /// Enroll it in the session's shutdown drain before releasing the history lock.
+    pub(super) fn record_review_evidence<T>(
+        &self,
+        history: &mut ContextManager,
+        record: impl FnOnce(&mut ContextManager) -> T,
+    ) -> (T, Option<TaskTrackerToken>) {
+        if !self.preserve_review_writes {
+            return (record(history), None);
+        }
+        let before = history.guardian_revisions();
+        let recorded = record(history);
+        let token = if before != history.guardian_revisions() {
+            self.track_code_mode_message()
+        } else {
+            None
+        };
+        (recorded, token)
+    }
+
+    /// Call before yielding after admission. Start in caller order, then let the
+    /// session finish the append even if the caller drops its join handle.
+    pub(super) fn start_review_write(
+        &self,
+        items: Vec<RolloutItem>,
+        token: TaskTrackerToken,
+        settings: Option<OwnedSemaphorePermit>,
+    ) -> Option<JoinHandle<()>> {
+        let live_thread = self.live_thread().cloned();
+        let runtime = self.services.local_agent_runtime.clone();
+        let thread_id = self.thread_id;
+        let mut append = Box::pin(async move {
+            let _token = token;
+            let _settings = settings;
+            Self::append_rollout_items(live_thread.as_ref(), &runtime, thread_id, &items).await;
+        });
+        // Reserve the writer's queue position even if this poll exhausted its Tokio budget.
+        tokio::task::unconstrained(append.as_mut())
+            .now_or_never()
+            .is_none()
+            .then(|| tokio::spawn(append))
     }
 
     pub(crate) fn track_code_mode_message(&self) -> Option<TaskTrackerToken> {

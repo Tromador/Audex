@@ -576,12 +576,12 @@ async fn project_diagnostic_uses_the_current_file_and_ignores_its_provider() -> 
     );
     std::fs::write(
         &path,
-        "[tui]\nstatus_line_provider = 42\nvim_mode_default = 43\n",
+        "ignored_setting = true\n[tui]\nstatus_line_provider = 42\nvim_mode_default = 43\n",
     )?;
     let error = first_layer_config_error_from_entries(&[layer])
         .await
         .expect("invalid vim setting");
-    assert_eq!((error.path, error.range.start.line), (path, 3));
+    assert_eq!((error.path, error.range.start.line), (path, 4));
     assert!(error.message.contains("43"), "{}", error.message);
     Ok(())
 }
@@ -1359,11 +1359,12 @@ fn project_config_cannot_supply_guardian_v3_prompts_or_their_cap() {
 }
 
 #[test]
-fn project_config_cannot_change_system_proxy_routing_or_credential_masking() {
+fn project_config_cannot_change_protected_features() {
     for key in [
         "respect_system_proxy",
         "system_proxy_fallback",
         "credential_masking",
+        "guardianv3_shadow",
     ] {
         for enabled in [false, true] {
             let mut config: TomlValue =

@@ -15,6 +15,7 @@ use codex_app_server_protocol::Turn;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
+use uuid::Uuid;
 
 #[test]
 fn tui_startup_future_stays_bounded() {
@@ -710,24 +711,20 @@ async fn startup_session_cwd_without_metadata_is_rejected() -> color_eyre::Resul
 
 #[test]
 fn alternate_screen_respects_terminal_compatibility_and_overrides() {
-    for terminal_app_over_ssh in [false, true] {
+    for prefer_inline_screen in [false, true] {
         for (mode, expected) in [
-            (AltScreenMode::Auto, !terminal_app_over_ssh),
+            (AltScreenMode::Auto, !prefer_inline_screen),
             (AltScreenMode::Always, true),
             (AltScreenMode::Never, false),
         ] {
             assert_eq!(
-                determine_alt_screen_mode(
-                    /*no_alt_screen*/ false,
-                    mode,
-                    terminal_app_over_ssh
-                ),
+                determine_alt_screen_mode(/*no_alt_screen*/ false, mode, prefer_inline_screen),
                 expected,
             );
             assert!(!determine_alt_screen_mode(
                 /*no_alt_screen*/ true,
                 mode,
-                terminal_app_over_ssh
+                prefer_inline_screen
             ));
         }
     }

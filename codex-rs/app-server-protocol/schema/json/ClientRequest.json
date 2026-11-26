@@ -461,6 +461,13 @@
         "input": {
           "$ref": "#/definitions/AuditInput"
         },
+        "originThreadId": {
+          "description": "Source conversation for an MCP-backed target preflight; never shown to reviewers.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "reviewers": {
           "items": {
             "$ref": "#/definitions/AuditReviewer"
@@ -3455,46 +3462,6 @@
       "enum": [
         "text",
         "audio"
-      ],
-      "type": "string"
-    },
-    "RealtimeVoice": {
-      "enum": [
-        "alloy",
-        "arbor",
-        "ash",
-        "aube",
-        "ballad",
-        "breeze",
-        "bubbie",
-        "cedar",
-        "coral",
-        "cove",
-        "echo",
-        "ember",
-        "haetsal",
-        "hanul",
-        "himari",
-        "juniper",
-        "leher",
-        "maple",
-        "marin",
-        "miko",
-        "neer",
-        "porto",
-        "rindo",
-        "rio",
-        "rivage",
-        "sage",
-        "selva",
-        "shimmer",
-        "sol",
-        "sonna",
-        "spruce",
-        "tinta",
-        "vale",
-        "verse",
-        "viola"
       ],
       "type": "string"
     },

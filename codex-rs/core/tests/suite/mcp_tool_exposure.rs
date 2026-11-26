@@ -87,7 +87,7 @@ use wiremock::matchers::path_regex;
 #[derive(Clone, Default)]
 struct McpCacheCounters {
     binding_captures: Arc<AtomicUsize>,
-    search_index_builds: Arc<AtomicUsize>,
+    search_handler_constructions: Arc<AtomicUsize>,
 }
 
 impl<S: Subscriber> Layer<S> for McpCacheCounters {
@@ -98,7 +98,8 @@ impl<S: Subscriber> Layer<S> for McpCacheCounters {
                 self.binding_captures.fetch_add(1, Ordering::SeqCst);
             }
             ("codex_core::tools::handlers::tool_search", "new") => {
-                self.search_index_builds.fetch_add(1, Ordering::SeqCst);
+                self.search_handler_constructions
+                    .fetch_add(1, Ordering::SeqCst);
             }
             _ => {}
         }
@@ -1033,6 +1034,7 @@ async fn root_reconciliation_reuses_pending_apps_startup() -> Result<()> {
                 windows_sandbox_type: test.config.permissions.windows_sandbox_type,
                 use_legacy_landlock: test.config.features.use_legacy_landlock(),
                 exec_policy: None,
+                plugins: Default::default(),
                 mcp_policy: None,
                 network_policy: None,
                 selected_capability_roots: vec![SelectedCapabilityRoot {
@@ -1766,14 +1768,14 @@ async fn deferred_tool_world_state_tracks_initial_unchanged_and_removed_namespac
     test.submit_turn("inspect initially available deferred tools")
         .await?;
     let initial_captures = counters.binding_captures.load(Ordering::SeqCst);
-    let initial_index_builds = counters.search_index_builds.load(Ordering::SeqCst);
+    let initial_handlers = counters.search_handler_constructions.load(Ordering::SeqCst);
     assert!(
         initial_captures > 0,
         "the initial turn must capture an MCP binding"
     );
     assert!(
-        initial_index_builds > 0,
-        "the initial turn must build the search index"
+        initial_handlers > 0,
+        "the initial turn must construct a tool search handler"
     );
 
     // Publish a new catalog revision with the same metadata from the ready client.
@@ -1784,9 +1786,9 @@ async fn deferred_tool_world_state_tracks_initial_unchanged_and_removed_namespac
         "the follow-up must capture a new binding after the refresh"
     );
     assert_eq!(
-        counters.search_index_builds.load(Ordering::SeqCst),
-        initial_index_builds,
-        "equivalent bindings must preserve MCP handlers and reuse the search index"
+        counters.search_handler_constructions.load(Ordering::SeqCst),
+        initial_handlers,
+        "equivalent bindings must preserve MCP handlers and reuse the tool search handler"
     );
 
     let current_config = test.codex.config().await;
@@ -2058,15 +2060,23 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
     release_apps_recovery
         .send(())
         .expect("background Apps recovery should still be waiting");
-    wait_for_event(&test.codex, |event| {
-        matches!(
-            event,
-            EventMsg::McpStartupUpdate(update)
-                if update.server == CODEX_APPS_MCP_SERVER_NAME
-                    && matches!(update.status, codex_protocol::protocol::McpStartupStatus::Ready)
-        )
+    let duration_ms = core_test_support::wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::McpStartupUpdate(update)
+            if update.server == CODEX_APPS_MCP_SERVER_NAME
+                && matches!(
+                    update.status,
+                    codex_protocol::protocol::McpStartupStatus::Ready
+                ) =>
+        {
+            Some(update.duration_ms)
+        }
+        _ => None,
     })
     .await;
+    assert!(
+        duration_ms.is_some(),
+        "Apps recovery should report its own startup duration"
+    );
 
     test.codex
         .submit(Op::UserInputAnswer {

@@ -69,7 +69,7 @@ const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 struct ToolPlanInputs {
     tool_runtimes: Vec<RegisteredTool>,
     tool_suggest_candidates: Option<ToolSuggestCandidates>,
-    extension_tool_executors: Vec<Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>>,
+    extension_tool_executors: Vec<Arc<dyn ToolExecutor>>,
     wait_for_environment_tool_config: Option<Arc<WaitForEnvironmentToolConfig>>,
     dynamic_tools: Vec<DynamicToolSpec>,
 }
@@ -317,7 +317,7 @@ struct TestNamespaceExtensionTool {
     tool_name: &'static str,
 }
 
-impl<'call> ToolExecutor<ExtensionToolCall<'call>> for TestNamespaceExtensionTool {
+impl ToolExecutor for TestNamespaceExtensionTool {
     fn tool_name(&self) -> ToolName {
         ToolName::namespaced(self.namespace, self.tool_name)
     }
@@ -337,10 +337,7 @@ impl<'call> ToolExecutor<ExtensionToolCall<'call>> for TestNamespaceExtensionToo
         })
     }
 
-    fn handle<'a>(&'a self, _call: ExtensionToolCall<'call>) -> codex_tools::ToolExecutorFuture<'a>
-    where
-        'call: 'a,
-    {
+    fn handle<'a>(&'a self, _call: ExtensionToolCall<'a>) -> codex_tools::ToolExecutorFuture<'a> {
         Box::pin(async {
             Ok(Box::new(codex_tools::JsonToolOutput::new(json!({}))) as Box<dyn ToolOutput>)
         })
@@ -349,7 +346,7 @@ impl<'call> ToolExecutor<ExtensionToolCall<'call>> for TestNamespaceExtensionToo
 
 struct DeferredExtensionTool;
 
-impl<'call> ToolExecutor<ExtensionToolCall<'call>> for DeferredExtensionTool {
+impl ToolExecutor for DeferredExtensionTool {
     fn tool_name(&self) -> ToolName {
         ToolName::plain("extension_echo")
     }
@@ -376,10 +373,7 @@ impl<'call> ToolExecutor<ExtensionToolCall<'call>> for DeferredExtensionTool {
         ToolExposure::Deferred
     }
 
-    fn handle<'a>(&'a self, _call: ExtensionToolCall<'call>) -> codex_tools::ToolExecutorFuture<'a>
-    where
-        'call: 'a,
-    {
+    fn handle<'a>(&'a self, _call: ExtensionToolCall<'a>) -> codex_tools::ToolExecutorFuture<'a> {
         Box::pin(async { panic!("spec planning should not execute extension tools") })
     }
 }
@@ -536,10 +530,7 @@ async fn allowed_tools_filter_sources_before_code_mode_and_discovery() {
                 mcp_runtime("kept", "kept", "lookup", ToolExposure::Deferred),
                 mcp_runtime("excluded", "excluded", "lookup", ToolExposure::Deferred),
             ],
-            [Arc::new(DeferredExtensionTool)
-                as Arc<
-                    dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>,
-                >],
+            [Arc::new(DeferredExtensionTool) as Arc<dyn ToolExecutor>],
             &[dynamic_tool(
                 /*namespace*/ None,
                 "dynamic_echo",
@@ -2797,6 +2788,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         );
     }
     assert!(!properties.contains_key("agent_type"));
+    assert!(!properties.contains_key("service_tier"));
 
     let v2 = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
@@ -2855,9 +2847,8 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
     for property in ["model", "reasoning_effort"] {
         assert!(spawn_agent_properties.contains_key(property));
     }
-    for property in ["agent_type", "service_tier"] {
-        assert!(!spawn_agent_properties.contains_key(property));
-    }
+    assert!(!spawn_agent_properties.contains_key("agent_type"));
+    assert!(!spawn_agent_properties.contains_key("service_tier"));
     let spawn_agent_description = spawn_agent.description.as_str();
     assert!(!spawn_agent_description.contains("max_concurrent_threads_per_session"));
     assert!(spawn_agent_description.contains(

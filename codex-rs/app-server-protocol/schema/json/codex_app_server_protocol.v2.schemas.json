@@ -394,6 +394,21 @@
       "title": "AccountUpdatedNotification",
       "type": "object"
     },
+    "AccountVoiceOption": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "voice": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "voice"
+      ],
+      "type": "object"
+    },
     "ActivePermissionProfile": {
       "properties": {
         "extends": {
@@ -695,6 +710,15 @@
         },
         "moderated": {
           "type": "boolean"
+        },
+        "promptWellbeingResults": {
+          "items": {
+            "$ref": "#/definitions/PromptWellbeingResult"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2148,6 +2172,13 @@
         },
         "input": {
           "$ref": "#/definitions/AuditInput"
+        },
+        "originThreadId": {
+          "description": "Source conversation for an MCP-backed target preflight; never shown to reviewers.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "reviewers": {
           "items": {
@@ -7502,6 +7533,15 @@
         },
         {
           "properties": {
+            "additionalContextLimit": {
+              "description": "Approximate token threshold for spilling plaintext `additionalContext` to disk. Defaults to 2,500. For MCP hooks, `0` and values above 10,000 trigger a warning and use 10,000. Command hooks can disable spilling with `0` or set a higher threshold. The MCP ceiling mirrors the current default tool-output budget and may change in the future. Encrypted hook output has a separate byte limit.",
+              "format": "uint",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "input": {
               "additionalProperties": true,
               "type": "object"
@@ -10981,7 +11021,7 @@
       ],
       "properties": {
         "additionalContextLimit": {
-          "description": "Configured `additionalContext` spill threshold. `null` uses 2,500 tokens; `0` disables spilling.",
+          "description": "Configured `additionalContext` spill threshold. `null` uses 2,500 approximate tokens. Only command hooks support `0` (no spill) or values above 10,000.",
           "format": "uint",
           "minimum": 0.0,
           "type": [
@@ -12904,6 +12944,15 @@
     "McpServerStatusUpdatedNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
+        "durationMs": {
+          "description": "Elapsed startup time for a measured attempt. Older servers omit this field.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "environmentId": {
           "description": "Registration scope, not necessarily the server's execution environment.",
           "type": [
@@ -16209,6 +16258,33 @@
         "recencyAt"
       ],
       "type": "string"
+    },
+    "PromptWellbeingResult": {
+      "description": "Wellbeing results for a single scored input item.",
+      "properties": {
+        "inputItemId": {
+          "type": "string"
+        },
+        "labels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "scores": {
+          "additionalProperties": {
+            "format": "double",
+            "type": "number"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "inputItemId",
+        "labels",
+        "scores"
+      ],
+      "type": "object"
     },
     "ProviderSettings": {
       "oneOf": [

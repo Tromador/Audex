@@ -88,9 +88,10 @@ async fn session_header_uses_catalog_display_name_without_changing_model() {
         let mut preset = get_available_model(&chat, "gpt-5.5");
         preset.model = slug.to_string();
         preset.display_name = display_name.unwrap_or_default().to_string();
-        chat.model_catalog = Arc::new(ModelCatalog::new(
+        set_test_model_catalog(
+            &mut chat,
             display_name.map(|_| preset).into_iter().collect(),
-        ));
+        );
         chat.show_welcome_banner = first_event;
         chat.local_settings.tui.show_tooltips = false;
         let mut session = configured_thread_session(ThreadId::new());
@@ -296,7 +297,7 @@ async fn safety_buffering_offers_one_retry_with_app_wording() {
     let mut preset = get_available_model(&chat, "gpt-5.5");
     preset.model = "faster-model".to_string();
     preset.display_name = "Faster Model".to_string();
-    chat.model_catalog = Arc::new(ModelCatalog::new(vec![preset]));
+    set_test_model_catalog(&mut chat, vec![preset]);
     let (thread_id, turn_id, _) = start_safety_buffering_test_turn(&mut chat, &mut op_rx);
 
     let notification = safety_buffering_notification(thread_id, turn_id, Some("faster-model"));
@@ -842,6 +843,51 @@ async fn thread_settings_updated_updates_visible_state_without_transcript() {
     );
 
     assert_eq!(chat.current_model(), "gpt-5.4");
+}
+
+#[tokio::test]
+async fn thread_settings_updated_during_replay_restores_effort_without_animating() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
+    let thread_id = ThreadId::new();
+    chat.local_settings.tui.status_line = Some(vec!["model-with-reasoning".to_string()]);
+    let mut session = configured_thread_session(thread_id);
+    session.reasoning_effort = Some(ReasoningEffortConfig::Ultra);
+    chat.handle_thread_session(session);
+    chat.show_welcome_banner = false;
+
+    let settings = |effort| {
+        let mut update = thread_settings_for_test("gpt-5.2", thread_id);
+        update.thread_settings.collaboration_mode.mode = ModeKind::Default;
+        update.thread_settings.service_tier = None;
+        update.thread_settings.effort = Some(effort);
+        ServerNotification::ThreadSettingsUpdated(update)
+    };
+    crate::terminal_palette::with_test_palette(/*colors*/ None, || {
+        // Switching back restores the current session before replaying older settings.
+        let replay = Some(ReplayKind::ThreadSnapshot);
+        chat.handle_server_notification(settings(ReasoningEffortConfig::High), replay);
+        chat.handle_server_notification(settings(ReasoningEffortConfig::Max), replay);
+        assert!(render_bottom_popup(&chat, /*width*/ 80).contains("max"));
+        chat.handle_server_notification(settings(ReasoningEffortConfig::Ultra), replay);
+        insta::assert_snapshot!(render_bottom_popup(&chat, /*width*/ 80), @"
+        ────────────────────────────────────────────────────────────────────────────────
+        » Ask Codex to do anything
+        ────────────────────────────────────────────────────────────────────────────────
+          gpt-5.2 ultra
+          ? for shortcuts
+        ");
+
+        // A live change still starts by showing the outgoing Ultra status line.
+        chat.handle_server_notification(
+            settings(ReasoningEffortConfig::Max),
+            /*replay_kind*/ None,
+        );
+        assert_eq!(
+            chat.current_reasoning_effort(),
+            Some(ReasoningEffortConfig::Max)
+        );
+        assert!(render_bottom_popup(&chat, /*width*/ 80).contains("ultra"));
+    });
 }
 
 #[tokio::test]

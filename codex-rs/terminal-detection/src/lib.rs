@@ -1,10 +1,17 @@
 //! Terminal detection utilities.
 //!
 //! This module feeds terminal metadata into OpenTelemetry user-agent logging and into
-//! terminal-specific configuration choices in the TUI. Detection only reads the
-//! environment; it must not execute helpers selected by an untrusted PATH.
+//! terminal-specific configuration choices in the TUI. Detection reads the
+//! environment and stdout capabilities without executing helpers from PATH.
 
 use std::sync::OnceLock;
+
+mod color;
+pub use color::StdoutColorLevel;
+pub use color::stdout_color_level;
+pub use color::terminal_color_level;
+
+const GHOSTTY_TERM: &str = "xterm-ghostty";
 
 /// Structured terminal identification data.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,6 +49,8 @@ pub enum TerminalName {
     Ghostty,
     /// Rex terminal emulator.
     Rex,
+    /// Orca integrated terminal.
+    Orca,
     /// iTerm2 terminal emulator.
     Iterm2,
     /// Warp terminal emulator.
@@ -139,7 +148,7 @@ impl TerminalInfo {
     fn from_term(term: String, multiplexer: Option<Multiplexer>) -> Self {
         let name = match term.as_str() {
             "dumb" => TerminalName::Dumb,
-            "xterm-ghostty" => TerminalName::Ghostty,
+            GHOSTTY_TERM => TerminalName::Ghostty,
             "xterm-rex" => TerminalName::Rex,
             "wezterm" | "wezterm-mux" => TerminalName::WezTerm,
             _ => TerminalName::Unknown,
@@ -180,6 +189,7 @@ impl TerminalInfo {
                 }
                 TerminalName::Ghostty => format_terminal_version("Ghostty", &self.version),
                 TerminalName::Rex => format_terminal_version("rex", &self.version),
+                TerminalName::Orca => format_terminal_version("Orca", &self.version),
                 TerminalName::Iterm2 => format_terminal_version("iTerm.app", &self.version),
                 TerminalName::WarpTerminal => {
                     format_terminal_version("WarpTerminal", &self.version)
@@ -203,6 +213,15 @@ impl TerminalInfo {
     /// Returns whether the active terminal multiplexer is Zellij.
     pub fn is_zellij(&self) -> bool {
         matches!(self.multiplexer, Some(Multiplexer::Zellij { .. }))
+    }
+
+    /// Whether this terminal is VS Code running in a dev container.
+    pub fn is_vscode_dev_container(&self) -> bool {
+        self.is_vscode_dev_container_in(&ProcessEnvironment)
+    }
+
+    fn is_vscode_dev_container_in(&self, env: &dyn Environment) -> bool {
+        self.name == TerminalName::VsCode && env.var("REMOTE_CONTAINERS").as_deref() == Some("true")
     }
 }
 
@@ -421,6 +440,7 @@ fn terminal_name_from_term_program(value: &str) -> Option<TerminalName> {
         "appleterminal" => Some(TerminalName::AppleTerminal),
         "ghostty" => Some(TerminalName::Ghostty),
         "rex" => Some(TerminalName::Rex),
+        "orca" => Some(TerminalName::Orca),
         "iterm" | "iterm2" | "itermapp" => Some(TerminalName::Iterm2),
         "warp" | "warpterminal" => Some(TerminalName::WarpTerminal),
         "vscode" => Some(TerminalName::VsCode),

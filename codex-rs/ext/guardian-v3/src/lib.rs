@@ -1,6 +1,5 @@
-//! Guardian's durable evidence storage, owned by the main thread.
-//! The housekeeper routes originals to topic channels. Each reviewer searches the live board
-//! and manages its own subscriptions.
+//! The main thread owns Guardian's evidence board. The housekeeper routes originals to
+//! topic channels. Each live reviewer owns its subscriptions and inbox in memory.
 //! Hosts invoke permanent-deletion cleanup only when Guardian V3 is enabled.
 
 #![recursion_limit = "256"]
@@ -14,8 +13,6 @@ mod actor;
 mod conversation;
 pub use actor::ActorReviewer;
 pub use actor::PreparedReviewer;
-mod cutoff;
-pub use cutoff::RootEvidence;
 mod delivery;
 mod evidence;
 mod host;
@@ -24,6 +21,8 @@ mod housekeeper_sampler;
 mod housekeeper_transport;
 mod inbox;
 pub use host::install;
+pub use host::install_shadow;
+pub use host::route_pending_history;
 mod retrieval_tools;
 mod sampling;
 mod subscription_tools;
@@ -41,9 +40,13 @@ pub fn board_retrieval(instructions: Option<&str>) -> codex_core::guardian_revie
     let strategy = instructions
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .unwrap_or(
-            "Use the guardian_board tools when you need more evidence for the exact action.",
-        );
+        .unwrap_or(concat!(
+            "Before your first verdict for each task, use the Guardian board even if the action appears low risk. ",
+            "The pending action does not include the user's instructions. ",
+            "Call guardian_board.get_channels, then call guardian_board.subscribe for the relevant channel ",
+            "if you do not already follow it. Read the user's original instructions there. ",
+            "On later reviews, use the subscribed updates and look up any missing or possibly stale instructions.",
+        ));
     let board_rules = concat!(
         "Search or read any live channel, including channels you do not follow. ",
         "Use subscribed_channels to see which channels you follow. Subscribe or unsubscribe to manage which channels feed new originals to this conversation. ",
@@ -67,9 +70,8 @@ pub fn local_board_options() -> LocalBoardOptions {
     }
 }
 
-/// Selects the board for the owning main thread, never the temporary reviewer or housekeeper.
-/// Hosts use a read-write connection; reviewers use a read-only connection, which still
-/// permits their own explicit subscriptions. Cleanup uses the same namespace and root identity.
+/// Selects the owning main thread's board. The housekeeper uses a read-write connection
+/// and reviewers use read-only connections. Cleanup uses the same namespace and root identity.
 pub fn local_board(sqlite: SqliteConfig, root: SessionId) -> LocalBoard {
     LocalBoard::new(sqlite, root).with_options(local_board_options())
 }

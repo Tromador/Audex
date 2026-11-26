@@ -49,7 +49,7 @@ impl ChatWidget {
         } else if !self.daybreak_account_eligible() {
             None
         } else {
-            match crate::daybreak::availability(&self.model_catalog.models) {
+            match crate::daybreak::availability(self.model_catalog.models()) {
                 Some(true) => Some("Enable broader access for cybersecurity work"),
                 Some(false) => Some("Learn about broader access for cybersecurity work"),
                 None => Some("Manage broader access for cybersecurity work"),
@@ -280,7 +280,7 @@ impl ChatWidget {
         let had_refreshing_status_outputs = !self.refreshing_status_outputs.is_empty();
         let now = Local::now();
         for (_, handle) in self.refreshing_status_outputs.drain(..) {
-            handle.finish_rate_limit_refresh(&[], now);
+            handle.finish_rate_limit_refresh(&[], /*quota_plan*/ None, now);
         }
         if had_refreshing_status_outputs {
             self.request_redraw();
@@ -295,7 +295,10 @@ impl ChatWidget {
         self.quota_plan = None;
         self.plan_type = plan_type;
         self.has_chatgpt_account = has_chatgpt_account;
-        if api_key_changed {
+        if api_key_changed
+            || (self.model_catalog.models().is_empty()
+                && self.thread_params_mode != crate::ThreadParamsMode::Cloud)
+        {
             self.refresh_account_scoped_models();
         }
         self.set_daybreak_enabled(self.daybreak_enabled);
@@ -353,7 +356,7 @@ impl ChatWidget {
 
     pub(crate) fn should_disable_daybreak(&self, model: &str) -> bool {
         self.daybreak_enabled
-            && self.model_catalog.models.iter().any(|entry| {
+            && self.model_catalog.models().iter().any(|entry| {
                 entry.model == model
                     && crate::daybreak::availability(std::slice::from_ref(entry)) == Some(false)
             })
@@ -436,18 +439,7 @@ impl ChatWidget {
         &mut self,
         notification: ThreadSettingsUpdatedNotification,
     ) {
-        let Ok(thread_id) = ThreadId::from_string(&notification.thread_id) else {
-            tracing::warn!(
-                thread_id = notification.thread_id,
-                "ignoring app-server ThreadSettingsUpdated with invalid thread_id"
-            );
-            return;
-        };
-        if self.thread_id != Some(thread_id) {
-            return;
-        }
-
-        self.apply_thread_settings(notification.thread_settings);
+        self.apply_thread_settings(notification, /*replay_kind*/ None);
     }
 
     #[cfg(test)]
@@ -532,7 +524,23 @@ impl ChatWidget {
         self.refresh_open_model_picker();
     }
 
-    fn apply_thread_settings(&mut self, mut settings: ThreadSettings) {
+    pub(super) fn apply_thread_settings(
+        &mut self,
+        notification: ThreadSettingsUpdatedNotification,
+        replay_kind: Option<ReplayKind>,
+    ) {
+        let Ok(thread_id) = ThreadId::from_string(&notification.thread_id) else {
+            tracing::warn!(
+                thread_id = notification.thread_id,
+                "ignoring app-server ThreadSettingsUpdated with invalid thread_id"
+            );
+            return;
+        };
+        if self.thread_id != Some(thread_id) {
+            return;
+        }
+
+        let mut settings = notification.thread_settings;
         self.invalidate_permission_discovery();
         if let Some(environments) = &settings.environments {
             self.primary_environment_cwd =
@@ -570,7 +578,7 @@ impl ChatWidget {
             &self.current_workspace_roots,
         );
         self.current_cwd = cwd;
-        self.config.model_provider_id = settings.model_provider.clone();
+        self.set_model_provider(&settings.model_provider);
         self.set_daybreak_enabled(self.daybreak_enabled);
         self.set_service_tier(settings.service_tier.clone());
         if let Err(err) = self
@@ -614,6 +622,12 @@ impl ChatWidget {
             self.queue_unavailable_daybreak_disable(&settings.model);
         }
         settings.collaboration_mode.settings.model = settings.model;
+        // A thread switch replays earlier effort changes after restoring the session.
+        // Establish each replayed tier before refreshing the composer so only live changes animate.
+        if replay_kind.is_some() {
+            self.bottom_pane
+                .set_active_reasoning_effort_baseline(settings.effort.as_ref());
+        }
         settings.collaboration_mode.settings.reasoning_effort = settings.effort;
         self.thread_settings_confirmed = true;
         self.set_effective_collaboration_mode(settings.collaboration_mode);

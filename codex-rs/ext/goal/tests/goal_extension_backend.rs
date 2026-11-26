@@ -69,7 +69,7 @@ async fn installed_goal_tools_create_goal_and_fill_empty_preview() -> anyhow::Re
         }),
     );
     let output = create_tool.handle(invocation.clone()).await?;
-    let result = output.code_mode_result(&invocation.payload);
+    let result = output.code_mode_result(&invocation.payload).into_json();
     assert_eq!(
         result,
         json!({
@@ -142,7 +142,7 @@ async fn installed_goal_tools_apply_maximum_token_budget() -> anyhow::Result<()>
     );
     let output = create_tool.handle(invocation.clone()).await?;
     assert_eq!(
-        output.code_mode_result(&invocation.payload)["goal"]["tokenBudget"],
+        output.code_mode_result(&invocation.payload).into_json()["goal"]["tokenBudget"],
         json!(100)
     );
     Ok(())
@@ -250,7 +250,7 @@ async fn installed_goal_tools_only_replace_complete_goal() -> anyhow::Result<()>
         json!({ "objective": "replacement goal" }),
     );
     let output = create_tool.handle(invocation.clone()).await?;
-    let result = output.code_mode_result(&invocation.payload);
+    let result = output.code_mode_result(&invocation.payload).into_json();
 
     assert_eq!(json!("replacement goal"), result["goal"]["objective"]);
     assert_eq!(json!("active"), result["goal"]["status"]);
@@ -588,7 +588,7 @@ async fn subagent_usage_resets_when_root_goal_is_replaced() -> anyhow::Result<()
         .await?;
     assert_eq!(
         json!(25),
-        completed.code_mode_result(&completion.payload)["goal"]["tokensUsed"]
+        completed.code_mode_result(&completion.payload).into_json()["goal"]["tokensUsed"]
     );
 
     child
@@ -1140,7 +1140,7 @@ async fn update_goal_can_stop_and_accounts_final_progress() -> anyhow::Result<()
             json!({ "status": status }),
         );
         let output = update_tool.handle(invocation.clone()).await?;
-        let result = output.code_mode_result(&invocation.payload);
+        let result = output.code_mode_result(&invocation.payload).into_json();
 
         assert_eq!(
             result,
@@ -1637,7 +1637,7 @@ async fn goal_service_enforces_maximum_token_budget_on_creation_and_updates() ->
 async fn installed_tools(
     runtime: Arc<codex_state::StateRuntime>,
     thread_id: ThreadId,
-) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
+) -> Vec<Arc<dyn ToolExecutor>> {
     installed_tools_with_start(
         runtime,
         thread_id,
@@ -1652,7 +1652,7 @@ async fn installed_tools_with_start(
     thread_id: ThreadId,
     session_source: SessionSource,
     persistent_thread_state_available: bool,
-) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
+) -> Vec<Arc<dyn ToolExecutor>> {
     let mut builder = ExtensionRegistryBuilder::<()>::new();
     let goal_service = Arc::new(GoalService::new());
     install_with_backend(
@@ -1692,7 +1692,7 @@ async fn installed_tools_with_start(
         .collect()
 }
 
-fn tool_names(tools: &[Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>]) -> Vec<String> {
+fn tool_names(tools: &[Arc<dyn ToolExecutor>]) -> Vec<String> {
     tools.iter().map(|tool| tool.tool_name().name).collect()
 }
 
@@ -1794,7 +1794,7 @@ impl GoalExtensionHarness {
         })
     }
 
-    fn tools(&self) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
+    fn tools(&self) -> Vec<Arc<dyn ToolExecutor>> {
         self.registry
             .tool_contributors()
             .iter()
@@ -1948,10 +1948,7 @@ impl GoalExtensionHarness {
     }
 }
 
-fn tool_by_name<'a>(
-    tools: &'a [Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>],
-    name: &str,
-) -> &'a Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>> {
+fn tool_by_name<'a>(tools: &'a [Arc<dyn ToolExecutor>], name: &str) -> &'a Arc<dyn ToolExecutor> {
     tools
         .iter()
         .find(|tool| tool.tool_name().namespace.is_none() && tool.tool_name().name == name)

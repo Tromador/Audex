@@ -25,11 +25,12 @@ use super::thread_settings;
 use super::turn_context::NewTurnContextOptions;
 use super::turn_context::TurnContext;
 use crate::WithTurnExtensionData;
+use crate::agent::helper_daybreak::goal::GoalDaybreakAdmission;
 use crate::agent::helper_daybreak::turn::HelperTurnAdmission;
 use crate::context::ContextualUserFragment;
 use crate::context::GuardianSenderMessages;
+use crate::context::world_state::AdditionalContextState;
 use crate::state::ActiveTurn;
-use crate::state::AdditionalContextFormat;
 use crate::state::TurnState;
 use crate::tasks::RegularTask;
 use codex_features::Feature;
@@ -109,6 +110,7 @@ impl TurnStartKind {
 struct PreparedTurnInputSettings {
     thread_settings_update: Option<SessionSettingsUpdate>,
     start_options: TurnStartOptions,
+    goal_daybreak: Option<Arc<GoalDaybreakAdmission>>,
 }
 
 impl PreparedTurnInputSettings {
@@ -139,6 +141,7 @@ impl PreparedTurnInputSettings {
         Ok(Self {
             thread_settings_update,
             start_options,
+            goal_daybreak: None,
         })
     }
 
@@ -156,6 +159,7 @@ impl PreparedTurnInputSettings {
         kind: TurnStartKind,
     ) -> CodexResult<Option<Arc<TurnContext>>> {
         let TurnStartOptions {
+            inferred_workspace_kind,
             turn_trigger,
             final_output_json_schema,
             direct_only_tool_namespaces,
@@ -188,6 +192,7 @@ impl PreparedTurnInputSettings {
             prompt_cache_ttl,
             cyber_access_program,
             helper_admission,
+            goal_daybreak: self.goal_daybreak.map(|admission| admission.0.clone()),
         };
         let turn_context = match kind {
             TurnStartKind::User | TurnStartKind::Recovery => Some(
@@ -215,6 +220,11 @@ impl PreparedTurnInputSettings {
                 replacement: Some(inherited_client_metadata),
                 ..Default::default()
             });
+        if let Some(kind) = inferred_workspace_kind {
+            turn_context
+                .turn_metadata_state
+                .set_inferred_workspace_kind(kind);
+        }
         if let Some(turn_trigger) = turn_trigger {
             turn_context
                 .turn_metadata_state
@@ -294,12 +304,21 @@ pub(super) async fn handle_realtime_handoff(
 )]
 async fn handle_inner(
     session: &Arc<Session>,
-    request: WithTurnExtensionData<TurnInputRequest>,
+    mut request: WithTurnExtensionData<TurnInputRequest>,
     mode: TurnInputMode,
     submission_id: String,
     realtime_handoff_id: Option<uuid::Uuid>,
 ) -> CodexResult<TurnInputSubmission> {
     session.conversation.check_history_recovery()?;
+    let goal_daybreak = request
+        .turn_extension_init
+        .as_mut()
+        .and_then(codex_extension_api::ExtensionDataInit::remove::<GoalDaybreakAdmission>);
+    if goal_daybreak.is_some() {
+        // Only Core's goal-specific idle entry point can supply this attachment.
+        // It supplies no other data, so consuming it must not clear host defaults.
+        request.turn_extension_init = None;
+    }
     if request.request.start.service_tier.is_some()
         && crate::agent::host::host_child_uses_shared_service_tier(session)
     {
@@ -351,6 +370,7 @@ async fn handle_inner(
                 /*expected_previous_turn_id*/ None,
                 realtime_handoff_id,
                 None,
+                goal_daybreak.filter(|_| kind == TurnStartKind::Automatic),
             )
             .await
         }
@@ -380,6 +400,7 @@ async fn handle_inner(
                 Some(expected_previous_turn_id),
                 realtime_handoff_id,
                 None,
+                /*goal_daybreak*/ None,
             )
             .await
         }
@@ -435,6 +456,7 @@ pub(super) async fn handle_recovery(
         /*expected_previous_turn_id*/ None,
         /*realtime_handoff_id*/ None,
         None,
+        /*goal_daybreak*/ None,
     )
     .await;
     if let Ok(TurnInputSubmission::Started { turn_id, .. }) = &result {
@@ -457,6 +479,7 @@ pub(super) async fn handle_external(
         None,
         /*realtime_handoff_id*/ None,
         Some(crate::tasks::external_conversation::ExternalConversationTask::new(execution)),
+        /*goal_daybreak*/ None,
     )
     .await
 }
@@ -630,6 +653,7 @@ async fn start_if_idle(
     expected_previous_turn_id: Option<String>,
     realtime_handoff_id: Option<uuid::Uuid>,
     external: Option<crate::tasks::external_conversation::ExternalConversationTask>,
+    goal_daybreak: Option<Arc<GoalDaybreakAdmission>>,
 ) -> CodexResult<TurnInputSubmission> {
     let WithTurnExtensionData {
         mut request,
@@ -718,7 +742,7 @@ async fn start_if_idle(
         });
     }
 
-    let settings = match PreparedTurnInputSettings::prepare(
+    let mut settings = match PreparedTurnInputSettings::prepare(
         session,
         WithTurnExtensionData {
             request: thread_settings,
@@ -734,6 +758,7 @@ async fn start_if_idle(
             return Err(error);
         }
     };
+    settings.goal_daybreak = goal_daybreak;
     let turn_context = match settings
         .apply_started(session, submission_id.clone(), kind)
         .await
@@ -890,31 +915,23 @@ impl Session {
         else {
             return;
         };
-        let input = self.state.lock().await.additional_context.extend(
-            BTreeMap::from([(
+        let section = AdditionalContextState::new(
+            &BTreeMap::from([(
                 key.to_owned(),
                 AdditionalContextEntry::new(value, AdditionalContextKind::Untrusted),
             )]),
-            self.additional_context_format(),
+            self.enabled(Feature::UntrustedAsToolOutput),
             &task.turn_context.session_telemetry,
             &self.context_ids,
-        );
-        if !input.is_empty() {
-            self.input_queue
-                .extend_pending_input_for_turn_state(
-                    &turn.turn_state,
-                    input.into_iter().map(TurnInput::ResponseItem).collect(),
-                )
-                .await;
-        }
-    }
-
-    pub(super) fn additional_context_format(&self) -> AdditionalContextFormat {
-        if self.enabled(Feature::UntrustedAsToolOutput) {
-            AdditionalContextFormat::ToolOutputs
-        } else {
-            AdditionalContextFormat::Messages
-        }
+        )
+        .extending();
+        // Tool-produced context belongs after tool results and before the next prompt.
+        task.turn_context
+            .extension_data
+            .get_or_init(super::turn::PendingToolContext::default)
+            .lock()
+            .await
+            .push(section);
     }
 
     /// Called under the active-turn lock when registering a task (or a realtime transcript turn).
@@ -926,6 +943,7 @@ impl Session {
         let mut state = self.state.lock().await;
         state.last_started_turn_id = Some(turn_id.to_owned());
         if let Some(attribution) = attribution {
+            state.pending_recorded_mail_sequence = 0;
             state.turn_attribution = Some(attribution);
         }
     }
@@ -938,6 +956,17 @@ impl Session {
         let mut active_turn = self.active_turn.lock().await;
         if active_turn.is_some() || self.turn_starts_closed() {
             return None;
+        }
+        if !self.input_queue.has_pending_mailbox_items().await {
+            let mut state = self.state.lock().await;
+            // An intervening turn may already have sampled the durable injection.
+            if state.pending_recorded_mail_sequence == 0
+                || state.pending_recorded_mail_sequence
+                    <= crate::context_manager::sampled_through(state.history.annotated_items())
+            {
+                state.pending_recorded_mail_sequence = 0;
+                return None;
+            }
         }
         let has_trigger_turn = self.input_queue.has_trigger_turn_mailbox_items().await;
         if !has_trigger_turn

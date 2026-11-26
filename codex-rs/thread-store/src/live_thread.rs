@@ -235,17 +235,21 @@ impl LiveThread {
         ))
     }
 
-    #[tracing::instrument(
-        level = "trace",
-        skip_all,
-        fields(item_count = raw_items.len())
-    )]
+    #[tracing::instrument(level = "trace", skip_all, fields(item_count = raw_items.len()))]
     pub async fn append_items(&self, raw_items: &[RolloutItem]) -> ThreadStoreResult<()> {
         let items = self
             .persist_appended_items(raw_items)
             .await?
             .unwrap_or_else(|| persisted_rollout_items(raw_items, self.history_mode));
         if items.is_empty() {
+            return Ok(());
+        }
+        if self.should_defer_rollout_metadata().await {
+            let _ = self
+                .metadata_sync
+                .lock()
+                .await
+                .observe_appended_items(items.as_slice());
             return Ok(());
         }
         self.observe_appended_metadata(&items).await
@@ -277,8 +281,27 @@ impl LiveThread {
         }))
     }
 
+    async fn should_defer_rollout_metadata(&self) -> bool {
+        if self.history_mode == ThreadHistoryMode::Paginated
+            && let Some(store) = self
+                .thread_store
+                .as_any()
+                .downcast_ref::<LocalThreadStore>()
+        {
+            store.config.sqlite.prefers_rollback_journal().await
+        } else {
+            false
+        }
+    }
+
     pub async fn persist(&self, context: PersistContext) -> ThreadStoreResult<()> {
         if context.allows_background_persistence() {
+            if self.should_defer_rollout_metadata().await {
+                return self
+                    .thread_store
+                    .persist_thread(self.thread_id, context)
+                    .await;
+            }
             let update = self
                 .metadata_sync
                 .lock()

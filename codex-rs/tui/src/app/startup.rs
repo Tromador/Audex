@@ -179,9 +179,11 @@ impl App {
         tui: &tui::Tui,
         app_event_rx: &mpsc::UnboundedReceiver<AppEvent>,
     ) -> bool {
-        self.pending_thread_switch_resets == 0
+        self.pending_input_drain.is_none()
+            && self.pending_thread_switch_resets == 0
             && (app_event_rx.is_empty()
-                || (!self.config.features.enabled(Feature::TuiMultiBackend)
+                || (!self.backtrack.revert_queued
+                    && !self.config.features.enabled(Feature::TuiMultiBackend)
                     && !self.side_retention_enabled(tui)
                     && self
                         .current_displayed_thread_id()
@@ -196,7 +198,8 @@ impl App {
         tui: &mut tui::Tui,
         app_event_rx: &mpsc::UnboundedReceiver<AppEvent>,
     ) -> Result<()> {
-        if self.awaiting_side_replay(tui)
+        if self.pending_input_drain.is_some()
+            || self.awaiting_side_replay(tui)
             || (tui.is_owned_screen()
                 && !app_event_rx.is_empty()
                 && !self.chat_widget.has_active_view())
@@ -216,7 +219,11 @@ impl App {
     /// Keep a visible modal closed to input if the terminal has not settled yet. The next input
     /// event retries the drain instead of acting on the modal; server events can continue meanwhile.
     pub(super) fn discard_startup_modal_input(&mut self, tui: &mut tui::Tui) -> Result<()> {
-        match tui.discard_pending_input_before_interactive_screen() {
+        let drained = tui.discard_pending_input_before_interactive_screen();
+        // A press-only terminal can report the held key again after the input drain.
+        self.chat_widget
+            .protect_modal_from_held_activation_key(Instant::now());
+        match drained {
             Ok(()) => self.startup_pending_protected_request = false,
             Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
                 self.startup_pending_protected_request = true;
@@ -231,19 +238,16 @@ impl App {
     pub(super) fn has_queued_startup_protected_request(&self) -> bool {
         self.startup_protected_input_boundary
             && (self
-                .active_thread_rx
-                .as_ref()
-                .is_some_and(|receiver| !receiver.is_empty())
-                && self
-                    .active_thread_id
-                    .and_then(|thread_id| self.thread_event_channels.get(&thread_id))
-                    .is_none_or(|channel| {
-                        // A bounded drain can leave ordinary notifications queued. Only protect
-                        // input for pending requests, or when their state cannot be inspected.
-                        channel.store.try_lock().map_or(/*default*/ true, |store| {
+                .active_thread_id
+                .and_then(|id| self.thread_event_channels.get(&id))
+                .is_some_and(|channel| {
+                    // A bounded drain can leave ordinary notifications queued. Only protect
+                    // input for pending requests, or when their state cannot be inspected.
+                    !channel.receiver.is_empty()
+                        && channel.store.try_lock().map_or(/*default*/ true, |store| {
                             store.side_parent_pending_status().is_some()
                         })
-                    })
+                })
                 || self
                     .pending_primary_events
                     .iter()
@@ -275,6 +279,7 @@ impl App {
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
         session_selection: SessionSelection,
+        initial_resume_config: Option<Box<Config>>,
         feedback: codex_feedback::CodexFeedback,
         is_first_run: bool,
         should_prompt_windows_sandbox_nux_at_startup: bool,
@@ -567,6 +572,7 @@ impl App {
         ) && let Err(error) = app_server
             .start_dynamic_tool_mcp(
                 config.clone(),
+                local_settings.workspace_enabled(&config),
                 app_event_tx.clone(),
                 dynamic_tool_status_updates.clone(),
             )
@@ -576,7 +582,7 @@ impl App {
         }
         let mut provider_writes = HashMap::new();
         let model_catalog = Arc::new(
-            ModelCatalog::new(available_models.clone())
+            ModelCatalog::new(available_models.clone(), bootstrap.catalog_provider)
                 .for_backend(app_server.backend_id(), &mut provider_writes)
                 .with_collaboration_modes(bootstrap.collaboration_modes),
         );
@@ -633,6 +639,7 @@ impl App {
         let mut read_only_thread = false;
         let mut provider_error = None;
         let mut history_notice = None;
+        let confirm_preset = initial_resume_config.is_some();
         let (mut chat_widget, initial_started_thread) = match session_selection {
             SessionSelection::StartFresh
             | SessionSelection::Exit
@@ -727,26 +734,42 @@ impl App {
                     &config,
                     &harness_overrides,
                 );
+                let permissions = if confirm_preset {
+                    crate::resume_permissions::ResumePermissions::PRESET
+                } else {
+                    crate::resume_permissions::ResumePermissions::from_overrides(
+                        &config,
+                        &harness_overrides,
+                    )
+                };
+                // Keep post-bootstrap launch choices (e.g. --search) for the initial resume.
+                let scoped = initial_resume_config.map(|preset| {
+                    let mut scoped = Box::new(config.clone());
+                    scoped.permissions = preset.permissions;
+                    scoped.approvals_reviewer = preset.approvals_reviewer;
+                    scoped.workspace_roots = preset.workspace_roots;
+                    scoped
+                });
+                let resume_config = scoped.as_deref().unwrap_or(&config);
                 let resumed = match startup_draft
                     .run_until(
                         tui,
                         app_server.resume_thread_with_permission_overrides(
                             &local_settings,
-                            config.clone(),
+                            resume_config.clone(),
                             target_session.thread_id,
                             model_settings,
-                            crate::resume_permissions::ResumePermissions::from_overrides(
-                                &config,
-                                &harness_overrides,
-                            ),
+                            permissions,
                         ),
                     )
                     .await
                 {
                     Ok(Ok(resumed)) => Ok(resumed),
                     Ok(Err(err))
-                        if crate::app_server_session::is_active_writer_error(&err)
-                            || crate::app_server_session::model_provider_error(&err).is_some() =>
+                        if !permissions.confirm_preset
+                            && (crate::app_server_session::is_active_writer_error(&err)
+                                || crate::app_server_session::model_provider_error(&err)
+                                    .is_some()) =>
                     {
                         provider_error = crate::app_server_session::model_provider_error(&err);
                         read_only_thread = true;
@@ -790,17 +813,11 @@ impl App {
                         }
                     }
                 } else {
-                    let action = SessionStartAction::Resume(
-                        model_settings,
-                        crate::resume_permissions::ResumePermissions::from_overrides(
-                            &config,
-                            &harness_overrides,
-                        ),
-                    );
+                    let action = SessionStartAction::Resume(model_settings, permissions);
                     let resumed = complete_session_start(
                         &mut app_server,
                         SessionStartConfig {
-                            config: &config,
+                            config: resume_config,
                             local_settings: &local_settings,
                         },
                         &target_session,
@@ -1038,6 +1055,7 @@ See the Codex keymap documentation for supported actions and examples."
             statusline_metrics,
             provider_writes,
             feature_write_lock: Arc::default(),
+            voice_settings_pending: false,
             config_notification_test_generation: 0,
             config_notification_test_pending: None,
             model_catalog,
@@ -1081,6 +1099,7 @@ See the Codex keymap documentation for supported actions and examples."
             transcript_reflow: TranscriptReflowState::default(),
             initial_history_replay_buffer: None,
             pending_thread_switch_resets: 0,
+            pending_input_drain: None,
             scrollback_has_older_history: false,
             commit_animation: None,
             status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
@@ -1135,6 +1154,7 @@ See the Codex keymap documentation for supported actions and examples."
             side_threads: HashMap::new(),
             saved_openings: Default::default(),
             sidebars: HashMap::new(),
+            model_preview_load: None,
             side_companions: HashMap::new(),
             zoomed_thread: None,
             exact_sidebar_width: None,
@@ -1144,7 +1164,6 @@ See the Codex keymap documentation for supported actions and examples."
             sidebar_press: None,
             abandoned_side_threads: HashSet::new(),
             active_thread_id: None,
-            active_thread_rx: None,
             primary_thread_id: None,
             last_subagent_backfill_attempt: None,
             primary_session_configured: None,
@@ -1191,7 +1210,11 @@ See the Codex keymap documentation for supported actions and examples."
             // Prewarm WSL interop off the UI thread, without accessing clipboard contents.
             let _ = tui.clipboard.warm_text_reader(tui.frame_requester());
         }
-        app.remember_launch_permissions();
+        // The confirmed server settings own the first turn. Replaying a different
+        // launch profile here could undo the preset. /new reloads the launch flags.
+        if !confirm_preset {
+            app.remember_launch_permissions();
+        }
         if !tui.is_terminal_focused() {
             app.recap.note_focus_lost(Instant::now());
         }
@@ -1288,7 +1311,7 @@ See the Codex keymap documentation for supported actions and examples."
         }
         if Self::should_handle_active_thread_events(
             wait_for_initial_session_configured,
-            app.active_thread_rx.is_some(),
+            app.active_thread_rx().is_some(),
         ) && let Err(err) = app.drain_active_thread_events(tui).await
         {
             return shutdown_on_startup_error(app_server, &mut other_backends, err).await;
@@ -1326,8 +1349,7 @@ See the Codex keymap documentation for supported actions and examples."
         if let Err(err) = app.render_startup_frame(tui, &app_event_rx) {
             return shutdown_on_startup_error(app_server, &mut other_backends, err).await;
         }
-        let tui_events = tui.event_stream();
-        tokio::pin!(tui_events);
+        let mut tui_events = tui.input_stream();
         tracing::info!(
             duration_ms = %(startup_elapsed_before_app + startup_started_at.elapsed()).as_millis(),
             bootstrap_ms = %bootstrap_ms,
@@ -1347,6 +1369,8 @@ See the Codex keymap documentation for supported actions and examples."
                 app.app_event_tx.clone(),
                 app.chat_widget.security_setup_request_id,
             );
+        }
+        if app.chat_widget.should_prefetch_rate_limits() {
             let reset_hint_request_id = app.chat_widget.start_rate_limit_reset_startup_check();
             app.refresh_rate_limits(
                 &app_server,
@@ -1461,6 +1485,13 @@ See the Codex keymap documentation for supported actions and examples."
                         break Err(err.into());
                     }
                 }
+                if app.reconnect.cloud_resume.as_ref().is_some_and(|resume| {
+                    resume.backend_id != displayed_owner
+                        || Some(resume.thread_id) != app.current_displayed_thread_id()
+                        || app.reconnect.offline
+                }) {
+                    app.reconnect.cloud_resume = None;
+                }
                 // Process archive completions before the picker can list or mutate those threads.
                 if app.pending_open_resume_picker && app.agents_overview.pending_archives.is_empty()
                 {
@@ -1552,7 +1583,14 @@ See the Codex keymap documentation for supported actions and examples."
                 // Replay queues history and operations. A buffered closure must not switch
                 // widgets before those app events have been applied.
                 let has_pending_app_events = !app_event_rx.is_empty();
+                // An installed stream can emit events before the install result is consumed.
+                // Apply the recovered history before accepting those events.
                 let paused_backend = ((app.reconnect.offline && !app.pending_startup_thread_start)
+                    || app
+                        .reconnect
+                        .cloud_resume
+                        .as_ref()
+                        .is_some_and(super::resume_preparation::CloudResume::installing)
                     || (app.awaiting_side_replay(tui) && has_pending_app_events)
                     || (!matches!(app.app_server_target, AppServerTarget::Embedded)
                         && has_pending_app_events))
@@ -1595,7 +1633,13 @@ See the Codex keymap documentation for supported actions and examples."
                     cloud_inventory_owner = cloud_owner;
                     cloud_inventory_poll.reset();
                 }
+                tui_events.coalesce_divider_drags = app.divider_drag.is_some();
                 let control = select! {
+                    // Leave the previous frame visible and let other app work run between batches.
+                    Some(transition) = std::future::ready(app.pending_input_drain), if app.pending_input_drain.is_some() => {
+                        app.finish_thread_input_drain(tui, transition);
+                        AppRunControl::Continue
+                    }
                     result = async {
                         match app.daemon_restart.as_mut() {
                             Some(task) => task.await,
@@ -1667,7 +1711,15 @@ See the Codex keymap documentation for supported actions and examples."
                             continue;
                         }
                         if let AppEvent::ResumeBackendSession(target) = event {
-                            match app.resume_backend_session(tui, &mut backends, target).await {
+                            let thread_id = target.thread_id;
+                            let result = app.resume_backend_session(tui, &mut backends, target).await;
+                            if app.finish_docked_task_opening(tui, thread_id)
+                                && app.chat_widget.has_active_modal()
+                                && let Err(err) = app.render_startup_frame(tui, &app_event_rx)
+                            {
+                                break Err(err);
+                            }
+                            match result {
                                 Ok(AppRunControl::Continue) => continue,
                                 Ok(AppRunControl::Exit(reason)) => break Ok(reason),
                                 Err(error) => break Err(error),
@@ -1715,14 +1767,14 @@ See the Codex keymap documentation for supported actions and examples."
                         }
                     }
                     active = async {
-                        if let Some(rx) = app.active_thread_rx.as_mut() {
-                            rx.recv().await
+                        if let Some(channel) = app.active_thread_id.and_then(|id| app.thread_event_channels.get_mut(&id)) {
+                            channel.receiver.recv().await
                         } else {
                             None
                         }
                     }, if App::should_handle_active_thread_events(
                         waiting_for_initial_session_configured,
-                        app.active_thread_rx.is_some()
+                        app.active_thread_rx().is_some()
                     ) && !has_pending_app_events && !app.reconnect.offline => {
                         if let Some(event) = active {
                             if let Err(err) = app.handle_active_thread_event(tui, backends.session_at_mut(displayed_session), event).await {
@@ -1747,8 +1799,7 @@ See the Codex keymap documentation for supported actions and examples."
                                 && app_event_rx.is_empty()
                                 && !app.startup_pending_protected_request
                                 && app
-                                    .active_thread_rx
-                                    .as_ref()
+                                    .active_thread_rx()
                                     .is_none_or(tokio::sync::mpsc::Receiver::is_empty)
                                 && !app.pending_primary_events.iter().any(|event| {
                                     matches!(event, ThreadBufferedEvent::Request(_))
@@ -1798,6 +1849,24 @@ See the Codex keymap documentation for supported actions and examples."
                         }
                         AppRunControl::Continue
                     }
+                    result = async {
+                        match app.reconnect.cloud_resume.as_mut() {
+                            Some(resume) => (&mut resume.task).await,
+                            None => std::future::pending().await,
+                        }
+                    }, if app.reconnect.cloud_resume.is_some() && !has_pending_app_events => {
+                        let Some(attempt) = app.reconnect.cloud_resume.take() else { continue };
+                        let outcome = result.unwrap_or_else(|error| Err(error.into()));
+                        match Box::pin(app.finish_cloud_resume(
+                            tui,
+                            backends.session_at_mut(displayed_session),
+                            attempt,
+                            outcome,
+                        )).await {
+                            Ok(control) => control,
+                            Err(err) => break Err(err),
+                        }
+                    }
                     (reconnect_owner, result) = async { match reconnect.as_mut() { Some((owner, future)) => (*owner, future.await), None => std::future::pending().await } }, if reconnect.is_some() && !has_pending_app_events => {
                         reconnect = None;
                         match result {
@@ -1837,10 +1906,10 @@ See the Codex keymap documentation for supported actions and examples."
                                     }
                                 }
                                 app.reconnect.failed = true;
-                                app.chat_widget.reconnect_failed();
+                                app.chat_widget.reconnect_failed(app.can_retry_reconnect());
                                 app.chat_widget.add_error_message(error.to_string());
                                 if let Ok(mut state) = app.agents_overview.view_state.lock() {
-                                    state.connection_notice = Some("Reconnect failed — agent list is stale; relaunch to retry");
+                                    state.connection_notice = Some(app.offline_overview_notice());
                                 }
                             }
                         }
@@ -1953,6 +2022,7 @@ See the Codex keymap documentation for supported actions and examples."
         };
         // Let the pending terminal poll unwind while the app server shuts down.
         tui.pause_events();
+        app.reconnect.cloud_resume = None;
         // Skip pending inference on exit. Give the fallback writes a bounded chance
         // to finish before closing the connections they use.
         if app.cloud_title_shutdown.send(()).is_ok()

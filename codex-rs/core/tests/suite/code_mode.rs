@@ -4867,7 +4867,7 @@ async fn code_mode_exec_nested_limit_truncates_result_variable_when_exceeded() -
         "use exec_command from code mode",
         r#"// @exec: {"max_output_tokens": 25000}
 const result = await tools.exec_command({
-  cmd: "python3 -c \"import sys; sys.stdout.write('A' * 90000)\"",
+  cmd: "printf '%90000s' '' | tr ' ' A",
   max_output_tokens: 20000
 });
 const resultVariableWasTruncated = result.output.includes("…2500 tokens truncated…");
@@ -4998,7 +4998,7 @@ async fn code_mode_exec_without_nested_limit_preserves_result_variable_before_co
         "use exec_command from code mode",
         r#"// @exec: {"max_output_tokens": 20000}
 const result = await tools.exec_command({
-  cmd: "python3 -c \"import sys; sys.stdout.write('x' * 50000)\""
+  cmd: "printf '%50000s' '' | tr ' ' x"
 });
 const resultVariableWasTruncated = result.output.length !== 50000;
 text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Variable: ${result.output}`);
@@ -7423,6 +7423,54 @@ async fn code_mode_can_apply_patch_via_nested_tool() -> Result<()> {
     Ok(())
 }
 
+#[test_case(false; "default")]
+#[test_case(true; "enabled")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_deduplicates_printed_mcp_results_only_when_enabled(enabled: bool) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let apps = AppsTestServer::mount_searchable(&server).await?;
+    let result = serde_json::json!({
+        "isError": false,
+        "content": [{"type": "text", "text": r#"{"timezone":"UTC"}"#}],
+        "structuredContent": {"timezone": "UTC"},
+    });
+    let mut expected = result.clone();
+    if enabled {
+        expected.as_object_mut().unwrap().remove("content");
+    }
+    Mock::given(method("POST"))
+        .and(body_partial_json(serde_json::json!({
+            "method": "tools/call", "params": {"name": "calendar_timezone_option_99"}
+        })))
+        .respond_with(move |request: &Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": body["id"], "result": result
+            }))
+        })
+        .with_priority(/*p*/ 1)
+        .mount(&server)
+        .await;
+    let builder = search_capable_apps_builder(apps.chatgpt_base_url).with_config(move |config| {
+        config.features.enable(Feature::CodeModeOnly).unwrap();
+        if enabled {
+            config
+                .features
+                .enable(Feature::CodeModeMcpResultDedup)
+                .unwrap();
+        }
+    });
+    let code =
+        r#"text(await tools.mcp__codex_apps__calendar_timezone_option_99({ timezone: "UTC" }));"#;
+    let (_test, follow_up) =
+        run_code_mode_turn_with_builder(&server, "Check the timezone", code, builder).await?;
+    let (output, _) = custom_tool_output_body_and_success(&follow_up.single_request(), "call-1");
+    assert_eq!(serde_json::from_str::<Value>(&output)?, expected);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_can_print_structured_mcp_tool_result_fields() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -8137,7 +8185,7 @@ impl ToolContributor for NamespacedCustomTool {
         &self,
         _session_store: &ExtensionData,
         _thread_store: &ExtensionData,
-    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
+    ) -> Vec<Arc<dyn ToolExecutor>> {
         Vec::new()
     }
 
@@ -8146,7 +8194,7 @@ impl ToolContributor for NamespacedCustomTool {
         _session_store: &ExtensionData,
         _thread_store: &ExtensionData,
         _step_store: &ExtensionData,
-    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
+    ) -> Vec<Arc<dyn ToolExecutor>> {
         vec![Arc::new(Self {
             generation: self.generations.fetch_add(1, Ordering::Relaxed) + 1,
             generations: Arc::clone(&self.generations),
@@ -8154,7 +8202,7 @@ impl ToolContributor for NamespacedCustomTool {
     }
 }
 
-impl<'call> ToolExecutor<ToolCall<'call>> for NamespacedCustomTool {
+impl ToolExecutor for NamespacedCustomTool {
     fn tool_name(&self) -> ToolName {
         ToolName::namespaced("editor", "apply_patch")
     }
@@ -8176,10 +8224,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for NamespacedCustomTool {
         })
     }
 
-    fn handle<'a>(&'a self, call: ToolCall<'call>) -> ToolExecutorFuture<'a>
-    where
-        'call: 'a,
-    {
+    fn handle<'a>(&'a self, call: ToolCall<'a>) -> ToolExecutorFuture<'a> {
         Box::pin(async move {
             let ToolPayload::Custom { input } = call.payload else {
                 return Err(FunctionCallError::Fatal(
@@ -8912,8 +8957,8 @@ async fn code_mode_search_normalizes_and_calls_deferred_dynamic_tools(
             );
             tools.functions_namespace_functions_description_prefixes =
                 Some(std::collections::BTreeMap::from([(
-                    "hidden-dynamic-tool".to_string(),
-                    "Function guidance.".to_string(),
+                    "hidden-dynamic-tool".into(),
+                    "Function guidance.".into(),
                 )]));
         })
         .with_config(|config| {

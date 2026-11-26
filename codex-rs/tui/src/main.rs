@@ -11,7 +11,6 @@ use codex_tui::ExitReason;
 use codex_tui::run_main;
 use codex_utils_cli::CliConfigOverrides;
 use std::io::Write;
-use supports_color::Stream;
 
 #[derive(Parser, Debug)]
 struct TopCli {
@@ -46,7 +45,7 @@ fn main() -> anyhow::Result<()> {
             ExitReason::UserRequested | ExitReason::TurnInterrupted => false,
         };
 
-        let color_enabled = supports_color::on(Stream::Stdout).is_some();
+        let color_enabled = codex_tui::stdout_supports_color();
         for line in exit_info.format_exit_messages(color_enabled) {
             println!("{line}");
         }

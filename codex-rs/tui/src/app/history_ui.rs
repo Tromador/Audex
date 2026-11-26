@@ -16,7 +16,7 @@ pub(super) struct RenderedHistoryTail {
 }
 
 pub(super) struct ThreadUsageStatusHistory {
-    thread_id: ThreadId,
+    thread_id: Option<ThreadId>,
     pub(super) cell: Weak<dyn HistoryCell>,
     pub(super) lines: Vec<HyperlinkLine>,
 }
@@ -28,13 +28,13 @@ impl App {
             .downcast_mut::<history_cell::ViewImageHistoryCell>()
             && !self.app_server_target.uses_remote_workspace()
             && crate::projectless::has_only_local_environments(&self.environment_manager)
-            && !crate::clipboard_copy::is_ssh_session()
+            && !crate::terminal_capabilities::is_ssh_session()
         {
             image.link_local_image();
         }
     }
 
-    pub(super) fn insert_history_cell(
+    pub(crate) fn insert_history_cell(
         &mut self,
         tui: &mut tui::Tui,
         mut cell: Box<dyn HistoryCell>,
@@ -97,7 +97,7 @@ impl App {
         // Owned replay must not eagerly format every historical entry. Composite status cards are
         // the only committed cells whose mutable usage data needs insertion-time bookkeeping.
         let lines = if !deferred || cell.as_any().is::<history_cell::CompositeHistoryCell>() {
-            cell.display_hyperlink_lines_for_mode(width, self.chat_widget.history_render_mode())
+            cell.scrollback_lines(width, self.chat_widget.history_render_mode())
         } else {
             Vec::new()
         };
@@ -105,10 +105,9 @@ impl App {
             && lines.first().is_some_and(|line| {
                 line.line.spans.len() == 1 && line.line.spans[0].content.as_ref() == "/status"
             })
-            && let Some(thread_id) = self.chat_widget.thread_id()
         {
             self.last_thread_usage_status_cell = Some(ThreadUsageStatusHistory {
-                thread_id,
+                thread_id: self.chat_widget.thread_id(),
                 cell: Arc::downgrade(cell),
                 lines: lines.clone(),
             });
@@ -156,6 +155,10 @@ impl App {
             return Ok(());
         }
 
+        self.refresh_status_history(tui)
+    }
+
+    pub(super) fn refresh_status_history(&mut self, tui: &mut tui::Tui) -> Result<()> {
         if !tui.is_owned_screen()
             && (self.overlay.is_some() || self.initial_history_replay_buffer.is_some())
         {
@@ -170,7 +173,7 @@ impl App {
             self.pending_thread_usage_history_refresh = false;
             return Ok(());
         };
-        if self.chat_widget.thread_id() != Some(status_history.thread_id) {
+        if self.chat_widget.thread_id() != status_history.thread_id {
             self.last_thread_usage_status_cell = None;
             self.pending_thread_usage_history_refresh = false;
             return Ok(());

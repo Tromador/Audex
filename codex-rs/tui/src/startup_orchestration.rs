@@ -4,8 +4,6 @@
 //! configuration and app-server initialization remain responsive to safe local editing.
 
 use super::*;
-use codex_terminal_detection::Multiplexer;
-use codex_terminal_detection::TerminalName;
 
 pub(super) async fn run_main_inner(
     mut cli: Cli,
@@ -181,6 +179,7 @@ pub(super) async fn run_main_inner(
                 &validation_bootstrap,
                 &codex_home,
                 &embedded_network_policy,
+                /*resolution*/ None,
             )
             .await?
         } else {
@@ -313,7 +312,7 @@ pub(super) async fn run_main_inner(
             err
         }
     })?;
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+    let resolution = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         codex_cloud_config::ensure_config_server_login(
             embedded_network_policy.bind_bootstrap_auth(bootstrap_auth_config(
                 &codex_home,
@@ -325,8 +324,10 @@ pub(super) async fn run_main_inner(
                 .requirements_toml(),
             codex_cloud_config::ConfigServerLoginMethod::Browser,
         )
-        .await?;
-    }
+        .await?
+    } else {
+        None
+    };
     // Keep normal terminal signals available until local configuration is ready. Once raw
     // mode begins, StartupDraft immediately takes ownership of input.
     let (initialized_terminal, terminal_restore_guard) = tokio::task::spawn_blocking(|| {
@@ -346,7 +347,7 @@ pub(super) async fn run_main_inner(
     screen.use_alt_screen = determine_alt_screen_mode(
         cli.no_alt_screen,
         local_settings.tui.alternate_screen,
-        initialized_terminal.terminal_app_over_ssh,
+        initialized_terminal.prefer_inline_screen,
     );
     screen.transcript_mode = crate::transcript_mode::TranscriptMode::resolve(
         screen.transcript_mode.is_owned(),
@@ -402,6 +403,7 @@ pub(super) async fn run_main_inner(
             &bootstrap_config,
             &codex_home,
             &embedded_network_policy,
+            resolution.as_ref(),
         ))
         .await??;
     let bootstrap_config_toml = &bootstrap_config.config_toml;
@@ -537,6 +539,7 @@ pub(super) async fn run_main_inner(
                 ),
                 config.config_layer_stack.requirements_toml(),
                 /*enable_codex_api_key_env*/ false,
+                cloud_config_bundle.config_server_resolution(),
             ))
             .await??
     };
@@ -777,30 +780,7 @@ pub(super) async fn run_main_inner(
         let Some(metrics) = metrics else {
             return Vec::new();
         };
-        // Use a fixed category, not the versioned or user-provided terminal identifier.
-        let terminal_info = codex_terminal_detection::terminal_info();
-        let terminal_name = match terminal_info.name {
-            TerminalName::AppleTerminal => "apple_terminal",
-            TerminalName::Ghostty => "ghostty",
-            TerminalName::Rex => "rex",
-            TerminalName::Iterm2 => "iterm2",
-            TerminalName::WarpTerminal => "warp",
-            TerminalName::VsCode => "vscode",
-            TerminalName::WezTerm => "wezterm",
-            TerminalName::Kitty => "kitty",
-            TerminalName::Alacritty => "alacritty",
-            TerminalName::Konsole => "konsole",
-            TerminalName::GnomeTerminal => "gnome_terminal",
-            TerminalName::Vte => "vte",
-            TerminalName::WindowsTerminal => "windows_terminal",
-            TerminalName::Dumb => "dumb",
-            TerminalName::Unknown => "unknown",
-        };
-        let multiplexer = match terminal_info.multiplexer {
-            Some(Multiplexer::Tmux { .. }) => "tmux",
-            Some(Multiplexer::Zellij { .. }) => "zellij",
-            None => "none",
-        };
+        let (terminal_name, multiplexer) = crate::terminal_capabilities::telemetry_labels();
         launch_tags.extend([
             ("app_server_mode", app_server_mode),
             ("terminal_name", terminal_name),
@@ -868,11 +848,14 @@ pub(super) async fn run_main_inner(
 
     set_default_client_residency_requirement(config.enforce_residency.value());
 
-    if let Some(warning) = add_dir_warning_message(
-        &cli.add_dir,
-        &config.permissions.effective_permission_profile(),
-        config.cwd.as_path(),
-    ) {
+    // A resume-only preset is validated against the selected thread's config.
+    if cli.resume_approval_preset.is_none()
+        && let Some(warning) = add_dir_warning_message(
+            &cli.add_dir,
+            &config.permissions.effective_permission_profile(),
+            config.cwd.as_path(),
+        )
+    {
         #[allow(clippy::print_stderr)]
         {
             restore_terminal_before_fatal_exit();

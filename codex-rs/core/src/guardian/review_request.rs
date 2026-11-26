@@ -6,20 +6,37 @@ mod attached;
 use super::super::runtime::validate;
 use super::*;
 use crate::codex_thread::GuardianAuthorizationVersion;
+use crate::guardian_review::AttachedReviewer;
 use crate::guardian_review::ReviewPreparationError;
 use attached::AttachedApproval;
 use codex_config::config_toml::CircuitBreakAction;
+use codex_guardian_context::CachedApprovalContext;
 use codex_guardian_reviewer::ReviewDeadline;
 use codex_guardian_reviewer::ReviewHost;
 use codex_protocol::approvals::GuardianReviewReason;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::ErrorEvent;
+
+type RootHistory = (codex_protocol::ThreadId, Option<[u8; 16]>, u64);
+
+fn root_history_key(root: &crate::GuardianRootSnapshot) -> RootHistory {
+    (
+        root.root_thread_id,
+        root.authorization_version.root_runtime_id,
+        root.history_reset_version,
+    )
+}
+
+fn root_versions(root: crate::GuardianRootSnapshot) -> (GuardianAuthorizationVersion, u64) {
+    (root.authorization_version, root.review_context_revision)
+}
 
 pub(in crate::guardian) struct PreparedApproval {
     request: GuardianApprovalRequest,
     category: GuardianScope,
     context: GuardianReviewContext,
     // Unlike authorization, the original history lifetime cannot advance on retry.
-    root_history: Option<(codex_protocol::ThreadId, u64)>,
+    root_history: Option<RootHistory>,
     formatted_action: Option<String>,
     attached: Option<AttachedApproval>,
 }
@@ -35,7 +52,7 @@ pub(in crate::guardian) struct ApprovalEvidence {
 pub(in crate::guardian) struct ReviewAuthorization {
     user_message_revision: u64,
     review_context_revision: u64,
-    root_history: Option<(codex_protocol::ThreadId, u64)>,
+    root_history: Option<RootHistory>,
     root_authorization_version: Option<GuardianAuthorizationVersion>,
     root_review_context_revision: Option<u64>,
     history_reset: CancellationToken,
@@ -56,15 +73,28 @@ impl ReviewAuthorization {
     ) -> Option<ReviewInvalidation> {
         use codex_guardian_reviewer::GuardianReviewSessionOutcome;
 
-        let root_snapshot = session
-            .services
-            .agent_control
-            .get_guardian_package(session.thread_id)
-            .await;
-        let root_history_changed = self.root_history
-            != root_snapshot
-                .as_ref()
-                .map(|snapshot| (snapshot.root_thread_id, snapshot.history_reset_version));
+        let stopped = || {
+            self.history_reset.is_cancelled()
+                || cancellation.is_some_and(CancellationToken::is_cancelled)
+        };
+        let root_snapshot = match session.guardian_root_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let outcome = if matches!(error.details(), CodexErrorDetails::Timeout) && !stopped()
+                {
+                    GuardianReviewSessionOutcome::TimedOut
+                } else {
+                    tracing::warn!("Guardian root evidence unavailable during validation");
+                    GuardianReviewSessionOutcome::Aborted
+                };
+                return Some(ReviewInvalidation {
+                    outcome,
+                    context_changed: false,
+                });
+            }
+        };
+        let root_history_changed =
+            self.root_history != root_snapshot.as_ref().map(root_history_key);
         let root_review_changed = self.root_review_context_revision
             != root_snapshot
                 .as_ref()
@@ -77,10 +107,7 @@ impl ReviewAuthorization {
         let review_context_changed = root_review_changed
             || self.review_context_revision != history.guardian_review_context_revision();
         // An actual stop or history reset wins over a concurrent evidence change.
-        let outcome = if self.history_reset.is_cancelled()
-            || cancellation.is_some_and(CancellationToken::is_cancelled)
-            || root_history_changed
-        {
+        let outcome = if stopped() || root_history_changed {
             Some(GuardianReviewSessionOutcome::Aborted)
         } else if authorization_changed || review_context_changed {
             tracing::info!(
@@ -151,6 +178,12 @@ impl ReviewHost for super::super::runtime::ReviewRuntime {
         } = options;
         let target_item_id = guardian_request_target_item_id(&request).map(str::to_string);
         let assessment_turn_id = guardian_request_turn_id(&request, &turn.sub_id).to_string();
+        // An explicit action turn outside this context has unknown lineage.
+        let root_turn_id = if assessment_turn_id == turn.sub_id {
+            context.reviewed_action_root_turn_id.clone()
+        } else {
+            None
+        };
         let plugin_attribution = match plugin_attribution_override {
             Some(attribution) => Some(attribution),
             None if matches!(&request, GuardianApprovalRequest::ExecCommand { .. }) => {
@@ -184,6 +217,7 @@ impl ReviewHost for super::super::runtime::ReviewRuntime {
         let metadata = codex_guardian_reviewer::ReviewMetadata {
             thread_id: session.thread_id.to_string(),
             turn_id: assessment_turn_id,
+            root_turn_id,
             turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
             review_id: review_id.to_owned(),
             target_item_id,
@@ -196,38 +230,24 @@ impl ReviewHost for super::super::runtime::ReviewRuntime {
             model_context,
             timeout: turn.config.guardian_review_timeout,
         };
-        let root = session
-            .services
-            .agent_control
-            .get_guardian_package(session.thread_id);
-        let (report, root_history, attached) = if let Some(provider) = attached_reviewer {
-            let root = root.await;
-            let root_history = root
-                .as_ref()
-                .map(|root| (root.root_thread_id, root.history_reset_version));
-            let history = session.conversation_history_snapshot().await;
-            let authorization = ReviewAuthorization {
-                user_message_revision: history.user_message_revision(),
-                review_context_revision: history.guardian_review_context_revision(),
-                root_history,
-                root_authorization_version: root.as_ref().map(|root| root.authorization_version),
-                root_review_context_revision: root
-                    .as_ref()
-                    .map(|root| root.review_context_revision),
-                history_reset: self.history_reset.clone(),
-            };
-            drop(history);
+        let (root_history, attached) = if let Some(provider) = attached_reviewer {
+            let root_history = attached::root_history_version(&session, provider.as_ref())
+                .await
+                .map_err(|error| ReviewDecision::denied(error.to_string()))?;
             let started = Instant::now();
-            tracing::info!(%review_id, "Guardian V3 review preparation started");
-            let result = AttachedApproval::prepare(
-                provider,
-                authorization,
-                &session,
-                &context,
-                deadline,
-                cancellation,
-            )
-            .await;
+            tracing::info!(
+                %review_id,
+                tool_call_id = self.request.tool_call_id.as_deref(),
+                probe_review = match context.guardian_probe {
+                    Some(true) => "required",
+                    Some(false) => "not_required",
+                    None => "not_reported",
+                },
+                "Guardian V3 review preparation started"
+            );
+            let result =
+                AttachedApproval::prepare(provider, &session, &context, deadline, cancellation)
+                    .await;
             let result = if cancellation.is_cancelled() {
                 Err(ReviewPreparationError::Cancelled)
             } else {
@@ -246,17 +266,13 @@ impl ReviewHost for super::super::runtime::ReviewRuntime {
                     "Guardian V3 could not prepare the evidence for this action: {error}"
                 )),
             })?;
-            (
-                codex_guardian_reviewer::ReviewReport::new(metadata),
-                root_history,
-                Some(prepared),
-            )
+            (root_history, Some(prepared))
         } else {
-            let report = codex_guardian_reviewer::ReviewReport::new(metadata);
-            let root_history = root
+            let root = session
+                .guardian_root_snapshot()
                 .await
-                .map(|root| (root.root_thread_id, root.history_reset_version));
-            (report, root_history, None)
+                .map_err(|error| ReviewDecision::denied(error.to_string()))?;
+            (root.as_ref().map(root_history_key), None)
         };
         Ok((
             PreparedApproval {
@@ -267,7 +283,7 @@ impl ReviewHost for super::super::runtime::ReviewRuntime {
                 root_history,
                 attached,
             },
-            report,
+            codex_guardian_reviewer::ReviewReport::new(metadata),
         ))
     }
 
@@ -288,67 +304,65 @@ impl ReviewHost for super::super::runtime::ReviewRuntime {
                 None,
             );
         }
-        // Every attempt rebuilds the prompt from live history. Capture its revision and
-        // cache attribution anew too; a retried verdict must not use the first snapshot.
         let session = &self.session;
-        let root_snapshot = session
-            .services
-            .agent_control
-            .get_guardian_package(session.thread_id)
-            .await;
-        if prepared.root_history
-            != root_snapshot
-                .as_ref()
-                .map(|snapshot| (snapshot.root_thread_id, snapshot.history_reset_version))
+        let extensions = &session.services.thread_extension_data;
+        let store = extensions.get::<GuardianReviewEvidence>();
+        // Only the thread's live reviewer publishes previous reviews. An
+        // observer or a session without a store needs just the reset checks.
+        if let Some(attached) = &prepared.attached
+            && (store.is_none() || extensions.get::<Arc<dyn AttachedReviewer>>().is_none())
         {
+            let (outcome, analytics) = attached
+                .attempt(session, prepared, &self.reasons, deadline, cancellation)
+                .await;
+            return (outcome, analytics, None);
+        }
+        // Attribute the verdict to the history versions at the start of this attempt.
+        let root_snapshot = match session.guardian_root_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return (
+                    GuardianReviewOutcome::Error(GuardianReviewError::PromptBuild {
+                        message: error.to_string(),
+                    }),
+                    GuardianReviewAnalyticsResult::without_session(),
+                    None,
+                );
+            }
+        };
+        if prepared.root_history != root_snapshot.as_ref().map(root_history_key) {
             return (
                 GuardianReviewOutcome::Error(GuardianReviewError::Cancelled),
                 GuardianReviewAnalyticsResult::without_session(),
                 None,
             );
         }
-        let root_versions = root_snapshot.map(|snapshot| {
-            (
-                snapshot.authorization_version,
-                snapshot.review_context_revision,
-            )
-        });
+        let root_versions = root_snapshot.map(root_versions);
         let (root_authorization_version, root_review_context_revision) = root_versions.unzip();
         // Keep the authorization revision even when no cacheable review evidence exists.
         let history = session.conversation_history_snapshot().await;
         let user_message_revision = history.user_message_revision();
         let review_context_revision = history.guardian_review_context_revision();
-        let review_evidence = session
-            .services
-            .thread_extension_data
-            .get::<GuardianReviewEvidence>()
-            .map(|store| ApprovalEvidence {
-                authorization_version: store.authorization_version(history.as_ref()),
-                review_context_revision,
-                store,
-                root_versions,
-            });
-        drop(history);
-        let authorization = ReviewAuthorization {
-            user_message_revision,
+        let review_evidence = store.map(|store| ApprovalEvidence {
+            authorization_version: store.authorization_version(history.as_ref()),
             review_context_revision,
-            root_history: prepared.root_history,
-            root_authorization_version,
-            root_review_context_revision,
-            history_reset: self.history_reset.clone(),
-        };
+            store,
+            root_versions,
+        });
+        drop(history);
         let (outcome, analytics) = if let Some(attached) = &prepared.attached {
             attached
-                .attempt(
-                    session,
-                    prepared,
-                    &self.reasons,
-                    authorization,
-                    deadline,
-                    cancellation,
-                )
+                .attempt(session, prepared, &self.reasons, deadline, cancellation)
                 .await
         } else {
+            let authorization = ReviewAuthorization {
+                user_message_revision,
+                review_context_revision,
+                root_history: prepared.root_history,
+                root_authorization_version,
+                root_review_context_revision,
+                history_reset: self.history_reset.clone(),
+            };
             run_guardian_review_session_before_deadline(
                 Arc::clone(&self.session),
                 prepared.context.clone(),
@@ -371,17 +385,23 @@ impl ReviewHost for super::super::runtime::ReviewRuntime {
         (outcome, analytics, review_evidence)
     }
 
-    async fn cached_approval_is_current(&self, prepared: &PreparedApproval) -> bool {
-        let root = self
-            .session
-            .services
-            .agent_control
-            .get_guardian_package(self.session.thread_id)
-            .await;
-        !self.history_reset.is_cancelled()
-            && self.validate_action().is_ok()
-            && prepared.root_history
-                == root.map(|snapshot| (snapshot.root_thread_id, snapshot.history_reset_version))
+    async fn cached_approval_context(
+        &self,
+        prepared: &PreparedApproval,
+    ) -> Option<CachedApprovalContext> {
+        let root = self.session.guardian_root_snapshot().await.ok()?;
+        let history = self.session.conversation_history_snapshot().await;
+        if self.history_reset.is_cancelled()
+            || self.validate_action().is_err()
+            || prepared.root_history != root.as_ref().map(root_history_key)
+        {
+            return None;
+        }
+        Some(CachedApprovalContext {
+            user_message_revision: history.user_message_revision(),
+            review_context_revision: history.guardian_review_context_revision(),
+            root_versions: root.map(root_versions),
+        })
     }
 
     fn validate_action(&self) -> Result<(&str, Option<&str>), ReviewDecision> {

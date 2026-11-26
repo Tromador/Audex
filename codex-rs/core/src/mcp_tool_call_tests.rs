@@ -83,6 +83,20 @@ struct McpPermissionRequestHookFixture {
 
 #[ctor]
 fn maybe_run_mcp_permission_request_hook_fixture() {
+    // musl does not pass argv to constructors. The hook subprocess must
+    // recognize its fixture command before libtest parses the arguments.
+    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    let cmdline = std::fs::read("/proc/self/cmdline").expect("read hook fixture arguments");
+    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    let mut args = {
+        use std::os::unix::ffi::OsStrExt;
+        cmdline
+            .strip_suffix(&[0])
+            .unwrap_or(&cmdline)
+            .split(|byte| *byte == 0)
+            .map(|arg| std::ffi::OsStr::from_bytes(arg).to_owned())
+    };
+    #[cfg(not(all(target_os = "linux", target_env = "musl")))]
     let mut args = std::env::args_os();
     let _program = args.next();
     if args.next().as_deref()
@@ -1675,6 +1689,7 @@ async fn mcp_sandbox_cwd_uses_matching_server_environment_uri() -> anyhow::Resul
                         .snapshot(),
                     shell_environment_policy: Default::default(),
                     exec_policy: None,
+                    plugins: Default::default(),
                     mcp_policy: None,
                     network_policy: None,
                     selected_capability_roots: Vec::new(),
@@ -2818,136 +2833,6 @@ async fn persist_custom_mcp_tool_approval_writes_tool_override() {
         }
     );
     assert!(contents.contains("[mcp_servers.docs.tools.search]"));
-}
-
-#[tokio::test]
-async fn custom_mcp_tool_approval_mode_uses_server_default_with_tool_override() {
-    let tmp = tempdir().expect("tempdir");
-    std::fs::write(
-        tmp.path().join(CONFIG_TOML_FILE),
-        r#"
-[mcp_servers.docs]
-command = "docs-server"
-default_tools_approval_mode = "approve"
-
-[mcp_servers.docs.tools.search]
-approval_mode = "prompt"
-"#,
-    )
-    .expect("seed config");
-    let config = ConfigBuilder::default()
-        .codex_home(tmp.path().to_path_buf())
-        .build()
-        .await
-        .expect("load config");
-    let (session, mut turn_context) = make_session_and_context().await;
-    turn_context.config = Arc::new(config);
-
-    assert_eq!(
-        custom_mcp_tool_approval_mode(&session, &turn_context, "docs", "read").await,
-        AppToolApproval::Approve
-    );
-    assert_eq!(
-        custom_mcp_tool_approval_mode(&session, &turn_context, "docs", "search").await,
-        AppToolApproval::Prompt
-    );
-    assert_eq!(
-        custom_mcp_tool_approval_mode(&session, &turn_context, "unknown", "search").await,
-        AppToolApproval::Auto
-    );
-}
-
-#[tokio::test]
-async fn custom_mcp_tool_approval_mode_uses_plugin_mcp_policy() {
-    let (session, mut turn_context) = make_session_and_context().await;
-    let codex_home = session.codex_home().await;
-    write_sample_plugin_mcp(codex_home.as_path());
-    std::fs::write(
-        codex_home.join(CONFIG_TOML_FILE),
-        r#"
-[features]
-plugins = true
-
-[plugins."sample@test"]
-enabled = true
-
-[plugins."sample@test".mcp_servers.sample]
-default_tools_approval_mode = "prompt"
-
-[plugins."sample@test".mcp_servers.sample.tools.search]
-approval_mode = "approve"
-"#,
-    )
-    .expect("seed config");
-    let config = ConfigBuilder::default()
-        .codex_home(codex_home.to_path_buf())
-        .build()
-        .await
-        .expect("load config");
-    turn_context.config = Arc::new(config);
-    session.services.plugins_manager.clear_cache();
-
-    assert_eq!(
-        custom_mcp_tool_approval_mode(&session, &turn_context, "sample", "read").await,
-        AppToolApproval::Prompt
-    );
-    assert_eq!(
-        custom_mcp_tool_approval_mode(&session, &turn_context, "sample", "search").await,
-        AppToolApproval::Approve
-    );
-}
-
-#[tokio::test]
-async fn custom_mcp_tool_approval_mode_uses_updated_plugin_mcp_policy_after_cache_warm() {
-    let (session, mut turn_context) = make_session_and_context().await;
-    let codex_home = session.codex_home().await;
-    write_sample_plugin_mcp(codex_home.as_path());
-    std::fs::write(
-        codex_home.join(CONFIG_TOML_FILE),
-        r#"
-[features]
-plugins = true
-
-[plugins."sample@test"]
-enabled = true
-"#,
-    )
-    .expect("seed config");
-    let initial_config = ConfigBuilder::default()
-        .codex_home(codex_home.to_path_buf())
-        .build()
-        .await
-        .expect("load initial config");
-    session
-        .services
-        .plugins_manager
-        .plugins_for_config(&initial_config.plugins_config_input())
-        .await;
-    std::fs::write(
-        codex_home.join(CONFIG_TOML_FILE),
-        r#"
-[features]
-plugins = true
-
-[plugins."sample@test"]
-enabled = true
-
-[plugins."sample@test".mcp_servers.sample.tools.search]
-approval_mode = "approve"
-"#,
-    )
-    .expect("update config");
-    let updated_config = ConfigBuilder::default()
-        .codex_home(codex_home.to_path_buf())
-        .build()
-        .await
-        .expect("load updated config");
-    turn_context.config = Arc::new(updated_config);
-
-    assert_eq!(
-        custom_mcp_tool_approval_mode(&session, &turn_context, "sample", "search").await,
-        AppToolApproval::Approve
-    );
 }
 
 #[tokio::test]

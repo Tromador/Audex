@@ -2,6 +2,8 @@ mod audio;
 mod callbacks;
 mod event_channel;
 mod globals;
+mod json_equality;
+mod mcp_result;
 mod module_loader;
 mod timers;
 mod value;
@@ -20,6 +22,7 @@ use crate::session_runtime::OutputItem;
 use crate::session_runtime::ToolCatalog;
 use crate::v8_init::ensure_v8_initialized;
 use codex_code_mode_protocol::CodeModeToolKind;
+use codex_code_mode_protocol::CodeModeToolResult;
 use codex_protocol::ToolName;
 pub(crate) use event_channel::RuntimeEventReceiver;
 pub(crate) use event_channel::RuntimeEventSender;
@@ -28,9 +31,17 @@ use serde_json::Value as JsonValue;
 
 #[derive(Debug)]
 pub(crate) enum RuntimeCommand {
-    ToolResponse { id: String, result: JsonValue },
-    ToolError { id: String, error_text: String },
-    TimeoutFired { id: u64 },
+    ToolResponse {
+        id: String,
+        result: CodeModeToolResult,
+    },
+    ToolError {
+        id: String,
+        error_text: String,
+    },
+    TimeoutFired {
+        id: u64,
+    },
     ObservePendingFrontier,
     Terminate,
 }
@@ -377,10 +388,7 @@ mod tests {
         );
 
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), failure_rx.recv())
-                .await
-                .expect("runtime failure timeout")
-                .expect("runtime failure"),
+            failure_rx.recv().await.expect("runtime failure"),
             "code-mode V8 runtime thread panicked"
         );
     }
@@ -395,9 +403,7 @@ mod tests {
         );
 
         assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
-                .await
-                .expect("runtime panic event timeout"),
+            event_rx.recv().await,
             Some(RuntimeEvent::ThreadPanicked)
         ));
     }

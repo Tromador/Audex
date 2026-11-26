@@ -2,6 +2,35 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
+async fn clearing_focus_keeps_unread_events_on_the_original_thread() -> Result<()> {
+    let mut app = make_test_app().await;
+    let first = ThreadId::new();
+    let second = ThreadId::new();
+    app.ensure_thread_channel(first);
+    app.ensure_thread_channel(second);
+    app.activate_thread_channel(first).await;
+    app.enqueue_thread_notification(first, thread_closed_notification(first))
+        .await?;
+
+    app.clear_active_thread().await;
+    assert!(app.active_thread_rx().is_none());
+    app.activate_thread_channel(second).await;
+    assert!(app.active_thread_rx().unwrap().is_empty());
+
+    app.clear_active_thread().await;
+    app.activate_thread_channel(first).await;
+    let event = app.active_thread_rx_mut().unwrap().try_recv()?;
+    let ThreadBufferedEvent::Notification(notification) = event else {
+        panic!("expected the original notification");
+    };
+    let ServerNotification::ThreadClosed(closed) = *notification else {
+        panic!("expected thread closure");
+    };
+    assert_eq!(closed.thread_id, first.to_string());
+    Ok(())
+}
+
+#[tokio::test]
 async fn agents_navigation_opens_the_command_center_on_every_target() -> Result<()> {
     let endpoint = crate::RemoteAppServerEndpoint::UnixSocket {
         socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
@@ -41,7 +70,7 @@ async fn agents_navigation_opens_the_command_center_on_every_target() -> Result<
         let event = events.try_recv()?;
         assert_matches!(event, AppEvent::OpenAgentsOverview);
         app.handle_event(&mut tui, &mut app_server, event).await?;
-        assert!(app.chat_widget.active_view_is(AGENTS_OVERVIEW_VIEW_ID));
+        assert!(app.agents_overview_has_focus());
         app_server.shutdown().await?;
     }
     Ok(())
@@ -50,6 +79,7 @@ async fn agents_navigation_opens_the_command_center_on_every_target() -> Result<
 #[tokio::test]
 async fn externally_archived_thread_keeps_advertised_agents_navigation() -> Result<()> {
     let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    crate::app::test_support::use_modal_agents_overview(&mut app);
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let mut app_server = start_config_write_test_app_server(&app).await?;
     app.app_server_target = AppServerTarget::LocalDaemon {
@@ -167,7 +197,7 @@ async fn provider_error_opens_command_center_with_left() -> Result<()> {
             TuiEvent::Key(KeyCode::Left.into()),
         )
         .await?;
-        assert!(app.chat_widget.active_view_is(AGENTS_OVERVIEW_VIEW_ID));
+        assert!(app.agents_overview_has_focus());
         assert_eq!(
             app.chat_widget.composer_text_with_pending(),
             "Retained draft"
@@ -430,6 +460,26 @@ fn thread_links_navigate_and_missing_threads_preserve_the_draft() -> Result<()> 
                 (Some(root), Some(target))
             );
         }
+        if scenario == "root" {
+            for exiting in [false, true] {
+                app.ensure_thread_channel(root).mark_replay_only();
+                app.chat_widget.show_external_writer_thread();
+                app.pending_shutdown_exit_thread_id = exiting.then_some(root);
+                app.enqueue_thread_notification(root, thread_closed_notification(root)).await?;
+                Box::pin(app.select_agent_thread(&mut tui, &mut app_server, root)).await?;
+                assert_eq!(app.thread_event_channels[&root].attachment(), ThreadEventAttachment::Live);
+                let mut saw_exit = false;
+                while let Ok(event) = events.try_recv() {
+                    if matches!(event, AppEvent::Exit(ExitMode::Immediate)) {
+                        saw_exit = true;
+                    } else {
+                        Box::pin(app.handle_event(&mut tui, &mut app_server, event)).await?;
+                    }
+                }
+                assert_eq!(saw_exit, exiting);
+            }
+            app.pending_shutdown_exit_thread_id = None;
+        }
         if scenario == "grandchild" {
             let intermediate = intermediate.expect("grandchild has an intermediate parent");
             Box::pin(app.select_agent_thread(&mut tui, &mut app_server, intermediate)).await?;
@@ -439,13 +489,13 @@ fn thread_links_navigate_and_missing_threads_preserve_the_draft() -> Result<()> 
             Box::pin(thread_links::open_thread_link(&mut app, &mut tui, &mut app_server, target)).await?;
             Box::pin(app.select_agent_thread(&mut tui, &mut app_server, intermediate)).await?;
             assert_eq!(app.active_thread_id, Some(intermediate));
-            while app.active_thread_rx.as_mut().unwrap().try_recv().is_ok() {}
+            while app.active_thread_rx_mut().unwrap().try_recv().is_ok() {}
             let event = ThreadBufferedEvent::Notification(Box::new(
                 agent_message_delta_notification(intermediate, "turn", "item", "fresh delivery"),
             ));
             app.thread_event_channels[&intermediate].sender.send(event).await?;
             let ThreadBufferedEvent::Notification(notification) =
-                app.active_thread_rx.as_mut().unwrap().try_recv()?
+                app.active_thread_rx_mut().unwrap().try_recv()?
             else {
                 panic!("expected an agent message notification");
             };
@@ -530,4 +580,127 @@ fn thread_links_navigate_and_missing_threads_preserve_the_draft() -> Result<()> 
         })?
         .join()
         .expect("thread-link navigation test panicked")
+}
+
+#[tokio::test]
+async fn collab_history_resolves_replayed_and_live_names_in_background() -> Result<()> {
+    let (mut app, mut rx, _ops) = Box::pin(make_test_app_with_channels()).await;
+    let root = ThreadId::new();
+    let receiver_thread_id = ThreadId::from_string(
+        &app_test_support::create_fake_parented_rollout_with_source(
+            app.config.codex_home.as_path(),
+            "2026-01-01T00-00-01",
+            "2026-01-01T00:00:01Z",
+            "Child",
+            Some(&app.config.model_provider_id),
+            /*git_info*/ None,
+            RolloutSessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: Some("Kepler".into()),
+                agent_role: Some("explorer".into()),
+            }),
+            root.into(),
+            root,
+        )
+        .expect("create child rollout"),
+    )?;
+    let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.primary_thread_id = Some(root);
+
+    let call = |id: &str, tool, status| ThreadItemPayload::CollabAgentToolCall {
+        id: id.to_string(),
+        tool,
+        status,
+        sender_thread_id: root.to_string(),
+        receiver_thread_ids: vec![receiver_thread_id.to_string()],
+        prompt: None,
+        model: None,
+        reasoning_effort: None,
+        agents_states: HashMap::new(),
+    };
+    let spawn = call(
+        "spawn-1",
+        codex_app_server_protocol::CollabAgentTool::SpawnAgent,
+        codex_app_server_protocol::CollabAgentToolCallStatus::Completed,
+    );
+    app.chat_widget.replay_thread_turns(
+        vec![test_turn("saved-turn", TurnStatus::Completed, vec![spawn])],
+        ReplayKind::ResumeInitialMessages,
+    );
+    let completion = loop {
+        let event = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), rx.recv())
+            .await?
+            .expect("app event channel");
+        if matches!(event, AppEvent::AgentPickerThreadsLoaded { .. }) {
+            break event;
+        }
+        Box::pin(app.handle_event(&mut tui, &mut server, event)).await?;
+    };
+    let mut parked = SideCompanion::empty(app.config.cwd.to_path_buf());
+    parked.cells = app.transcript_cells.clone();
+    let parked_id = ThreadId::new();
+    app.side_companions.insert(parked_id, parked);
+    // The wait is queued before the name arrives, but inserted after the lookup completes.
+    app.handle_thread_event_now(ThreadBufferedEvent::Notification(Box::new(
+        ServerNotification::ItemStarted(ItemStartedNotification::new(
+            root.to_string(),
+            "turn-1".to_string(),
+            call(
+                "wait-1",
+                codex_app_server_protocol::CollabAgentTool::Wait,
+                codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
+            ),
+            /*started_at_ms*/ 0,
+        )),
+    )));
+
+    assert_eq!(
+        app.agent_navigation.get(&receiver_thread_id),
+        Some(&AgentPickerThreadEntry {
+            agent_nickname: None,
+            agent_role: None,
+            agent_path: None,
+            is_running: false,
+            is_closed: false,
+        })
+    );
+    app.enqueue_thread_notification(
+        receiver_thread_id,
+        thread_closed_notification(receiver_thread_id),
+    )
+    .await?;
+    Box::pin(app.handle_event(&mut tui, &mut server, completion)).await?;
+    assert!(
+        app.agent_navigation
+            .get(&receiver_thread_id)
+            .unwrap()
+            .is_closed
+    );
+    drain_app_events(&mut app, &mut tui, &mut server, &mut rx).await?;
+    let text = |lines: Vec<crate::terminal_hyperlinks::HyperlinkLine>| {
+        lines
+            .iter()
+            .map(rendered_line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let transcript = text(app.render_transcript_lines_for_reflow(/*width*/ 80).lines);
+    insta::assert_snapshot!(transcript, @r"
+    • Spawned Kepler [explorer]
+
+    • Waiting for Kepler [explorer]
+    ");
+    assert_eq!(
+        text(app.side_companions[&parked_id].cells[0].transcript_hyperlink_lines(/*width*/ 80)),
+        "• Spawned Kepler [explorer]"
+    );
+    assert_eq!(
+        text(tui.pending_history_lines_for_test()),
+        format!("• Spawned {receiver_thread_id}\n\n• Waiting for Kepler [explorer]")
+    );
+    server.shutdown().await?;
+    Ok(())
 }

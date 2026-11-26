@@ -28,6 +28,13 @@ use codex_app_server_protocol::ThreadPrepareApprovedPlanParams;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use std::collections::HashSet;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ResumeOrigin {
+    Manual,
+    BackendSwitch,
+    CloudRecovery,
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum ThreadAttachPresentation {
     /// A primary thread created by thread/start, without inherited history.
@@ -37,7 +44,7 @@ pub(super) enum ThreadAttachPresentation {
     /// A fresh thread whose startup composer is already visible.
     FreshWithDraft,
     SessionLineage,
-    /// A resume whose outgoing events were drained and terminal cleared before capture.
+    /// Outgoing events were drained and the terminal handoff prepared before capture.
     SessionLineageAfterClear,
 }
 
@@ -434,19 +441,17 @@ impl App {
             }
         );
         let replace_active = self.active_thread_id == Some(thread_id)
-            && self.active_thread_rx.is_some()
             && matches!(&prepared, PreparedAttachment::Live(_));
         if replace_active {
-            // The active receiver belongs to the channel that installation will replace.
-            self.drain_outgoing_thread_events().await;
-            self.store_active_thread_receiver().await;
+            // A new live attachment supersedes the old stream's close notification.
+            self.drain_outgoing_thread_events(Some(thread_id)).await;
+            self.save_active_thread_state().await;
         }
         let live = self
             .install_thread_attachment(app_server, thread_id, prepared, ChannelMode::ReplaceLive)
             .await;
         if replace_active {
             self.set_thread_active(thread_id, /*active*/ true).await;
-            self.active_thread_rx = self.ensure_thread_channel(thread_id).receiver.take();
         }
         self.ensure_thread_channel(thread_id).archived = archived;
         Ok(live)
@@ -627,6 +632,7 @@ impl App {
         mut chat_widget: ChatWidget,
         thread_provider: Option<&str>,
     ) {
+        self.conversation_frame = Default::default();
         self.statusline_picker = None;
         chat_widget.inherit_view_transition_key_guard(&mut self.chat_widget);
         chat_widget.fork_in_progress = self.chat_widget.fork_in_progress;
@@ -663,8 +669,11 @@ impl App {
                 self.chat_widget.windows_sandbox_elevated_setup_complete;
         }
         // Different providers can report identical account details.
-        let provider_changed = thread_provider
-            .is_some_and(|provider| provider != self.chat_widget.quota_provider_id());
+        let provider_changed = thread_provider.is_some_and(|provider| {
+            provider != self.chat_widget.quota_provider_id()
+                || chat_widget.config_ref().model_providers.get(provider)
+                    != self.chat_widget.config_ref().model_providers.get(provider)
+        });
         let lost_chatgpt_account =
             self.chat_widget.has_chatgpt_account() && !chat_widget.has_chatgpt_account();
         if provider_changed || lost_chatgpt_account {
@@ -751,11 +760,6 @@ impl App {
         if let Some(pane) = self.sidebars.get_mut(&self.sidebar_parent()) {
             pane.agents.pending_link = None;
         }
-        if self.active_thread_id == Some(thread_id) {
-            // Detach the cached receiver before a successful attachment replaces its channel.
-            self.store_active_thread_receiver().await;
-        }
-
         let known_side = self.side_threads.contains_key(&thread_id)
             && self.thread_event_channels.contains_key(&thread_id);
         // The live parent already receives lifecycle notifications while its child has focus.
@@ -849,18 +853,17 @@ impl App {
         // Notifications already routed to the active channel must reach the old
         // widget before its transcript state is transferred. Events routed after
         // deactivation are retained separately for that thread.
-        if let Some(mut receiver) = self.active_thread_rx.take() {
-            while let Ok(event) = receiver.try_recv() {
-                self.handle_thread_event_now_recovering_file_changes(event)
-                    .await;
-            }
-            self.active_thread_rx = Some(receiver);
+        // A live same-thread replacement already drained its old receiver. On failed
+        // reattachment leave a queued close to the normal shutdown/failover handler.
+        if previous_thread_id != Some(thread_id) {
+            self.drain_outgoing_thread_events(/*reattached*/ None).await;
         }
-        self.store_active_thread_receiver().await;
+        self.save_active_thread_state().await;
         self.active_thread_id = None;
-        let Some((receiver, mut snapshot)) = self.activate_thread_for_replay(thread_id).await
-        else {
-            self.add_agents_overview_error(format!("Agent thread {thread_id} is already active."));
+        let Some(mut snapshot) = self.activate_thread_for_replay(thread_id).await else {
+            self.add_agents_overview_error(format!(
+                "Agent thread {thread_id} is no longer available."
+            ));
             if let Some(previous_thread_id) = previous_thread_id {
                 self.activate_thread_channel(previous_thread_id).await;
             }
@@ -919,7 +922,6 @@ impl App {
             .or(self.agents_overview.input_states.remove(&thread_id));
 
         self.active_thread_id = Some(thread_id);
-        self.active_thread_rx = Some(receiver);
 
         self.recap.note_focus_gained();
         self.recap = recap::RecapState::default();
@@ -1025,10 +1027,13 @@ impl App {
                 .get(&self.side_pair_key(id)?)
                 .map(|side| side.parent_thread_id)
         };
+        let docked_resume = self.docked_task_opening(tui);
         let preserve_screen = retain_side_view
-            && side_parent(thread_id).is_some_and(|parent| {
-                self.chat_widget.thread_id().and_then(side_parent) == Some(parent)
-            });
+            && (docked_resume
+                || side_parent(thread_id).is_some_and(|parent| {
+                    self.chat_widget.thread_id().and_then(side_parent) == Some(parent)
+                }));
+        self.startup_protected_input_boundary |= docked_resume;
         let mut init = self.chatwidget_init_for_forked_or_resumed_thread(
             tui,
             self.config.clone(),
@@ -1043,6 +1048,7 @@ impl App {
                 .unwrap_or_default();
             self.apply_session_account(&mut init, account);
         }
+        let presented = preserve_screen.then(|| std::mem::take(&mut self.conversation_frame));
         self.replace_chat_widget_for_provider(
             ChatWidget::new_with_app_event(init),
             snapshot
@@ -1050,6 +1056,9 @@ impl App {
                 .as_ref()
                 .map(|session| session.model_provider_id.as_str()),
         );
+        if let Some(frame) = presented {
+            self.conversation_frame = frame;
+        }
         self.chat_widget
             .set_task_mentions_enabled(app_server.task_tools_available(thread_id));
         self.chat_widget
@@ -1179,7 +1188,6 @@ impl App {
         self.agents_overview.activity.clear();
         self.agent_navigation.clear();
         self.active_thread_id = None;
-        self.active_thread_rx = None;
         self.primary_thread_id = None;
         self.last_subagent_backfill_attempt = None;
         self.primary_session_configured = None;
@@ -1316,7 +1324,7 @@ impl App {
                     && self.chat_widget.config_ref().model_provider_id == OPENAI_PROVIDER_ID
                     && !self
                         .model_catalog
-                        .models
+                        .models()
                         .iter()
                         .any(|preset| preset.model == model)
                 {
@@ -1391,6 +1399,7 @@ impl App {
         // Start a fresh in-memory session while preserving resumability via persisted rollout
         // history. If an initial message is provided, `enqueue_primary_thread_session` suppresses it
         // until the new session is configured and any replayed turns have been rendered.
+        let interrupted_recovery = self.interrupt_cloud_resume_for_navigation();
         let (session_start_source, mut draft) = match start {
             FreshSessionStart::NewConversation => (
                 None,
@@ -1411,6 +1420,7 @@ impl App {
         .await;
         match prepared {
             Ok(prepared) => {
+                self.reconnect.cloud_resume = None;
                 let presentation = if draft.is_some() {
                     ThreadAttachPresentation::FreshWithDraft
                 } else {
@@ -1428,6 +1438,9 @@ impl App {
             }
             Err(err) => {
                 self.chat_widget.add_error_message(err.to_string());
+                if interrupted_recovery {
+                    self.start_cloud_resume(app_server);
+                }
                 if let Some(message) = initial_user_message {
                     self.chat_widget.restore_user_message_to_composer(message);
                 }
@@ -1712,13 +1725,19 @@ impl App {
         .await
     }
 
-    async fn drain_outgoing_thread_events(&mut self) {
-        if let Some(mut receiver) = self.active_thread_rx.take() {
-            while let Ok(event) = receiver.try_recv() {
-                self.handle_thread_event_now_recovering_file_changes(event)
-                    .await;
+    async fn drain_outgoing_thread_events(&mut self, reattached: Option<ThreadId>) {
+        while let Some(receiver) = self.active_thread_rx_mut()
+            && let Ok(event) = receiver.try_recv()
+        {
+            if let Some(id) = reattached
+                && self.pending_shutdown_exit_thread_id != Some(id)
+                && let ThreadBufferedEvent::Notification(notification) = &event
+                && matches!(notification.as_ref(), ServerNotification::ThreadClosed(closed) if closed.thread_id == id.to_string())
+            {
+                continue;
             }
-            self.active_thread_rx = Some(receiver);
+            self.handle_thread_event_now_recovering_file_changes(event)
+                .await;
         }
     }
 
@@ -1753,7 +1772,7 @@ impl App {
             presentation,
             ThreadAttachPresentation::SessionLineageAfterClear
         ) {
-            self.drain_outgoing_thread_events().await;
+            self.drain_outgoing_thread_events(/*reattached*/ None).await;
         }
         if let Some(thread_id) = source_thread
             && (self.agents_overview.blank_sessions.contains_key(&thread_id)
@@ -1762,10 +1781,19 @@ impl App {
         {
             self.agents_overview.input_states.insert(thread_id, input);
         }
-        self.store_active_thread_receiver().await;
+        self.save_active_thread_state().await;
         self.refresh_transcript_document_links();
         self.reset_transcript_state_after_clear();
         tui.clear_pending_history_lines();
+        let docked_resume = matches!(
+            presentation,
+            ThreadAttachPresentation::SessionLineage
+                | ThreadAttachPresentation::SessionLineageAfterClear
+        ) && self.docked_task_opening(tui);
+        // Replayed approvals need the same first-frame input quarantine as startup.
+        self.startup_protected_input_boundary |= docked_resume;
+        let preserve_screen =
+            docked_resume || matches!(presentation, ThreadAttachPresentation::FreshWithDraft);
         let presentation = match presentation {
             ThreadAttachPresentation::FreshAfterClear => ThreadAttachPresentation::Fresh,
             ThreadAttachPresentation::SessionLineageAfterClear => {
@@ -1776,18 +1804,18 @@ impl App {
                 presentation
             }
             ThreadAttachPresentation::Fresh | ThreadAttachPresentation::SessionLineage => {
-                tui.clear_for_thread_switch()?;
+                if !docked_resume {
+                    tui.clear_for_thread_switch()?;
+                }
                 presentation
             }
         };
         self.pending_thread_switch_resets += 1;
-        self.app_event_tx.send(
-            if matches!(presentation, ThreadAttachPresentation::FreshWithDraft) {
-                AppEvent::ResetTranscriptForThreadSwitchPreservingScreen
-            } else {
-                AppEvent::ResetTranscriptForThreadSwitch
-            },
-        );
+        self.app_event_tx.send(if preserve_screen {
+            AppEvent::ResetTranscriptForThreadSwitchPreservingScreen
+        } else {
+            AppEvent::ResetTranscriptForThreadSwitch
+        });
         self.reset_thread_event_state().await;
         let mut init = self.chatwidget_init_for_forked_or_resumed_thread(
             tui,
@@ -1981,6 +2009,9 @@ impl App {
             self.agents_overview
                 .hidden_threads
                 .remove(&target_session.thread_id);
+            if self.agents_overview.workspace.is_open() {
+                self.focus_workspace_composer(tui);
+            }
             self.repaint_agents_overview();
             tui.frame_requester().schedule_frame();
             return Ok(AppRunControl::Continue);
@@ -1996,6 +2027,7 @@ impl App {
         if self.reject_pending_permission_root_switch() {
             return Ok(AppRunControl::Continue);
         }
+        let interrupted_recovery = self.interrupt_cloud_resume_for_navigation();
         let prepared = match self
             .prepare_target_session(
                 tui,
@@ -2006,8 +2038,14 @@ impl App {
             .await
         {
             Ok(prepared) => prepared,
-            Err(control) => return Ok(control),
+            Err(control) => {
+                if interrupted_recovery {
+                    self.start_cloud_resume(app_server);
+                }
+                return Ok(control);
+            }
         };
+        self.reconnect.cloud_resume = None;
         self.activate_prepared_session(tui, app_server, prepared)
             .await
     }
@@ -2018,6 +2056,22 @@ impl App {
         app_server: &mut AppServerSession,
         prepared: super::resume_preparation::PreparedResume,
     ) -> Result<AppRunControl> {
+        crate::boxed_future!(self.activate_prepared_session_from(
+            tui,
+            app_server,
+            prepared,
+            ResumeOrigin::Manual
+        ))
+        .await
+    }
+
+    pub(super) async fn activate_prepared_session_from(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        prepared: super::resume_preparation::PreparedResume,
+        origin: ResumeOrigin,
+    ) -> Result<AppRunControl> {
         if prepared.backend_id != app_server.backend_id() {
             self.add_session_picker_error(
                 "This session belongs to a different backend. Open the session picker again."
@@ -2027,10 +2081,8 @@ impl App {
         }
         let handoff = self.chat_widget.pause_input_for_resume_handoff();
         let _handoff = self.prepare_resume_handoff(tui, handoff).await?;
-        self.activate_prepared_session_after_clear(
-            tui, app_server, prepared, /*switched_backend*/ false,
-        )
-        .await
+        self.activate_prepared_session_after_clear(tui, app_server, prepared, origin)
+            .await
     }
 
     pub(super) async fn prepare_resume_handoff(
@@ -2038,9 +2090,11 @@ impl App {
         tui: &mut tui::Tui,
         handoff: std::sync::Arc<()>,
     ) -> Result<std::sync::Arc<()>> {
-        self.drain_outgoing_thread_events().await;
-        // Keep the outgoing receiver and session in place if the terminal clear fails.
-        if let Err(error) = tui.clear_for_thread_switch() {
+        self.drain_outgoing_thread_events(/*reattached*/ None).await;
+        // A docked open keeps the outgoing frame until the synchronized destination draw.
+        if !self.docked_task_opening(tui)
+            && let Err(error) = tui.clear_for_thread_switch()
+        {
             drop(handoff);
             self.chat_widget.maybe_send_next_queued_input();
             return Err(error.into());
@@ -2053,8 +2107,9 @@ impl App {
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
         prepared: super::resume_preparation::PreparedResume,
-        switched_backend: bool,
+        origin: ResumeOrigin,
     ) -> Result<AppRunControl> {
+        let switched_backend = origin == ResumeOrigin::BackendSwitch;
         let super::resume_preparation::PreparedResume {
             backend_id,
             config: resume_config,
@@ -2077,8 +2132,13 @@ impl App {
         let same_thread =
             !switched_backend && self.chat_widget.thread_id() == Some(resumed_thread_id);
         let refreshing_history = same_thread
-            && !was_reconnecting
-            && owned_channel.is_some_and(|channel| channel.history_may_be_incomplete);
+            && owned_channel.is_some_and(|channel| {
+                if origin == ResumeOrigin::CloudRecovery {
+                    was_reconnecting || channel.history_may_be_incomplete
+                } else {
+                    !was_reconnecting && channel.history_may_be_incomplete
+                }
+            });
         let retained_input = (same_thread
             && owned_channel.is_some()
             && (refreshing_history
@@ -2139,8 +2199,9 @@ impl App {
             .await
         {
             Ok(()) => {
-                self.ensure_thread_channel(resumed_thread_id)
-                    .history_may_be_incomplete = false;
+                let channel = self.ensure_thread_channel(resumed_thread_id);
+                channel.history_may_be_incomplete = false;
+                channel.recovered_cloud_history = origin == ResumeOrigin::CloudRecovery;
                 self.remember_attached_host_project(app_server);
                 let resumed_turn_running = !read_only
                     && self
@@ -2209,6 +2270,10 @@ impl App {
                 if let Some(notice) = history_notice {
                     self.chat_widget
                         .add_info_message(notice.to_string(), /*hint*/ None);
+                }
+                if self.agents_overview.workspace.is_open() {
+                    self.focus_workspace_composer(tui);
+                    self.repaint_agents_overview();
                 }
                 self.backfill_loaded_subagent_threads(app_server).await;
                 if matches!(

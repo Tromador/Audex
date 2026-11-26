@@ -46,6 +46,8 @@ pub struct HttpClientBuilder {
     pub(crate) request_logging: RequestLogging,
     tls_backend: TlsBackend,
     pub(crate) tls: HttpClientTlsConfig,
+    #[cfg(unix)]
+    pub(crate) unix_socket: Option<std::path::PathBuf>,
     #[cfg(windows)]
     windows_proxy_pipe_path: Option<std::path::PathBuf>,
 }
@@ -262,22 +264,6 @@ impl HttpClientBuilder {
         self
     }
 
-    /// Builds a client using the transport's default proxy behavior.
-    ///
-    /// # Legacy compatibility only
-    ///
-    /// This bypasses [`HttpClientFactory`] and therefore does not honor its configured outbound
-    /// proxy policy. New product traffic must use [`Self::build_respecting_outbound_proxy_policy`]
-    /// or [`HttpClientFactory::build_client`].
-    #[deprecated(
-        note = "legacy compatibility only; use HttpClientFactory::build_client or build_respecting_outbound_proxy_policy"
-    )]
-    pub fn build_with_transport_default_proxy(
-        self,
-    ) -> Result<HttpClient, BuildCustomCaTransportError> {
-        self.build_with_proxy_routing(ProxyRouting::TransportDefault)
-    }
-
     /// Builds a client that connects directly without using a proxy.
     ///
     /// # Exceptional use only
@@ -287,8 +273,11 @@ impl HttpClientBuilder {
     /// sandbox traffic whose egress routing is handled separately. Ordinary outbound product
     /// traffic must use [`Self::build_respecting_outbound_proxy_policy`] or
     /// [`HttpClientFactory::build_client`].
-    pub fn build_direct(self) -> Result<HttpClient, BuildCustomCaTransportError> {
-        self.build_with_proxy_routing(ProxyRouting::Direct)
+    pub fn build_direct(mut self) -> Result<HttpClient, BuildCustomCaTransportError> {
+        let request_logging = self.request_logging;
+        let default_headers = self.default_headers.take().unwrap_or_default();
+        build_reqwest_client_with_custom_ca(self.reqwest_builder(ProxyRouting::Direct))
+            .map(|inner| HttpClient::from_parts(inner, request_logging, default_headers))
     }
 
     /// Builds a transport-default client while preserving the legacy custom-CA fallback.
@@ -324,16 +313,6 @@ impl HttpClientBuilder {
                 self.build_with_custom_ca_fallback(ProxyRouting::Direct),
             ),
         }
-    }
-
-    fn build_with_proxy_routing(
-        mut self,
-        proxy_routing: ProxyRouting,
-    ) -> Result<HttpClient, BuildCustomCaTransportError> {
-        let request_logging = self.request_logging;
-        let default_headers = self.default_headers.take().unwrap_or_default();
-        build_reqwest_client_with_custom_ca(self.reqwest_builder(proxy_routing))
-            .map(|inner| HttpClient::from_parts(inner, request_logging, default_headers))
     }
 
     pub(crate) fn build_with_custom_ca_fallback(
@@ -397,6 +376,10 @@ impl HttpClientBuilder {
 
     fn base_reqwest_builder(self) -> reqwest::ClientBuilder {
         let mut builder = reqwest::Client::builder();
+        #[cfg(unix)]
+        if let Some(path) = self.unix_socket {
+            builder = builder.unix_socket(path);
+        }
         #[cfg(windows)]
         if let Some(path) = self.windows_proxy_pipe_path {
             builder = builder.windows_named_pipe(path);
@@ -460,6 +443,8 @@ impl Default for HttpClientBuilder {
             request_logging: RequestLogging::Enabled,
             tls_backend: TlsBackend::TransportDefault,
             tls: HttpClientTlsConfig::default(),
+            #[cfg(unix)]
+            unix_socket: None,
             #[cfg(windows)]
             windows_proxy_pipe_path: None,
         }

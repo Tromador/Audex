@@ -26,7 +26,7 @@ fn plan_test_session(thread_id: ThreadId) -> crate::session_state::ThreadSession
         fork_parent_title: None,
         thread_name: None,
         model: "test-model".to_string(),
-        model_provider_id: "test-provider".to_string(),
+        model_provider_id: "openai".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
@@ -587,11 +587,13 @@ async fn request_user_input_notification_overrides_pending_agent_turn_complete_n
 }
 
 #[tokio::test]
-async fn handle_request_user_input_sets_pending_notification() {
+async fn delayed_user_input_notifies_and_is_discarded_on_disconnect() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.local_settings.tui.notification_settings.notifications =
         Notifications::Custom(vec!["plan-mode-prompt".to_string()]);
 
+    chat.handle_paste("draft".to_string());
+    chat.open_terminal_title_setup();
     chat.handle_request_user_input_now(ToolRequestUserInputParams {
         thread_id: "thread-1".to_string(),
         item_id: "call-1".to_string(),
@@ -615,6 +617,11 @@ async fn handle_request_user_input_sets_pending_notification() {
         chat.pending_notification,
         Some(Notification::PlanModePrompt { ref title }) if title == "Reasoning scope"
     );
+    assert!(chat.has_pending_protected_request());
+    chat.pause_for_disconnect();
+    assert!(!chat.has_pending_protected_request());
+    assert!(chat.active_view_accepts_input_when_disconnected());
+    assert_eq!(chat.composer_text_with_pending(), "draft");
 }
 
 #[tokio::test]
@@ -1467,7 +1474,7 @@ async fn plan_slash_command_with_hidden_shell_paste_rejected_image_remains_liter
         .expect("current model")
         .input_modalities
         .retain(|modality| *modality != InputModality::Image);
-    Arc::make_mut(&mut chat.model_catalog).models = models;
+    Arc::make_mut(&mut chat.model_catalog).set_models(models);
     let payload = paste_hidden_plan_shell_payload(&mut chat);
     chat.set_remote_image_urls(vec!["https://example.com/image.png".to_string()]);
 
@@ -1542,7 +1549,7 @@ async fn rejected_initial_image_does_not_submit_later_queued_prompt() {
         .expect("current model")
         .input_modalities
         .retain(|modality| *modality != InputModality::Image);
-    Arc::make_mut(&mut chat.model_catalog).models = models;
+    Arc::make_mut(&mut chat.model_catalog).set_models(models);
     let mut initial_message = UserMessage::from("initial prompt");
     initial_message.remote_image_urls = vec!["https://example.com/image.png".to_string()];
     chat.initial_user_message = Some(initial_message);
@@ -1686,30 +1693,6 @@ async fn set_reasoning_effort_does_not_override_active_plan_override() {
         Some(ReasoningEffortConfig::High)
     );
     assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Plan);
-}
-
-#[tokio::test]
-async fn collab_mode_is_sent_after_enabling() {
-    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
-    chat.thread_id = Some(ThreadId::new());
-    chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
-
-    chat.bottom_pane
-        .set_composer_text("hello".to_string(), Vec::new(), Vec::new());
-    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
-    match next_submit_op(&mut op_rx) {
-        Op::UserTurn {
-            collaboration_mode:
-                Some(CollaborationMode {
-                    mode: ModeKind::Default,
-                    ..
-                }),
-            ..
-        } => {}
-        other => {
-            panic!("expected Op::UserTurn, got {other:?}")
-        }
-    }
 }
 
 #[tokio::test]

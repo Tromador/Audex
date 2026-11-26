@@ -27,6 +27,7 @@ use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::sqlite::SqliteSynchronous;
 use std::path::Path;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -255,6 +256,22 @@ impl SqliteConfig {
         probe_nfs(self.home(), &self.is_nfs).await
     }
 
+    pub async fn prefers_rollback_journal(&self) -> bool {
+        self.is_nfs()
+            .await
+            .is_ok_and(|is_nfs| self.journal_mode_policy(is_nfs).prefers_rollback())
+    }
+
+    fn journal_mode_policy(&self, is_nfs: bool) -> JournalModePolicy {
+        if !is_nfs {
+            JournalModePolicy::InitializeWal
+        } else if self.enforce_delete_on_nfs {
+            JournalModePolicy::RequireDelete
+        } else {
+            JournalModePolicy::InitializeDelete
+        }
+    }
+
     pub(crate) async fn logs_are_on_nfs(&self) -> anyhow::Result<bool> {
         probe_nfs(self.logs_home(), &self.logs_is_nfs).await
     }
@@ -474,7 +491,17 @@ impl SqliteConfig {
         .await
     }
 
-    async fn open_read_write_pool_with_spec(
+    // Share SQLite setup and recovery between the runtime and standalone database owners.
+    fn open_read_write_pool_with_spec<'a>(
+        &'a self,
+        path: &'a Path,
+        recover_spec: Option<RuntimeDbSpec>,
+        telemetry_override: Option<&'a dyn DbTelemetry>,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<SqlitePool>> + Send + 'a>> {
+        Box::pin(self.open_pool_inner(path, recover_spec, telemetry_override))
+    }
+
+    async fn open_pool_inner(
         &self,
         path: &Path,
         recover_spec: Option<RuntimeDbSpec>,
@@ -494,24 +521,17 @@ impl SqliteConfig {
         };
         // Keep the migration lock through pool initialization so another managed startup
         // cannot open the old inode or initialize a database during cutover.
-        let migration = if self.enforce_delete_on_nfs && is_nfs {
+        let journal_mode_policy = self.journal_mode_policy(is_nfs);
+        let _migration = if journal_mode_policy == JournalModePolicy::RequireDelete {
             Some(nfs::prepare_database(self, path).await?)
         } else {
             None
-        };
-        let journal_mode_policy = if migration.is_some() {
-            JournalModePolicy::RequireDelete
-        } else if is_nfs {
-            JournalModePolicy::InitializeDelete
-        } else {
-            JournalModePolicy::InitializeWal
         };
         let recovery = recover_spec.map_or(RecoveryMode::Unavailable, |spec| spec.recovery);
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
             .synchronous(SqliteSynchronous::Normal)
-            .busy_timeout(DEFAULT_BUSY_TIMEOUT)
             .log_statements(LevelFilter::Off);
         // Each failed attempt closes its pool before initialization is retried.
         let connect = || async {

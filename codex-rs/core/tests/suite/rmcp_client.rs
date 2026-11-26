@@ -937,6 +937,7 @@ async fn environment_mcp_policy_filters_runtime_config_and_model_tools(
                 windows_sandbox_type: fixture.config.permissions.windows_sandbox_type,
                 use_legacy_landlock: fixture.config.features.use_legacy_landlock(),
                 exec_policy: None,
+                plugins: Default::default(),
                 mcp_policy: Some(mcp_policy),
                 network_policy: None,
                 selected_capability_roots: Vec::new(),
@@ -1056,6 +1057,7 @@ async fn future_environment_mcp_policy_applies_on_the_next_turn() -> anyhow::Res
         windows_sandbox_type: fixture.config.permissions.windows_sandbox_type,
         use_legacy_landlock: fixture.config.features.use_legacy_landlock(),
         exec_policy: None,
+        plugins: Default::default(),
         mcp_policy: Some(EnvironmentMcpPolicy {
             servers: Some(BTreeMap::from([(
                 "environment_policy".to_string(),
@@ -2177,7 +2179,7 @@ async fn interrupt_during_mcp_startup_preserves_user_input_in_history(
             .iter()
             .any(|item| matches!(
                 item,
-                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(applied))
+                RolloutItem::EventMsg { event: EventMsg::ThreadSettingsApplied(applied), .. }
                     if applied.thread_id == Some(fixture.session_configured.thread_id)
             ))
     );
@@ -2322,7 +2324,6 @@ async fn local_stdio_server_uses_runtime_fallback_cwd_when_config_omits_cwd() ->
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: config.bundled_skills_enabled(),
             cloud_skill_enabled: config.cloud_skill_enabled,
-            shadow_selection_enabled: config.features.enabled(Feature::SkillSearch),
         }
     });
     let mut fixture = test_codex()
@@ -2561,8 +2562,8 @@ async fn stdio_mcp_tool_call_includes_sandbox_state_meta(
         .as_mut()
         .expect("bundled model messages");
     messages.confirmation_policies = Some(ConfirmationPolicies {
-        browser_use: browser_policy.map(str::to_owned),
-        computer_use: computer_policy.map(str::to_owned),
+        browser_use: browser_policy.map(Into::into),
+        computer_use: computer_policy.map(Into::into),
     });
     let models_mock = mount_models_once(&server, models).await;
 
@@ -2701,6 +2702,7 @@ async fn stdio_mcp_tool_call_includes_sandbox_state_meta(
                     windows_sandbox_type: fixture.config.permissions.windows_sandbox_type,
                     use_legacy_landlock: fixture.config.features.use_legacy_landlock(),
                     exec_policy: None,
+                    plugins: Default::default(),
                     mcp_policy: None,
                     network_policy: None,
                     selected_capability_roots: Vec::new(),

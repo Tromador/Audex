@@ -22,10 +22,7 @@ impl ToolExecutor<ToolInvocation> for TestHandler {
         test_spec(&self.tool_name)
     }
 
-    fn handle<'a>(&'a self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
-    where
-        ToolInvocation: 'a,
-    {
+    fn handle(&self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
         Box::pin(async {
             Ok(
                 Box::new(crate::tools::context::FunctionToolOutput::from_text(
@@ -53,10 +50,7 @@ impl ToolExecutor<ToolInvocation> for ReadinessTestHandler {
         self.handler.spec()
     }
 
-    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
-    where
-        ToolInvocation: 'a,
-    {
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
         self.handler.handle(invocation)
     }
 }
@@ -89,10 +83,7 @@ impl ToolExecutor<ToolInvocation> for LifecycleTestHandler {
         test_spec(&self.tool_name)
     }
 
-    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
-    where
-        ToolInvocation: 'a,
-    {
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
         assert_eq!(
             invocation.tool_name,
             self.tool_name.clone().with_default_namespace()
@@ -746,7 +737,7 @@ fn post_tool_use_feedback_output_keeps_code_mode_result_typed() {
 
     assert_eq!(
         result.code_mode_result(),
-        serde_json::json!({ "typed": true })
+        CodeModeToolResult::Json(serde_json::json!({ "typed": true }))
     );
 }
 
@@ -783,12 +774,17 @@ fn post_tool_use_feedback_output_preserves_mcp_result_metadata(tool_error: bool)
     let payload = ToolPayload::Function {
         arguments: "{}".to_string(),
     };
-    let original_result = result.original.code_mode_result(&payload);
     assert_eq!(
         result.tool_result_metadata(),
         ToolResultMetadata::new(&metadata)
     );
-    assert_eq!(result.code_mode_result(&payload), original_result);
+    assert_eq!(
+        result.code_mode_result(&payload),
+        CodeModeToolResult::McpCallToolResult(serde_json::json!({
+            "content": [{"type": "text", "text": "original result"}],
+            "isError": tool_error,
+        }))
+    );
 }
 
 #[tokio::test]

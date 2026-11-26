@@ -103,6 +103,13 @@
     "input": {
       "$ref": "#/definitions/AuditInput"
     },
+    "originThreadId": {
+      "description": "Source conversation for an MCP-backed target preflight; never shown to reviewers.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "reviewers": {
       "items": {
         "$ref": "#/definitions/AuditReviewer"

@@ -32,6 +32,7 @@ use crate::thread_state::ThreadListenerCommand;
 use crate::thread_state::ThreadStateManager;
 
 pub(crate) struct ThreadExtensionDependencies {
+    pub(crate) thread_state_manager: ThreadStateManager,
     pub(crate) sample_responses: Arc<crate::thread_sample::SampleResponseRegistry>,
     pub(crate) event_sink: Arc<dyn ExtensionEventSink>,
     pub(crate) auth_manager: Arc<AuthManager>,
@@ -54,6 +55,7 @@ pub(crate) fn thread_extensions(
     dependencies: ThreadExtensionDependencies,
 ) -> Arc<ExtensionRegistry<Config>> {
     let ThreadExtensionDependencies {
+        thread_state_manager,
         sample_responses,
         event_sink,
         auth_manager,
@@ -70,6 +72,7 @@ pub(crate) fn thread_extensions(
         turn_start_admission,
     } = dependencies;
     let mut builder = ExtensionRegistryBuilder::<Config>::with_event_sink(Arc::clone(&event_sink));
+    builder.thread_lifecycle_contributor(Arc::new(thread_state_manager));
     if config
         .features
         .enabled(codex_features::Feature::MultiEnvCopyFile)
@@ -104,11 +107,13 @@ pub(crate) fn thread_extensions(
         git_attribution_base_url,
         http_client_factory,
     );
+    let board_manager = thread_manager.clone();
+    let board_host =
+        move |root| codex_agent_message_board_host::local_board_host(board_manager.clone(), root);
     if config.features.enabled(codex_features::Feature::GuardianV3) {
-        let board_manager = thread_manager.clone();
-        codex_guardian_v3::install(&mut builder, thread_manager.clone(), config, move |root| {
-            codex_agent_message_board_host::local_board_host(board_manager.clone(), root)
-        });
+        codex_guardian_v3::install(&mut builder, thread_manager.clone(), config, board_host);
+    } else {
+        codex_guardian_v3::install_shadow(&mut builder, thread_manager.clone(), board_host);
     }
     codex_guardian_v2::install(&mut builder, auth_manager.clone(), thread_manager);
     codex_memories_extension::install(&mut builder, codex_otel::global());
@@ -124,10 +129,9 @@ pub(crate) fn thread_extensions(
     if let Some(provider) = cloud_skill_provider {
         skill_providers = skill_providers.with_cloud_provider(provider);
     }
-    codex_skills_extension::install_with_providers_and_metrics(
+    codex_skills_extension::install_with_providers(
         &mut builder,
         skill_providers,
-        codex_otel::global(),
         |config: &Config| codex_skills_extension::SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
             catalog_deltas_enabled: config
@@ -139,9 +143,6 @@ pub(crate) fn thread_extensions(
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: config.bundled_skills_enabled(),
             cloud_skill_enabled: config.cloud_skill_enabled,
-            shadow_selection_enabled: config
-                .features
-                .enabled(codex_features::Feature::SkillSearch),
         },
     );
     builder.model_request_contributor(sample_responses);

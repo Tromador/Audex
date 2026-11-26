@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::suite::scenarios::guardian_direct_mcp::recorded_mcp_items;
+use crate::suite::scenarios::guardian_direct_review::assess_with_transcript_reviewer;
 use crate::suite::scenarios::guardian_direct_review::model_input;
 use codex_core::context::UserGoalUpdate;
 use codex_history::RolloutItem;
@@ -133,11 +134,9 @@ async fn live_and_recorded_mcp_reviews_use_the_server_owners_denied_paths() -> R
     let options = test.start_thread_options().await;
     let recorded = test.thread_manager.start_thread(options).await?;
     let items = recorded_mcp_items(&test.codex, prompt).await?;
+    let tool_call = items.last().expect("recorded call").clone();
     recorded.thread.inject_response_items(items).await?;
-    recorded
-        .thread
-        .guardian_review(&tokio_util::sync::CancellationToken::new())
-        .await?;
+    assess_with_transcript_reviewer(&recorded.thread, &tool_call).await?;
     let requests = responses.requests();
     let [review, _, replay] = requests.as_slice() else {
         anyhow::bail!("expected live review, parent completion, and recorded review");
@@ -428,6 +427,10 @@ async fn guardian_reviews_target_environment_and_reuses_prefix(tool: &str) -> Re
             .context("permission context")?;
         let permissions = &latest[start + 1];
         assert!(permissions.contains(&format!("environment {environment_id:?}")));
+        assert_eq!(
+            permissions.contains("The command stays sandboxed"),
+            tool == "exec_command" && environment_id == secondary_id
+        );
         if environment_id == secondary_id {
             assert!(permissions.contains(&denied.inferred_native_path_string()));
         } else {
@@ -528,7 +531,6 @@ async fn guardian_reviews_with_offline_primary_executor() -> Result<()> {
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: false,
             cloud_skill_enabled: false,
-            shadow_selection_enabled: false,
         }
     });
     let test = test_codex()

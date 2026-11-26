@@ -36,6 +36,13 @@ fn namespace(name: &str, tools: Vec<Value>) -> Value {
     json!({"type": "namespace", "name": name, "description": "Tools.", "tools": tools})
 }
 
+fn make_exec_definitions(entries: Vec<ExecDefinition>) -> Arc<ExecDefinitions> {
+    Arc::new(ExecDefinitions {
+        entries,
+        ..Default::default()
+    })
+}
+
 fn exec_declaration(description: &str, grammar: &str) -> Value {
     json!({"type": "namespace", "name": "functions", "description": "",
         "tools": [{"type": "custom", "name": "exec", "description": description,
@@ -281,7 +288,7 @@ async fn snapshots_namespace_transitions() {
             Some(Arc::clone(&telemetry)),
         )
         .unwrap()
-        .with_incremental_exec_tools(Some(Arc::new(
+        .with_incremental_exec_tools(Some(make_exec_definitions(
             entries
                 .into_iter()
                 .map(|(key, description)| ExecDefinition {
@@ -407,8 +414,8 @@ fn initial_catalog_preserves_order_and_unchanged_catalog_emits_nothing() {
 
     let reworded = TopLevelToolsState::new(
         ResolvedIncrementalToolMessages {
-            tool_update_hint: "New wording".to_string(),
-            removed_tools_header: "Removed".to_string(),
+            tool_update_hint: "New wording".into(),
+            removed_tools_header: "Removed".into(),
             ..Default::default()
         },
         definitions,
@@ -457,7 +464,9 @@ fn empty_catalog_is_persisted_and_can_add_tools_again() {
         merge_world_state_updates(updates),
         vec![
             ContextualUserFragment::into(IncrementalToolsUpdate(
-                ResolvedIncrementalToolMessages::default().tool_update_hint
+                ResolvedIncrementalToolMessages::default()
+                    .tool_update_hint
+                    .as_cow()
             )),
             item(definitions),
         ]
@@ -507,7 +516,9 @@ fn namespace_diff_contains_only_changed_and_added_tools() {
         merge_world_state_updates(updates),
         vec![
             ContextualUserFragment::into(IncrementalToolsUpdate(
-                ResolvedIncrementalToolMessages::default().tool_update_hint
+                ResolvedIncrementalToolMessages::default()
+                    .tool_update_hint
+                    .as_cow()
             )),
             item(vec![expected]),
             ContextualUserFragment::into(RemovedTools {
@@ -551,13 +562,15 @@ fn new_namespaces_share_one_notice_before_their_declarations() {
         prefix,
         vec![
             ContextualUserFragment::into(IncrementalToolsUpdate(
-                ResolvedIncrementalToolMessages::default().tool_update_hint
+                ResolvedIncrementalToolMessages::default()
+                    .tool_update_hint
+                    .as_cow()
             )),
             item(additions.clone()),
         ]
     );
     assert!(remaining.is_empty());
-    state.messages.tool_update_hint.clear();
+    state.messages.tool_update_hint = "".into();
     let (_, updates) = state.render_diff(PreviousSectionState::Known(&previous));
     let (prefix, remaining) = super::super::split_prefix_updates(updates);
     assert_eq!(prefix, vec![item(additions)]);
@@ -610,8 +623,8 @@ fn namespace_description_change_does_not_repeat_unchanged_tools(
     updated["description"] = json!(instructions);
     let mut messages = ResolvedIncrementalToolMessages::default();
     if let Some((prefix, cleared_template)) = wording {
-        messages.namespace_instructions_prefix = prefix.to_string();
-        messages.namespace_instructions_cleared = cleared_template.to_string();
+        messages.namespace_instructions_prefix = prefix.into();
+        messages.namespace_instructions_cleared = cleared_template.into();
     }
     let current = TopLevelToolsState::new(messages, vec![updated], /*metrics*/ None).unwrap();
     let (snapshot, updates) = current.render_diff(PreviousSectionState::Known(&snapshot));
@@ -666,7 +679,9 @@ fn tool_type_change_keeps_the_callable_name_available() {
         merge_world_state_updates(updates),
         vec![
             ContextualUserFragment::into(IncrementalToolsUpdate(
-                ResolvedIncrementalToolMessages::default().tool_update_hint
+                ResolvedIncrementalToolMessages::default()
+                    .tool_update_hint
+                    .as_cow()
             )),
             item(vec![updated]),
             ContextualUserFragment::into(RemovedTools {
@@ -759,7 +774,7 @@ fn namespace_replaced_by_builtin_keeps_the_replacement_available() {
 #[test]
 fn hidden_exec_is_not_reintroduced_and_returning_exec_restores_full_catalog() {
     let original = exec_declaration("Shared MCP Types:", "grammar");
-    let exec_definitions = Arc::new(vec![ExecDefinition {
+    let exec_definitions = make_exec_definitions(vec![ExecDefinition {
         key: "Tool: tools.a".to_string(),
         description: "### a\ndeclare const tools: { a(): Promise<string> };".to_string(),
     }]);
@@ -797,6 +812,11 @@ fn hidden_exec_is_not_reintroduced_and_returning_exec_restores_full_catalog() {
     // Retain identities for removals on return, but require a fresh exec declaration.
     let restored: TopLevelToolsSnapshot =
         serde_json::from_value(serde_json::to_value(empty.unwrap()).unwrap()).unwrap();
+    let hint = ContextualUserFragment::into(IncrementalToolsUpdate(
+        ResolvedIncrementalToolMessages::default()
+            .tool_update_hint
+            .as_cow(),
+    ));
     let namespace_instructions = ContextualUserFragment::into(
         DeveloperInstructions::new(
             "The functions namespace no longer has additional instructions.".to_string(),
@@ -812,7 +832,8 @@ fn hidden_exec_is_not_reintroduced_and_returning_exec_restores_full_catalog() {
                 .1
         ),
         vec![
-            namespace_instructions.clone(),
+            namespace_instructions,
+            hint.clone(),
             ResponseItem::AdditionalTools {
                 id: None,
                 role: "developer".to_string(),
@@ -821,14 +842,19 @@ fn hidden_exec_is_not_reintroduced_and_returning_exec_restores_full_catalog() {
         ],
     );
 
-    // A full restore also withdraws definitions removed while exec was hidden.
+    // Restoring exec alongside wait shares one hint and still withdraws removed entries.
+    let wait = declaration("wait");
+    let mut wait_only = original.clone();
+    wait_only["tools"] = json!([wait]);
+    let mut with_wait = original.clone();
+    with_wait["tools"].as_array_mut().unwrap().push(wait);
     let without_entries = TopLevelToolsState::new(
         /*messages*/ Default::default(),
-        vec![original.clone()],
+        vec![with_wait],
         /*metrics*/ None,
     )
     .unwrap()
-    .with_incremental_exec_tools(Some(Arc::new(Vec::new())));
+    .with_incremental_exec_tools(Some(make_exec_definitions(Vec::new())));
     assert_eq!(
         merge_world_state_updates(
             without_entries
@@ -836,12 +862,9 @@ fn hidden_exec_is_not_reintroduced_and_returning_exec_restores_full_catalog() {
                 .1
         ),
         vec![
-            namespace_instructions,
-            ResponseItem::AdditionalTools {
-                id: None,
-                role: "developer".to_string(),
-                tools: Arc::from(vec![original]),
-            },
+            hint,
+            item(vec![wait_only]),
+            item(vec![original]),
             ContextualUserFragment::into(RemovedExecDefinitions {
                 header: ResolvedIncrementalToolMessages::default()
                     .exec_tools_removed_definitions_header,
@@ -868,7 +891,7 @@ fn changed_and_added_entries_share_one_update_and_removed_entries_are_withdrawn(
         /*metrics*/ None,
     )
     .unwrap()
-    .with_incremental_exec_tools(Some(Arc::new(vec![
+    .with_incremental_exec_tools(Some(make_exec_definitions(vec![
         ExecDefinition {
             key: "Tool: tools.a".to_string(),
             description: "### a\ndeclare const tools: { a(): Promise<string> };".to_string(),
@@ -892,7 +915,7 @@ fn changed_and_added_entries_share_one_update_and_removed_entries_are_withdrawn(
         /*metrics*/ None,
     )
     .unwrap()
-    .with_incremental_exec_tools(Some(Arc::new(vec![
+    .with_incremental_exec_tools(Some(make_exec_definitions(vec![
         ExecDefinition {
             key: "Tool: tools.a".to_string(),
             description:
@@ -906,15 +929,18 @@ fn changed_and_added_entries_share_one_update_and_removed_entries_are_withdrawn(
     ])));
     let (snapshot, updates) = current.render_diff(PreviousSectionState::Known(&baseline));
     let defaults = ResolvedIncrementalToolMessages::default();
-    let expected_update_hint = expected_update_hint.unwrap_or(defaults.exec_tools_update_hint);
-    let expected_removal_header =
-        expected_removal_header.unwrap_or(defaults.exec_tools_removed_definitions_header);
+    let expected_update_hint = expected_update_hint
+        .as_deref()
+        .unwrap_or(&defaults.exec_tools_update_hint);
+    let expected_removal_header = expected_removal_header
+        .map(Into::into)
+        .unwrap_or(defaults.exec_tools_removed_definitions_header);
     assert_eq!(
         merge_world_state_updates(updates),
         vec![
-            ContextualUserFragment::into(IncrementalToolsUpdate(format!(
+            ContextualUserFragment::into(IncrementalToolsUpdate(Cow::Owned(format!(
                 "{expected_update_hint}\n\n## Namespace: functions\n### a\nChanged a.\ndeclare const tools: {{ a(value: number): Promise<number> }};\n\n### c\ndeclare const tools: {{ c(): Promise<boolean> }};",
-            ))),
+            )))),
             ContextualUserFragment::into(RemovedExecDefinitions {
                 header: expected_removal_header,
                 names: vec!["Tool: tools.b".to_string()],

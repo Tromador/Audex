@@ -1,11 +1,15 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+use codex_core::CodexThread;
+use codex_core::GoalDaybreakSnapshot;
 use codex_core::StartIfIdleSubmission;
 use codex_core::ThreadManager;
 use codex_core::TurnStartOptions;
+use codex_core::cyber_access_program::ContinuationCyberAccessProgram;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ThreadGoal;
@@ -55,6 +59,19 @@ struct GoalRuntimeInner {
     tools_available_for_thread: bool,
     tools_visible_for_thread: bool,
     goal_state_lock: Semaphore,
+    daybreak: Mutex<Option<(String, GoalDaybreakPreference)>>,
+}
+
+enum GoalDaybreakPreference {
+    AwaitingActivation,
+    Captured(Option<GoalDaybreakSelection>),
+}
+
+/// The source of a Goal's live choice determines how it is resolved.
+#[derive(Clone)]
+pub(crate) enum GoalDaybreakSelection {
+    Explicit(Arc<ContinuationCyberAccessProgram>),
+    Saved(GoalDaybreakSnapshot),
 }
 
 pub(crate) struct AccountedGoalProgress {
@@ -109,6 +126,7 @@ impl GoalRuntimeHandle {
                 tools_available_for_thread: config.tools_available_for_thread,
                 tools_visible_for_thread: config.tools_visible_for_thread,
                 goal_state_lock: Semaphore::new(/*permits*/ 1),
+                daybreak: Mutex::new(None),
             }),
         }
     }
@@ -141,14 +159,75 @@ impl GoalRuntimeHandle {
         self.inner.root_accounting_state.clone()
     }
 
+    pub(crate) async fn live_thread(&self) -> Option<Arc<CodexThread>> {
+        self.inner
+            .thread_manager
+            .upgrade()?
+            .get_thread(self.thread_id())
+            .await
+            .ok()
+    }
+
+    /// Called under the goal mutation permit when a live goal is first accepted.
+    pub(crate) fn set_daybreak_snapshot(
+        &self,
+        goal_id: &str,
+        snapshot: Option<GoalDaybreakSelection>,
+    ) {
+        self.set_daybreak(goal_id, GoalDaybreakPreference::Captured(snapshot));
+    }
+
+    pub(crate) fn defer_daybreak_until_activation(&self, goal_id: &str) {
+        self.set_daybreak(goal_id, GoalDaybreakPreference::AwaitingActivation);
+    }
+
+    fn set_daybreak(&self, goal_id: &str, preference: GoalDaybreakPreference) {
+        *self
+            .inner
+            .daybreak
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((goal_id.to_owned(), preference));
+    }
+
+    pub(crate) fn clear_daybreak_snapshot(&self, goal_id: &str) {
+        let mut daybreak = self
+            .inner
+            .daybreak
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if daybreak.as_ref().is_some_and(|(id, _)| id == goal_id) {
+            *daybreak = None;
+        }
+    }
+
+    pub(crate) fn daybreak_awaits_activation(&self, goal_id: &str) -> bool {
+        self.inner
+            .daybreak
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|(id, preference)| {
+                id == goal_id && matches!(preference, GoalDaybreakPreference::AwaitingActivation)
+            })
+    }
+
+    fn daybreak_for_goal(&self, goal_id: &str) -> Option<GoalDaybreakSelection> {
+        let daybreak = self
+            .inner
+            .daybreak
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match daybreak.as_ref()? {
+            (id, GoalDaybreakPreference::Captured(snapshot)) if id == goal_id => snapshot.clone(),
+            _ => None,
+        }
+    }
+
     pub(crate) async fn clear_pending_turn_start_options(&self) {
-        let Some(thread_manager) = self.inner.thread_manager.upgrade() else {
-            return;
-        };
-        let Ok(thread) = thread_manager.get_thread(self.inner.thread_id).await else {
-            return;
-        };
-        thread.thread_extension_data().remove::<TurnStartOptions>();
+        if let Some(thread) = self.live_thread().await {
+            thread.thread_extension_data().remove::<TurnStartOptions>();
+        }
     }
 
     pub(crate) async fn goal_state_permit(&self) -> Result<SemaphorePermit<'_>, String> {
@@ -200,7 +279,10 @@ impl GoalRuntimeHandle {
             .as_ref()
             .is_some_and(|previous_goal| previous_goal.goal_id != goal.goal_id);
         if previous_goal.is_none() || replaced_existing_goal {
-            self.inner.metrics.record_created();
+            self.inner
+                .metrics
+                .record_external_created(&self.inner.thread_manager, self.inner.thread_id)
+                .await;
             self.inner
                 .analytics
                 .created(&goal, GoalEventAttribution::NoTurn);
@@ -475,21 +557,34 @@ impl GoalRuntimeHandle {
             self.inner.accounting_state.clear_active_goal();
             return Ok(());
         }
-        let start_options = thread
+        let mut start_options = thread
             .thread_extension_data()
             .get::<TurnStartOptions>()
             .map(|options| options.as_ref().clone())
             .unwrap_or_default();
+        let selection = self.daybreak_for_goal(&goal.goal_id);
         let request = continuation_request(
             &protocol_goal_from_state(goal),
             thread.config().await.update_plan_enabled,
         );
 
+        let snapshot = match selection {
+            Some(GoalDaybreakSelection::Explicit(captured)) => {
+                // Keep the existing explicit-program route and its model/provider/owner checks.
+                start_options.cyber_access_program = captured.for_thread(&thread).await;
+                None
+            }
+            Some(GoalDaybreakSelection::Saved(snapshot)) => Some(snapshot),
+            None => None,
+        };
         match thread
-            .start_turn_if_idle(request.on_start(TurnStartOptions {
-                turn_trigger: Some("goal".to_string()),
-                ..start_options
-            }))
+            .start_goal_turn_if_idle(
+                request.on_start(TurnStartOptions {
+                    turn_trigger: Some("goal".to_string()),
+                    ..start_options
+                }),
+                snapshot,
+            )
             .await
         {
             Ok(StartIfIdleSubmission::Started { turn_id, .. }) => {

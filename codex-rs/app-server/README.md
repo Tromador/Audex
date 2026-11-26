@@ -275,6 +275,56 @@ Clients that used `"detached"` should call `thread/start` and pass the new threa
 to `review/start`. To keep the original conversation history with custom review
 instructions, use `thread/fork` followed by `turn/start`.
 
+## Recorded Guardian reviews (experimental)
+
+On an idle thread, `thread/guardianReview` assesses the supplied `toolCall`
+without appending or executing it.
+
+With `features.guardianv3.enabled = true` at app-server startup, use
+`thread/start` to create a fresh root thread with `ephemeral: false` and
+`historyMode: "paginated"`. Inject history with `thread/inject_items`, then
+call `thread/guardianReview` with `threadId` and `toolCall`. V3 waits for
+pending history to be processed before assessing the call. Wait for the verdict
+before injecting another batch on the same thread. V3 rejects `rootEvidence`.
+
+The worker example below uses the transcript reviewer with Guardian V3 disabled
+at app-server startup. Start a dedicated ephemeral thread and inject the archived
+worker's history with `thread/inject_items`. Supply the action and parent
+messages in the review request.
+
+```json
+{
+  "method": "thread/guardianReview",
+  "id": 1,
+  "params": {
+    "threadId": "<ephemeral-thread-id>",
+    "toolCall": {
+      "type": "function_call",
+      "name": "exec_command",
+      "call_id": "pending",
+      "arguments": "{\"cmd\":\"git ls-files\"}"
+    },
+    "rootEvidence": {
+      "messages": [{ "role": "user", "text": "List the tracked files." }],
+      "missingUserInstructions": false,
+      "missingAssistantContext": true
+    }
+  }
+}
+```
+
+Supply bounded root messages in order with role `user` or `assistant`.
+Set both omission flags from the source. The server renders the native root
+section alongside the worker transcript. Send the evidence on every review.
+The reviewer can keep its private history when the evidence is unchanged.
+Changing or omitting the evidence invalidates that history. Parent messages
+never enter the worker history. Check for both
+`usedRootEvidence: true` and the expected `callId` before using the result.
+Older servers may ignore the parent evidence and review only the injected history.
+The result measures the supplied recording under the thread's current policy,
+tool catalog and environment. It grants no permission to execute the call.
+Direct client input to V2 workers remains restricted.
+
 # Thread removal
 
 `thread/archive` and `thread/delete` reject attempts to remove a live internal
@@ -544,12 +594,19 @@ Attachment creation and deletion requests using the same thread ID are serialize
 
 # Thread plugin settings
 
+In `thread/start` config, a named plugin entry such as `"notes@market": {}`
+lists the plugin. Without an explicit `enabled` flag, it inherits the default.
+
+In the effective thread config, an empty `plugins._default` means
+`enabled = true`. Omitting `plugins._default` leaves the fallback unset.
+
 Plugin summaries returned by `plugin/list`, `plugin/installed`, `plugin/read`,
 and `plugin/share/list` report effective `enabled` state. When
 `plugins._default.enabled` is configured, an explicit
 `plugins."<plugin-name>@<marketplace-name>".enabled` overrides that default;
-a plugin disabled at its source remains disabled. Omitting the default preserves
-existing source and account enablement. Other plugin settings, including remembered
+a plugin disabled at its source remains disabled. When `_default` is absent,
+an explicit `enabled: false` still disables the plugin without changing its
+installation or account settings. Other plugin settings, including remembered
 tool approvals, inherit the activation default unless `enabled` is explicitly set.
 `plugin/search` retains its discovery behavior: results report `enabled: false`
 while preserving their installation state.
@@ -558,9 +615,14 @@ Apps authentication setup without writing an `enabled` override.
 
 `thread/settings/update` and `turn/start` accept `disabledPluginIds`, a list of
 `PluginSummary.id` values from `plugin/list`, in the
-`<plugin-name>@<marketplace-name>` format. A supplied list replaces the selection;
-omission or `null` preserves it, and `[]` clears it. Saving this selection does
-not yet filter plugin capabilities.
+`<plugin-name>@<marketplace-name>` format. A supplied list replaces the selection.
+Omission or `null` preserves it, and `[]` clears it.
+
+Setting a plugin's `enabled` flag to `false` in thread or executor config
+does not by itself hide tools offered independently by Apps. With
+`disabledPluginIds`, Core also hides Apps tools whose connector IDs it can
+associate with an excluded plugin. A connector shared with another enabled
+plugin remains visible unless its canonical owner is excluded.
 
 Read the selection from `threadSettings.disabledPluginIds` in
 `thread/settings/updated` notifications, or from `disabledPluginIds` in
@@ -586,6 +648,14 @@ switching models. Setting `friendly` or `pragmatic` can replace a previous
 `none` setting for that purpose. Changing the setting does not rewrite the
 thread's existing instructions or change explicitly supplied base instructions.
 The old `features.personality` flag is ignored.
+
+# MCP server startup
+
+`mcpServer/startupStatus/updated` reports each server's startup state. On
+`ready` or `failed`, `durationMs` gives the elapsed milliseconds for that
+server's startup attempt, even when notifications arrive together. It is null
+when there is no new measurement, including for reused connections, `starting`
+and `cancelled`. Older servers omit the field.
 
 # MCP server capabilities
 
@@ -642,6 +712,8 @@ authenticated account metadata, when available. API-only and signed-out sessions
 return `null`. The ID belongs to the same account snapshot as the rest of the
 response. Clients should also accept an absent field from older app servers.
 PAT sessions continue to return no bearer token from `getAuthStatus`.
+
+The experimental `account/voiceSettings/read` method returns the selected ChatGPT voice and the available voice IDs and display names. Pass an ID as `{ "voice": "juniper" }` to `account/voiceSettings/write` to save it. Both methods use the connected app-server's ChatGPT account, including when the client connects to a remote host.
 
 # Selected workspace routing
 
@@ -805,9 +877,16 @@ the app server. If a required configuration server uses OAuth and needs a new
 grant, the command exits with an error whose `data` contains
 `"reason": "configServer"` and `"action": "configServerLogin"`.
 
-When the action is `configServerLogin`, start `codex app-server --startup-oauth`.
+To share OAuth discovery across startup and sign-in, start
+`codex app-server --startup-oauth` and send
+`{"id":0,"method":"configRequirements/read"}`. The result is the usual
+requirements response with an additional `appServerVersion` field. The helper
+performs the same validation and reports the same errors as
+`--print-startup-config`.
+
 This dedicated stdio connection accepts one JSON request per line without an
 initialize handshake. Each reply echoes the string or integer request ID.
+If the read reports `configServerLogin`, keep the connection open.
 
 1. After the user chooses Sign in, send
    `{"id":1,"method":"account/gatewayOAuth/login","params":{"target":{"kind":"configServer"}}}`.
@@ -820,8 +899,11 @@ initialize handshake. Each reply echoes the string or integer request ID.
    success, or an error on failure. To cancel, send
    `{"id":2,"method":"account/gatewayOAuth/cancel"}`. Closing stdin also ends the
    pending attempt.
-4. On success, close the pipe and rerun `--print-startup-config`. Continue startup
-   only with the validated requirements.
+4. On success, send `configRequirements/read` again on the same pipe. The
+   helper reloads policy with the saved credentials and reuses OAuth discovery
+   if the server and proxy settings still match. Close the pipe and continue
+   only after validating the requirements. Older clients can still use the
+   one-shot command before and after sign-in.
 
 # Item history anchors
 

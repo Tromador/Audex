@@ -3,7 +3,7 @@
 //! Push only on entry and pop before leaving or yielding input to an editor. The main screen
 //! keeps its own TUI mode until the handoff returns to it. Transcript surfaces retain pointer
 //! reporting across overlays and disable it before yielding. Promoting an overlay must not push
-//! another keyboard frame. Refresh tmux's input policy on entry for mouse-capture requests.
+//! another keyboard frame. A live tmux mouse change only reconfigures pointer input.
 
 use std::io::Result;
 use std::io::Write;
@@ -24,7 +24,7 @@ use super::DisableAlternateScroll;
 use super::EnableAlternateScroll;
 use super::KeyboardRestore;
 use super::keyboard_modes;
-use super::tmux;
+use crate::terminal_capabilities;
 
 // Panic and exit cleanup cannot borrow Tui. Track the actual screen independently of its owner.
 pub(super) static ALTERNATE_SCREEN: AlternateScreen = AlternateScreen {
@@ -44,7 +44,7 @@ pub(super) struct AlternateScreen {
     link_pointer: super::link_pointer::LinkPointer,
     active: AtomicBool,
     mouse_active: AtomicBool,
-    // Refresh alongside keyboard modes whenever this screen is entered or restored.
+    // Seed on screen entry and refresh independently of the keyboard stack.
     mouse_capture_disabled: AtomicBool,
     // A cleanup/setup error must not make the next identical request look already applied.
     input_configured: AtomicBool,
@@ -84,8 +84,11 @@ impl AlternateScreen {
         if self.mouse_active.load(Ordering::Relaxed) {
             self.link_pointer.update(writer, shape)
         } else {
-            self.link_pointer
-                .restore(writer, codex_terminal_detection::terminal_info().name)
+            self.link_pointer.restore(
+                writer,
+                terminal_capabilities::PointerReset::detect()
+                    .unwrap_or(terminal_capabilities::PointerReset::Text),
+            )
         }
     }
 
@@ -105,11 +108,27 @@ impl AlternateScreen {
             !cfg!(windows) && !keyboard_modes::keyboard_enhancement_disabled(),
             Ordering::Relaxed,
         );
-        self.mouse_capture_disabled.store(
-            mouse_capture == tmux::MouseCapture::DisabledByTmux,
-            Ordering::Relaxed,
-        );
+        self.set_mouse_policy(mouse_capture);
         self.configure_input(writer, capture_mouse)
+    }
+
+    pub(super) fn mouse_policy(&self) -> terminal_capabilities::MouseCapture {
+        if self.mouse_capture_disabled.load(Ordering::Relaxed) {
+            terminal_capabilities::MouseCapture::Disabled
+        } else {
+            terminal_capabilities::MouseCapture::Enabled
+        }
+    }
+
+    pub(super) fn set_mouse_policy(&self, mouse: terminal_capabilities::MouseCapture) {
+        if self.mouse_policy() != mouse {
+            self.mouse_capture_disabled.store(
+                mouse == terminal_capabilities::MouseCapture::Disabled,
+                Ordering::Relaxed,
+            );
+            self.input_configured
+                .store(/*val*/ false, Ordering::Relaxed);
+        }
     }
 
     pub(super) fn configure_input(
@@ -141,9 +160,11 @@ impl AlternateScreen {
     }
 
     fn disable_mouse(&self, writer: &mut impl Write) -> Result<()> {
-        let pointer_result = self
-            .link_pointer
-            .restore(writer, codex_terminal_detection::terminal_info().name);
+        let pointer_result = self.link_pointer.restore(
+            writer,
+            terminal_capabilities::PointerReset::detect()
+                .unwrap_or(terminal_capabilities::PointerReset::Text),
+        );
         if self.mouse_active.load(Ordering::Relaxed) {
             let result = execute!(writer, DisableMouseCapture);
             #[cfg(windows)]

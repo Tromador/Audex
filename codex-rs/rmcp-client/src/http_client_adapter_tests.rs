@@ -1,10 +1,25 @@
 use std::io::ErrorKind;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
+use anyhow::Context as _;
 use codex_exec_server::HttpRedirectPolicy;
 use http::HeaderMap;
 use http::HeaderValue;
 use http::header::AUTHORIZATION;
 use pretty_assertions::assert_eq;
+use rmcp::model::CallToolResult;
+use rmcp::model::ElicitationAction;
+use serde_json::Value;
+use serde_json::json;
+use tokio::sync::Notify;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
+use wiremock::MockServer;
 
 use super::HttpHeader;
 use super::SseEventSizeLimit;
@@ -607,5 +622,940 @@ async fn automatic_event_stream_reconnect_refreshes_request_auth() -> anyhow::Re
         Some(json!({"echo": "after reconnect"}))
     );
     client.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejection_of_a_reply_cannot_answer_a_request_with_the_same_id() -> anyhow::Result<()> {
+    use std::sync::Arc;
+
+    use codex_exec_server::RouteAwareHttpClient;
+    use codex_http_client::HttpClientFactory;
+    use codex_http_client::OutboundProxyPolicy;
+    use rmcp::model::JsonRpcMessage;
+    use rmcp::transport::streamable_http_client::StreamableHttpClient;
+    use rmcp::transport::streamable_http_client::StreamableHttpPostResponse;
+    use serde_json::json;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+
+    let rejection = json!({
+        "jsonrpc": "2.0", "id": 7,
+        "error": {"code": -32600, "message": "unknown request"},
+    });
+    let server = MockServer::start().await;
+    for (path, response) in [
+        (
+            "/reject",
+            ResponseTemplate::new(409).set_body_json(&rejection),
+        ),
+        (
+            "/json",
+            ResponseTemplate::new(200).set_body_json(&rejection),
+        ),
+        (
+            "/sse",
+            ResponseTemplate::new(200).set_body_raw(
+                format!("event: message\ndata: {rejection}\n\n"),
+                "text/event-stream",
+            ),
+        ),
+        ("/ack", ResponseTemplate::new(202)),
+        ("/empty", ResponseTemplate::new(204)),
+    ] {
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+    }
+    let adapter = super::StreamableHttpClientAdapter::new(
+        Arc::new(RouteAwareHttpClient::new(HttpClientFactory::new(
+            OutboundProxyPolicy::ReqwestDefault,
+        ))),
+        HeaderMap::new(),
+        /*auth_provider*/ None,
+        /*has_configured_headers*/ false,
+        StreamableHttpRedirectMode::Legacy,
+        Default::default(),
+    );
+    let post = |path: &str, message| {
+        adapter.post_message(
+            format!("{}{path}", server.uri()).into(),
+            message,
+            Some("same-session".into()),
+            /*auth_token*/ None,
+            Default::default(),
+        )
+    };
+    let reply: rmcp::model::ClientJsonRpcMessage = serde_json::from_value(json!({
+        "jsonrpc": "2.0", "id": 7, "result": {"action": "accept"},
+    }))?;
+    // The two peers number their requests independently. Only a POST carrying
+    // our request may deliver the remote error to our pending request ID 7.
+    let (request, rejected, json, sse) = tokio::join!(
+        post(
+            "/reject",
+            serde_json::from_value(json!({
+                "jsonrpc": "2.0", "id": 7, "method": "ping",
+            }))?
+        ),
+        post("/reject", reply.clone()),
+        post("/json", reply.clone()),
+        post("/sse", reply.clone()),
+    );
+    let StreamableHttpPostResponse::Json(error @ JsonRpcMessage::Error(_), _) = request? else {
+        anyhow::bail!("request lost its JSON-RPC error");
+    };
+    assert_eq!(serde_json::to_value(error)?, rejection);
+    assert_eq!(
+        [rejected.is_err(), json.is_err(), sse.is_err()],
+        [true; 3],
+        "409 JSON, 200 JSON, and 200 SSE must not dispatch messages for a reply"
+    );
+    for path in ["/ack", "/empty"] {
+        assert!(matches!(
+            post(path, reply.clone()).await?,
+            StreamableHttpPostResponse::Accepted
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum RecoveryHandshake {
+    #[default]
+    Json,
+    DelayedInitialize,
+    DelayedInitialized,
+    InitializedFailure,
+    InitializedSse,
+    StalledInitializeJson,
+    StalledInitializeSse,
+    HealthyInitializeSse,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Reply404FixtureConfig {
+    handshake: RecoveryHandshake,
+    protocol_mode: crate::McpProtocolMode,
+    saturated_queue: bool,
+    expire_replacement: bool,
+}
+
+struct FloodGateHttpClient {
+    inner: codex_exec_server::RouteAwareHttpClient,
+    started: tokio::sync::Notify,
+    release: tokio_util::sync::CancellationToken,
+    expiry_started: tokio::sync::Notify,
+    expiry_release: tokio_util::sync::CancellationToken,
+    stall_initialize_body: bool,
+    gate_recovery_delete: bool,
+    delete_started: tokio::sync::Notify,
+    delete_release: tokio_util::sync::CancellationToken,
+}
+
+impl codex_exec_server::HttpClient for FloodGateHttpClient {
+    fn http_request(
+        &self,
+        params: codex_exec_server::HttpRequestParams,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<codex_exec_server::HttpRequestResponse, codex_exec_server::ExecServerError>,
+    > {
+        if self.gate_recovery_delete
+            && params.method == "DELETE"
+            && params.headers.iter().any(|header| {
+                header.name.eq_ignore_ascii_case("mcp-session-id") && header.value == "new-session"
+            })
+        {
+            Box::pin(async move {
+                self.delete_started.notify_one();
+                self.delete_release.cancelled().await;
+                codex_exec_server::HttpClient::http_request(&self.inner, params).await
+            })
+        } else {
+            codex_exec_server::HttpClient::http_request(&self.inner, params)
+        }
+    }
+
+    fn http_request_stream(
+        &self,
+        params: codex_exec_server::HttpRequestParams,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<
+            (
+                codex_exec_server::HttpRequestResponse,
+                codex_exec_server::HttpResponseBodyStream,
+            ),
+            codex_exec_server::ExecServerError,
+        >,
+    > {
+        let body = params
+            .body
+            .as_ref()
+            .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body.0).ok());
+        let flood = body.as_ref().is_some_and(|body| {
+            body["method"] == "tools/call" && body["params"]["name"] == "flood"
+        });
+        let fresh = body.as_ref().is_some_and(|body| {
+            body["method"] == "tools/call" && body["params"]["name"] == "fresh"
+        });
+        let expiry = body
+            .as_ref()
+            .is_some_and(|body| body.get("method").is_none() && body["id"] == "prompt-1");
+        let initialize = body
+            .as_ref()
+            .is_some_and(|body| body["method"] == "initialize");
+        Box::pin(async move {
+            let pending_params = (self.stall_initialize_body && initialize).then(|| params.clone());
+            let mut response =
+                codex_exec_server::HttpClient::http_request_stream(&self.inner, params).await?;
+            if let Some(mut pending_params) = pending_params
+                && response.0.headers.iter().any(|header| {
+                    header.name.eq_ignore_ascii_case("mcp-session-id")
+                        && header.value == "new-session"
+                })
+            {
+                use tokio::io::AsyncWriteExt as _;
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                pending_params.url = format!("http://{}", listener.local_addr().unwrap());
+                // Only the recovery deadline should terminate this stalled body.
+                pending_params.timeout_ms = None;
+                tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n")
+                        .await
+                        .unwrap();
+                    let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
+                });
+                response.1 =
+                    codex_exec_server::HttpClient::http_request_stream(&self.inner, pending_params)
+                        .await?
+                        .1;
+            }
+            if expiry && !self.expiry_release.is_cancelled() {
+                self.expiry_started.notify_one();
+                self.expiry_release.cancelled().await;
+            }
+            if flood || (fresh && !self.release.is_cancelled()) {
+                self.started.notify_one();
+                self.release.cancelled().await;
+            }
+            Ok(response)
+        })
+    }
+}
+
+type RoutedReply = (
+    oneshot::Sender<crate::ElicitationResponse>,
+    oneshot::Receiver<()>,
+);
+type ToolTask = JoinHandle<anyhow::Result<CallToolResult>>;
+
+struct Reply404Fixture {
+    server: MockServer,
+    initializations: Arc<AtomicUsize>,
+    slow_started: Arc<Notify>,
+    sibling_started: Arc<Notify>,
+    deleted: Arc<Notify>,
+    old_deleted: Arc<Notify>,
+    http: Arc<FloodGateHttpClient>,
+    client: Arc<crate::RmcpClient>,
+    route_rx: mpsc::UnboundedReceiver<RoutedReply>,
+    reply: Option<RoutedReply>,
+    parent: Option<ToolTask>,
+}
+
+async fn start_reply_404_fixture(config: Reply404FixtureConfig) -> anyhow::Result<Reply404Fixture> {
+    use codex_exec_server::RouteAwareHttpClient;
+    use codex_http_client::HttpClientFactory;
+    use codex_http_client::OutboundProxyPolicy;
+    use rmcp::model::ClientCapabilities;
+    use rmcp::model::Implementation;
+    use rmcp::model::InitializeRequestParams;
+    use rmcp::model::ProtocolVersion;
+    use serde_json::Value;
+    use serde_json::json;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use tokio::sync::Notify;
+    use tokio::sync::mpsc;
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::Request;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+
+    let server = MockServer::start().await;
+    let initializations = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&initializations);
+    let slow_started = Arc::new(Notify::new());
+    let on_slow = Arc::clone(&slow_started);
+    let sibling_started = Arc::new(Notify::new());
+    let on_sibling = Arc::clone(&sibling_started);
+    Mock::given(method("POST")).and(path("/mcp")).respond_with(move |request: &Request| {
+        let body: Value = request.body_json().unwrap();
+        let session = request.headers.get("mcp-session-id").and_then(|value| value.to_str().ok());
+        match body["method"].as_str() {
+            Some("server/discover") => ResponseTemplate::new(404),
+            Some("initialize") => {
+                let n = count.fetch_add(1, Ordering::Relaxed);
+                let body = json!({
+                    "jsonrpc":"2.0", "id":body["id"], "result":{
+                        "protocolVersion":body["params"]["protocolVersion"], "capabilities":{"tools":{}}, "serverInfo":{"name":"fixture","version":"1"}
+                    }
+                });
+                let result = ResponseTemplate::new(200).insert_header("mcp-session-id", if n == 0 {"old-session"} else if n == 1 {"new-session"} else {"followup-session"});
+                let result = if n == 1 && matches!(config.handshake, RecoveryHandshake::StalledInitializeSse | RecoveryHandshake::HealthyInitializeSse) { result.set_body_raw(format!("event: message\ndata: {body}\n\n"), "text/event-stream") } else { result.set_body_json(body) };
+                if n == 1 && config.handshake == RecoveryHandshake::DelayedInitialize { result.set_delay(Duration::from_secs(2)) } else { result }
+            }
+            Some("notifications/initialized") if count.load(Ordering::Relaxed) == 2 && config.handshake == RecoveryHandshake::DelayedInitialized => ResponseTemplate::new(202).set_delay(Duration::from_secs(2)),
+            Some("notifications/initialized") if session == Some("new-session") && config.handshake == RecoveryHandshake::InitializedFailure => ResponseTemplate::new(500),
+            Some("notifications/initialized") if count.load(Ordering::Relaxed) == 2 && config.handshake == RecoveryHandshake::InitializedSse => ResponseTemplate::new(200).set_body_raw("", "text/event-stream"),
+            Some("notifications/initialized") => ResponseTemplate::new(202),
+            Some("tools/call") if body["params"]["name"] == "wait" => {
+                let prompt = json!({"jsonrpc":"2.0","id":"prompt-1","method":"elicitation/create","params":{
+                    "mode":"form","message":"Continue?","requestedSchema":{"type":"object","properties":{}}
+                }});
+                let mut events = format!("retry: 1\nid: cursor-1\nevent: message\ndata: {prompt}\n\n");
+                if config.saturated_queue {
+                    let mut second = prompt;
+                    second["id"] = json!("prompt-2");
+                    events.push_str(&format!("event: message\ndata: {second}\n\n"));
+                }
+                ResponseTemplate::new(200).set_body_raw(events,"text/event-stream")
+            }
+            Some("tools/call") if body["params"]["name"] == "sibling" => {
+                on_sibling.notify_one();
+                ResponseTemplate::new(200).set_delay(Duration::from_secs(30))
+            }
+            Some("tools/call") if body["params"]["name"] == "flood" => {
+                let event = json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"});
+                ResponseTemplate::new(200).set_body_raw(format!("event: message\ndata: {event}\n\n").repeat(64),"text/event-stream")
+            }
+            Some("tools/call") if session == Some("old-session") || (config.expire_replacement && body["params"]["name"] == "fresh") || (session == Some("new-session") && body["params"]["name"] == "advance") => ResponseTemplate::new(404),
+            Some("tools/call") => ResponseTemplate::new(200).set_body_json(json!({"jsonrpc":"2.0","id":body["id"],"result":{"content":[{"type":"text","text":"fresh succeeded"}]}})),
+            None if body["id"] == "prompt-1" => ResponseTemplate::new(404),
+            None if body["id"] == "prompt-2" => {
+                on_slow.notify_one();
+                ResponseTemplate::new(202).set_delay(Duration::from_secs(30))
+            }
+            _ => ResponseTemplate::new(400),
+        }
+    }).mount(&server).await;
+    let resumed = Arc::new(Notify::new());
+    let on_resume = Arc::clone(&resumed);
+    let resumes = AtomicUsize::new(0);
+    Mock::given(method("GET"))
+        .and(path("/mcp"))
+        .respond_with(move |request: &Request| {
+            if request
+                .headers
+                .get("last-event-id")
+                .is_some_and(|id| id == "cursor-1")
+            {
+                if resumes.fetch_add(1, Ordering::Relaxed) > 0 {
+                    on_resume.notify_one();
+                }
+                ResponseTemplate::new(404)
+            } else {
+                ResponseTemplate::new(405)
+            }
+        })
+        .mount(&server)
+        .await;
+    let deleted = Arc::new(Notify::new());
+    let old_deleted = Arc::new(Notify::new());
+    let on_delete = Arc::clone(&deleted);
+    let on_old_delete = Arc::clone(&old_deleted);
+    Mock::given(method("DELETE"))
+        .and(path("/mcp"))
+        .respond_with(move |request: &Request| {
+            if request
+                .headers
+                .get("mcp-session-id")
+                .is_some_and(|id| id == "new-session")
+            {
+                on_delete.notify_one();
+            } else {
+                on_old_delete.notify_one();
+            }
+            ResponseTemplate::new(200)
+        })
+        .mount(&server)
+        .await;
+
+    let http = Arc::new(FloodGateHttpClient {
+        inner: RouteAwareHttpClient::new(HttpClientFactory::new(
+            OutboundProxyPolicy::ReqwestDefault,
+        )),
+        started: Notify::new(),
+        release: Default::default(),
+        expiry_started: Notify::new(),
+        expiry_release: Default::default(),
+        stall_initialize_body: matches!(
+            config.handshake,
+            RecoveryHandshake::StalledInitializeJson | RecoveryHandshake::StalledInitializeSse
+        ),
+        gate_recovery_delete: config.handshake == RecoveryHandshake::InitializedFailure,
+        delete_started: Notify::new(),
+        delete_release: Default::default(),
+    });
+    if !config.saturated_queue {
+        http.expiry_release.cancel();
+    }
+    if !config.saturated_queue && !config.expire_replacement {
+        http.release.cancel();
+    }
+    let client = Arc::new(
+        crate::RmcpClient::new_streamable_http_client_with_protocol_mode(
+            "fixture",
+            &format!("{}/mcp", server.uri()),
+            Some("fixture-token".to_string()),
+            /*http_headers*/ None,
+            /*env_http_headers*/ None,
+            Default::default(),
+            Default::default(),
+            http.clone(),
+            /*auth_provider*/ None,
+            config.protocol_mode,
+        )
+        .await?,
+    );
+    let (route_tx, mut route_rx) = mpsc::unbounded_channel();
+    client
+        .initialize(
+            InitializeRequestParams::new(
+                ClientCapabilities::default(),
+                Implementation::new("codex-test", "1"),
+            )
+            .with_protocol_version(ProtocolVersion::V_2025_11_25),
+            Some(Duration::from_secs(5)),
+            Box::new(move |_, _| {
+                let (tx, rx) = oneshot::channel();
+                let (ready_tx, ready_rx) = oneshot::channel();
+                route_tx.send((tx, ready_rx)).unwrap();
+                Box::pin(async move {
+                    let response = rx.await?;
+                    let _ = ready_tx.send(());
+                    Ok(response)
+                })
+            }),
+        )
+        .await?;
+    let parent_timeout = if config.saturated_queue {
+        Duration::from_secs(20)
+    } else {
+        Duration::from_secs(5)
+    };
+    let parent = Reply404Fixture::spawn_tool_on(&client, "wait", Some(parent_timeout));
+    let reply = timeout(Duration::from_secs(3), route_rx.recv())
+        .await?
+        .expect("elicitation reached user");
+    timeout(Duration::from_secs(3), resumed.notified()).await?;
+    assert!(
+        !parent.is_finished(),
+        "resume 404 must not complete the parent before the user replies"
+    );
+    Ok(Reply404Fixture {
+        server,
+        initializations,
+        slow_started,
+        sibling_started,
+        deleted,
+        old_deleted,
+        http,
+        client,
+        route_rx,
+        reply: Some(reply),
+        parent: Some(parent),
+    })
+}
+
+impl Reply404Fixture {
+    fn spawn_tool_on(
+        client: &Arc<crate::RmcpClient>,
+        name: &str,
+        budget: Option<Duration>,
+    ) -> ToolTask {
+        let client = Arc::clone(client);
+        let name = name.to_string();
+        tokio::spawn(async move {
+            client
+                .call_tool(name, /*arguments*/ None, |_| Ok(None), budget)
+                .await
+        })
+    }
+
+    fn spawn_tool(&self, name: &str, budget: Option<Duration>) -> ToolTask {
+        Self::spawn_tool_on(&self.client, name, budget)
+    }
+
+    fn accept(reply: oneshot::Sender<crate::ElicitationResponse>) {
+        reply
+            .send(crate::ElicitationResponse {
+                action: ElicitationAction::Accept,
+                content: Some(json!({})),
+                meta: None,
+            })
+            .unwrap();
+    }
+
+    fn accept_parent_reply(&mut self) {
+        let (reply, _) = self.reply.take().expect("parent reply is pending");
+        Self::accept(reply);
+    }
+
+    async fn assert_parent_closed(&mut self, limit: Duration) -> anyhow::Result<()> {
+        let error = timeout(limit, self.parent.take().expect("parent call is pending"))
+            .await??
+            .expect_err("expired reply cannot replay the original call");
+        assert_eq!(crate::request_error_code(&error), Some("transport_closed"));
+        Ok(())
+    }
+
+    async fn expire_parent(&mut self) -> anyhow::Result<()> {
+        self.accept_parent_reply();
+        self.assert_parent_closed(Duration::from_secs(3)).await
+    }
+
+    async fn fresh(&self, budget: Option<Duration>) -> anyhow::Result<CallToolResult> {
+        timeout(Duration::from_secs(3), self.spawn_tool("fresh", budget)).await??
+    }
+
+    fn assert_fresh_succeeded(result: CallToolResult) {
+        assert_eq!(
+            result.content,
+            vec![rmcp::model::ContentBlock::text("fresh succeeded")]
+        );
+    }
+
+    async fn assert_fresh_timeout(&self, budget: Duration) {
+        let error = self
+            .fresh(Some(budget))
+            .await
+            .expect_err("recovery must respect fresh call timeout");
+        assert_eq!(crate::request_error_code(&error), Some("request_timeout"));
+    }
+
+    async fn assert_followup_succeeds(&self) -> anyhow::Result<()> {
+        let followup = timeout(
+            Duration::from_secs(1),
+            self.client.call_tool(
+                "followup".into(),
+                /*arguments*/ None,
+                |_| Ok(None),
+                Some(Duration::from_secs(2)),
+            ),
+        )
+        .await
+        .expect("recovery must release worker and semaphore")?;
+        Self::assert_fresh_succeeded(followup);
+        Ok(())
+    }
+
+    async fn wait_for_new_session_delete(&self) {
+        timeout(Duration::from_secs(2), self.deleted.notified())
+            .await
+            .expect("allocated session DELETE must be attempted");
+    }
+
+    async fn assert_new_session_delete(&self) {
+        let requests = self.server.received_requests().await.unwrap();
+        let deletes = requests
+            .iter()
+            .filter(|request| {
+                request.method == "DELETE"
+                    && request
+                        .headers
+                        .get("mcp-session-id")
+                        .is_some_and(|id| id == "new-session")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0].headers["authorization"], "Bearer fixture-token");
+    }
+
+    async fn assert_no_new_session_delete(&self) {
+        let requests = self.server.received_requests().await.unwrap();
+        assert!(
+            !requests.iter().any(|request| request.method == "DELETE"
+                && request
+                    .headers
+                    .get("mcp-session-id")
+                    .is_some_and(|id| id == "new-session")),
+            "healthy SSE initialization must not delete the active session"
+        );
+    }
+
+    async fn assert_transcript(&self, fresh_calls: usize, initializations: usize) {
+        let requests = self.server.received_requests().await.unwrap();
+        let posts = requests
+            .iter()
+            .filter(|request| request.method == "POST")
+            .map(|request| (request, request.body_json::<Value>().unwrap()))
+            .collect::<Vec<_>>();
+        let replies = posts
+            .iter()
+            .filter(|(_, body)| body.get("method").is_none())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            replies.len(),
+            1,
+            "no other prompt replies or approval replays"
+        );
+        assert_eq!(replies[0].0.headers["mcp-session-id"], "old-session");
+        assert_eq!(replies[0].1["id"], "prompt-1");
+        assert_eq!(replies[0].1["result"]["action"], "accept");
+        assert_eq!(
+            posts
+                .iter()
+                .filter(
+                    |(_, body)| body["method"] == "tools/call" && body["params"]["name"] == "wait"
+                )
+                .count(),
+            1
+        );
+        assert_eq!(
+            posts
+                .iter()
+                .filter(
+                    |(_, body)| body["method"] == "tools/call" && body["params"]["name"] == "fresh"
+                )
+                .count(),
+            fresh_calls
+        );
+        assert_eq!(
+            self.initializations.load(Ordering::Relaxed),
+            initializations
+        );
+    }
+}
+
+#[tokio::test]
+async fn reply_404_closes_parent_without_replay() -> anyhow::Result<()> {
+    let mut fixture = start_reply_404_fixture(Reply404FixtureConfig::default()).await?;
+    fixture.expire_parent().await?;
+    Reply404Fixture::assert_fresh_succeeded(fixture.fresh(Some(Duration::from_secs(2))).await?);
+    fixture
+        .assert_transcript(/*fresh_calls*/ 1, /*initializations*/ 2)
+        .await;
+    fixture.client.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unbounded_recovery_cleans_up_failed_initialization() -> anyhow::Result<()> {
+    let mut fixture = start_reply_404_fixture(Reply404FixtureConfig {
+        handshake: RecoveryHandshake::InitializedSse,
+        ..Default::default()
+    })
+    .await?;
+    fixture.expire_parent().await?;
+    Reply404Fixture::assert_fresh_succeeded(fixture.fresh(/*budget*/ None).await?);
+    fixture.wait_for_new_session_delete().await;
+    fixture
+        .assert_transcript(/*fresh_calls*/ 1, /*initializations*/ 3)
+        .await;
+    fixture.assert_new_session_delete().await;
+    fixture.client.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovery_frees_session_capacity_before_retrying_and_detaches_on_timeout()
+-> anyhow::Result<()> {
+    let config = Reply404FixtureConfig {
+        handshake: RecoveryHandshake::InitializedFailure,
+        ..Default::default()
+    };
+    let mut fixture = start_reply_404_fixture(config).await?;
+    fixture.expire_parent().await?;
+    let mut fresh = fixture.spawn_tool("fresh", Some(Duration::from_secs(5)));
+    timeout(
+        Duration::from_secs(2),
+        fixture.http.delete_started.notified(),
+    )
+    .await?;
+    // Keep DELETE pending through both normal retry windows.
+    assert!(timeout(Duration::from_secs(2), &mut fresh).await.is_err());
+    assert_eq!(fixture.initializations.load(Ordering::Relaxed), 2);
+    fixture.http.delete_release.cancel();
+    Reply404Fixture::assert_fresh_succeeded(timeout(Duration::from_secs(2), fresh).await???);
+    fixture.assert_new_session_delete().await;
+    fixture
+        .assert_transcript(/*fresh_calls*/ 1, /*initializations*/ 3)
+        .await;
+    fixture.client.shutdown().await;
+
+    let mut fixture = start_reply_404_fixture(config).await?;
+    fixture.expire_parent().await?;
+    let fresh = fixture.spawn_tool("fresh", Some(Duration::from_millis(250)));
+    timeout(
+        Duration::from_secs(2),
+        fixture.http.delete_started.notified(),
+    )
+    .await?;
+    let error = timeout(Duration::from_secs(1), fresh)
+        .await??
+        .expect_err("caller timeout must not wait for DELETE");
+    assert_eq!(crate::request_error_code(&error), Some("request_timeout"));
+    fixture.http.delete_release.cancel();
+    fixture.wait_for_new_session_delete().await;
+    fixture.assert_followup_succeeds().await?;
+    fixture.assert_new_session_delete().await;
+    fixture.client.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_tool_timeout_includes_session_recovery_handshake() -> anyhow::Result<()> {
+    let mut fixture = start_reply_404_fixture(Reply404FixtureConfig {
+        handshake: RecoveryHandshake::DelayedInitialize,
+        ..Default::default()
+    })
+    .await?;
+    fixture.expire_parent().await?;
+    fixture
+        .assert_fresh_timeout(Duration::from_millis(250))
+        .await;
+    fixture.assert_followup_succeeds().await?;
+    fixture
+        .assert_transcript(/*fresh_calls*/ 0, /*initializations*/ 3)
+        .await;
+    fixture.client.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_initialized_notification_deletes_allocated_session() -> anyhow::Result<()> {
+    let mut fixture = start_reply_404_fixture(Reply404FixtureConfig {
+        handshake: RecoveryHandshake::DelayedInitialized,
+        ..Default::default()
+    })
+    .await?;
+    fixture.expire_parent().await?;
+    fixture
+        .assert_fresh_timeout(Duration::from_millis(250))
+        .await;
+    fixture.wait_for_new_session_delete().await;
+    fixture.assert_followup_succeeds().await?;
+    fixture
+        .assert_transcript(/*fresh_calls*/ 0, /*initializations*/ 3)
+        .await;
+    fixture.assert_new_session_delete().await;
+    fixture.client.shutdown().await;
+    Ok(())
+}
+
+async fn cancelled_recovery_initialize_deletes_allocated_session(
+    handshake: RecoveryHandshake,
+) -> anyhow::Result<()> {
+    let mut fixture = start_reply_404_fixture(Reply404FixtureConfig {
+        handshake,
+        ..Default::default()
+    })
+    .await?;
+    fixture.expire_parent().await?;
+    fixture.assert_fresh_timeout(Duration::from_secs(1)).await;
+    fixture.wait_for_new_session_delete().await;
+    fixture.assert_followup_succeeds().await?;
+    fixture
+        .assert_transcript(/*fresh_calls*/ 0, /*initializations*/ 3)
+        .await;
+    fixture.assert_new_session_delete().await;
+    fixture.client.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_recovery_initialize_json_deletes_allocated_session() -> anyhow::Result<()> {
+    cancelled_recovery_initialize_deletes_allocated_session(
+        RecoveryHandshake::StalledInitializeJson,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn cancelled_recovery_initialize_sse_deletes_allocated_session() -> anyhow::Result<()> {
+    cancelled_recovery_initialize_deletes_allocated_session(RecoveryHandshake::StalledInitializeSse)
+        .await
+}
+
+#[tokio::test]
+async fn healthy_recovery_initialize_sse_keeps_allocated_session() -> anyhow::Result<()> {
+    let mut fixture = start_reply_404_fixture(Reply404FixtureConfig {
+        handshake: RecoveryHandshake::HealthyInitializeSse,
+        ..Default::default()
+    })
+    .await?;
+    fixture.expire_parent().await?;
+    Reply404Fixture::assert_fresh_succeeded(fixture.fresh(Some(Duration::from_secs(2))).await?);
+    fixture
+        .assert_transcript(/*fresh_calls*/ 1, /*initializations*/ 2)
+        .await;
+    fixture.assert_no_new_session_delete().await;
+    fixture.client.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_legacy_fallback_accepts_initialized_sse_without_deleting_session()
+-> anyhow::Result<()> {
+    let mut fixture = start_reply_404_fixture(Reply404FixtureConfig {
+        handshake: RecoveryHandshake::InitializedSse,
+        protocol_mode: crate::McpProtocolMode::V20260728,
+        ..Default::default()
+    })
+    .await?;
+    fixture.expire_parent().await?;
+    Reply404Fixture::assert_fresh_succeeded(fixture.fresh(Some(Duration::from_secs(2))).await?);
+    fixture
+        .assert_transcript(/*fresh_calls*/ 1, /*initializations*/ 2)
+        .await;
+    let requests = fixture.server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request
+                .body_json::<Value>()
+                .is_ok_and(|body| body["method"] == "server/discover"))
+            .count(),
+        2
+    );
+    fixture.assert_no_new_session_delete().await;
+    fixture.client.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn replacement_404_fails_without_another_reconnect() -> anyhow::Result<()> {
+    let mut fixture = start_reply_404_fixture(Reply404FixtureConfig {
+        expire_replacement: true,
+        ..Default::default()
+    })
+    .await?;
+    fixture.expire_parent().await?;
+    let fresh = fixture.spawn_tool("fresh", Some(Duration::from_secs(2)));
+    timeout(Duration::from_secs(3), fixture.http.started.notified()).await?;
+    let sibling = fixture.spawn_tool("sibling", /*budget*/ None);
+    timeout(Duration::from_secs(3), fixture.sibling_started.notified()).await?;
+    fixture.http.release.cancel();
+    let error = timeout(Duration::from_secs(3), fresh)
+        .await??
+        .expect_err("replacement expired");
+    assert_eq!(crate::request_error_code(&error), Some("transport_error"));
+    assert_eq!(
+        fixture.initializations.load(Ordering::Relaxed),
+        2,
+        "fresh call must reconnect only once"
+    );
+    let error = timeout(Duration::from_secs(8), sibling)
+        .await
+        .context("expired replacement left an unbounded sibling pending")??
+        .expect_err("expired replacement must fail sibling");
+    assert_eq!(crate::request_error_code(&error), Some("transport_closed"));
+    fixture.assert_followup_succeeds().await?;
+    fixture
+        .assert_transcript(/*fresh_calls*/ 1, /*initializations*/ 3)
+        .await;
+    fixture.client.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn stale_replacement_404_closes_its_sibling_after_another_call_recovers() -> anyhow::Result<()>
+{
+    let mut fixture = start_reply_404_fixture(Reply404FixtureConfig {
+        expire_replacement: true,
+        ..Default::default()
+    })
+    .await?;
+    fixture.expire_parent().await?;
+    let fresh = fixture.spawn_tool("fresh", Some(Duration::from_secs(10)));
+    timeout(Duration::from_secs(3), fixture.http.started.notified()).await?;
+    let sibling = fixture.spawn_tool("sibling", /*budget*/ None);
+    timeout(Duration::from_secs(3), fixture.sibling_started.notified()).await?;
+
+    let advance = fixture.spawn_tool("advance", Some(Duration::from_secs(5)));
+    Reply404Fixture::assert_fresh_succeeded(timeout(Duration::from_secs(5), advance).await???);
+    assert_eq!(fixture.initializations.load(Ordering::Relaxed), 3);
+    fixture.http.release.cancel();
+
+    let error = timeout(Duration::from_secs(3), fresh)
+        .await??
+        .expect_err("stale replacement expired");
+    assert_eq!(crate::request_error_code(&error), Some("transport_error"));
+    let error = timeout(Duration::from_secs(8), sibling)
+        .await
+        .context("stale replacement left an unbounded sibling pending")??
+        .expect_err("expired stale replacement must fail sibling");
+    assert_eq!(crate::request_error_code(&error), Some("transport_closed"));
+    fixture.assert_followup_succeeds().await?;
+    fixture
+        .assert_transcript(/*fresh_calls*/ 1, /*initializations*/ 3)
+        .await;
+    fixture.client.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reply_404_closes_two_calls_with_a_full_inbound_queue() -> anyhow::Result<()> {
+    let mut fixture = start_reply_404_fixture(Reply404FixtureConfig {
+        saturated_queue: true,
+        ..Default::default()
+    })
+    .await?;
+    let (second_reply, ready) = timeout(Duration::from_secs(3), fixture.route_rx.recv())
+        .await
+        .context("second elicitation was not routed")?
+        .expect("second elicitation reached user");
+    let flood = fixture.spawn_tool("flood", Some(Duration::from_secs(20)));
+    timeout(Duration::from_secs(3), fixture.http.started.notified())
+        .await
+        .context("flood did not reach HTTP gate")?;
+    fixture.accept_parent_reply();
+    timeout(
+        Duration::from_secs(3),
+        fixture.http.expiry_started.notified(),
+    )
+    .await
+    .context("first reply POST did not reach expiry gate")?;
+    Reply404Fixture::accept(second_reply);
+    timeout(Duration::from_secs(3), ready)
+        .await
+        .context("second response handler did not finish")??;
+    fixture.http.expiry_release.cancel();
+    timeout(Duration::from_secs(3), fixture.slow_started.notified())
+        .await
+        .context("second reply POST did not start")?;
+    timeout(Duration::from_secs(3), async {
+        while !fixture.client.is_closed().await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .context("reply 404 did not mark session closed")?;
+    // The service no longer receives; 64 events fill the SDK's 16-message inbound queue while the stalled reply drains.
+    fixture.http.release.cancel();
+    fixture.assert_parent_closed(Duration::from_secs(9)).await?;
+    let error = timeout(Duration::from_secs(1), flood)
+        .await??
+        .expect_err("concurrent old-session call must fail");
+    assert_eq!(crate::request_error_code(&error), Some("transport_closed"));
+    timeout(Duration::from_secs(2), fixture.old_deleted.notified())
+        .await
+        .expect("cancelled worker must release the old session");
+    fixture.client.shutdown().await;
     Ok(())
 }

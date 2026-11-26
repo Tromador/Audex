@@ -24,8 +24,16 @@ impl TranscriptView {
         let cursor = mode.cursor(selection);
         let snapshot = self.snapshot_cells();
         let cells = snapshot.as_deref().unwrap_or(cells);
+        if let Some(mark) = mode.mark
+            && let Scope::Block(block) = mark.scope
+        {
+            self.move_block(cells, mark, block, motion);
+            return;
+        }
         let next = match motion {
-            _ if let Some((mark, table)) = mode.mark.and_then(|mark| Some((mark, mark.table?))) => {
+            _ if let Some((mark, table)) =
+                mode.mark.and_then(|mark| Some((mark, mark.table()?))) =>
+            {
                 if table.kind == TableMarkKind::Cells {
                     self.move_select_table(cells, mode, mark, motion);
                     return;
@@ -88,6 +96,7 @@ impl TranscriptView {
             self.select_mode = Some(mode);
             return;
         };
+
         if let Some(mark) = &mut mode.mark {
             mark.active = next;
             mark.active_edges = None;
@@ -319,7 +328,11 @@ impl TranscriptView {
         };
         let snapshot = self.snapshot_cells();
         let cells = snapshot.as_deref().unwrap_or(cells);
-        if let Some(table) = mark.table {
+        if let Scope::Block(block) = mark.scope {
+            self.sync_block_range(cells, mark, block);
+            return;
+        }
+        if let Some(table) = mark.table() {
             self.sync_select_table(cells, mark, table);
             return;
         }

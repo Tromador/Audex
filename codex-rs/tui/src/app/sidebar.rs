@@ -82,6 +82,7 @@ pub(super) struct SidebarInputState {
     pub(super) choice: ChooserSelection,
     scroll: ChooserScroll,
     content: SidebarContent,
+    focus: Option<PaneFocus>,
     showing_file_path: bool,
     file_path_scroll: usize,
 }
@@ -93,6 +94,10 @@ pub(super) struct SidebarPane {
     pub(super) files: Option<super::sidebar_files::Files>,
     pub(super) opened_files: Vec<codex_utils_path_uri::PathUri>,
     pub(super) documents: HashMap<uuid::Uuid, super::sidebar_document::Document>,
+    pub(super) pending_documents: HashMap<
+        crate::backend_id::BackendId,
+        std::collections::VecDeque<crate::open_in_codex::DocumentRequest>,
+    >,
     pub(super) focus_document_request: Option<uuid::Uuid>,
     content: SidebarContent,
     tabs: Vec<SidebarTab>,
@@ -113,6 +118,7 @@ pub(super) struct SidebarPane {
     pub(super) file_preview_unavailable: Option<&'static str>,
     pub(super) tabs_revision: usize,
     focus: Option<PaneFocus>,
+    hidden: bool,
     motion: PaneMotion,
 }
 
@@ -132,12 +138,11 @@ impl SidebarPane {
         let selected = self.visible_content();
         let visible = visible && self.close.is_none();
         for (&id, doc) in &mut self.documents {
+            let visible = visible && selected == Some(SidebarContent::Document(id));
+            let path_visible = visible && doc.path_actions_available();
+            doc.path_actions.finish_copy(completion, path_visible);
             if let Some((view, cells)) = doc.reader()
-                && view.finish_copy(
-                    cells,
-                    completion,
-                    visible && selected == Some(SidebarContent::Document(id)),
-                ) == Some(true)
+                && view.finish_copy(cells, completion, visible) == Some(true)
             {
                 view.jump_to_latest();
             }
@@ -157,6 +162,8 @@ impl SidebarPane {
     }
 
     pub(super) fn show(&mut self, content: SidebarContent, focus: PaneFocus) {
+        let resume_chooser = self.hidden && self.content == SidebarContent::Chooser;
+        self.hidden = false;
         if self.content != content {
             self.cancel_hidden_document_primary(/*visible*/ false);
         }
@@ -171,7 +178,9 @@ impl SidebarPane {
                 self.visit(SidebarTab::Chat(id));
             }
             SidebarContent::Chooser
-                if self.focus.is_none() || matches!(self.content, SidebarContent::Chat(_)) =>
+                if !resume_chooser
+                    && (self.focus.is_none()
+                        || matches!(self.content, SidebarContent::Chat(_))) =>
             {
                 self.reset_choice();
             }
@@ -250,7 +259,7 @@ impl SidebarPane {
             .ne(rows.iter().map(|agent| agent.id));
         let selection = self.input_state().choice;
         self.agents.rows = rows;
-        if reordered {
+        if reordered || self.chat_tabs().agent_is_disabled(self.choice) {
             self.restore_choice(selection);
             self.tabs_revision += 1;
         }
@@ -261,7 +270,9 @@ impl SidebarPane {
         let index = match selection {
             ChooserSelection::New => Some(0),
             ChooserSelection::Chat(id) => tabs.choice_index(id),
-            ChooserSelection::Agent(id) => tabs.agent_index(id),
+            ChooserSelection::Agent(id) => tabs
+                .agent_index(id)
+                .filter(|&index| !tabs.agent_is_disabled(index)),
             ChooserSelection::File(offset) => {
                 Some(tabs.file_start() + offset).filter(|&index| tabs.file(index).is_some())
             }
@@ -460,6 +471,7 @@ impl SidebarPane {
             choice,
             scroll: self.chooser_scroll,
             content: self.content,
+            focus: self.focus,
             showing_file_path: self.showing_file_path,
             file_path_scroll: self.file_path_scroll,
         }
@@ -492,6 +504,7 @@ impl SidebarPane {
     }
 
     pub(super) fn hide(&mut self) {
+        self.hidden |= self.focus.is_some();
         self.cancel_hidden_document_primary(/*visible*/ false);
         self.focus_document_request = None;
         self.agents.pending_link = None;
@@ -553,6 +566,10 @@ impl SidebarPane {
         }
     }
 
+    pub(super) fn hidden_content(&self) -> Option<SidebarContent> {
+        (self.hidden && self.focus.is_none()).then_some(self.content)
+    }
+
     pub(super) fn visible_content(&self) -> Option<SidebarContent> {
         self.focus.map(|_| self.content)
     }
@@ -565,7 +582,9 @@ impl App {
         self.conversation_frame.panel_area().or_else(|| {
             match side_pane::split_layout(self, tui, screen) {
                 Some(SidebarLayout::Panel { sidebar, .. }) => Some(sidebar),
-                _ if screen.width < 100 && self.chooser_focus() == Some(PaneFocus::Sidebar) => {
+                _ if screen.width < side_pane::MIN_SPLIT_WIDTH
+                    && self.chooser_focus() == Some(PaneFocus::Sidebar) =>
+                {
                     Some(screen)
                 }
                 _ => None,
@@ -749,7 +768,7 @@ pub(super) fn paint_layout(app: &mut App, tui: &Tui, area: Rect) -> Option<Sideb
         && app.side_retention_enabled(tui)
         && !app.conversation_frame.has_caller_inset();
     let animate = allowed
-        && area.width >= 100
+        && area.width >= side_pane::MIN_SPLIT_WIDTH
         && app.local_settings.tui.animations
         && app.pane_resize.is_none()
         && app.divider_drag.is_none();
@@ -764,7 +783,7 @@ pub(super) fn paint_layout(app: &mut App, tui: &Tui, area: Rect) -> Option<Sideb
     }
     let content = pane.content;
     let focus = pane.focus.unwrap_or(PaneFocus::Main);
-    let [main, sidebar] = if zoomed_document || area.width < 100 {
+    let [main, sidebar] = if zoomed_document || area.width < side_pane::MIN_SPLIT_WIDTH {
         if focus == PaneFocus::Main {
             return None;
         }

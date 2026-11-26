@@ -24,6 +24,8 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::sync::DropGuard;
 
 pub(super) struct Conversation {
+    // A prewarmed thread is still new until its first reusable review.
+    pub(super) kind: GuardianReviewSessionKind,
     pub(super) thread: Arc<CodexThread>,
     _stop: DropGuard,
     pub(super) inbox: Arc<ActorInbox>,
@@ -61,13 +63,20 @@ impl Conversation {
         prepared: &PreparedGuardianContext,
         owner: &ReviewerTasks,
         binding: LiveRetrievalBinding,
-        inbox: Arc<ActorInbox>,
         stop: CancellationToken,
+        shadow: bool,
     ) -> anyhow::Result<Self> {
         let key = prepared.reuse_key(/*previous*/ None);
         let (mut options, state) = prepared
             .thread_options(GuardianReviewSessionKind::TrunkNew, /*snapshot*/ None)
             .await;
+        if shadow {
+            options.config.ephemeral = true;
+            options.config.feedback_enabled = false;
+            options
+                .thread_extension_init
+                .insert(codex_core::guardian_review::ShadowReviewSession);
+        }
         options.initial_history = codex_history::InitialHistory::New;
         let mut registry = ExtensionRegistryBuilder::<Config>::default();
         crate::install_retrieval_tools(&mut registry);
@@ -84,6 +93,7 @@ impl Conversation {
         options
             .thread_extension_init
             .insert(SessionIsolation::Isolated);
+        let inbox = Arc::clone(&binding.inbox);
         options.thread_extension_init.insert(binding);
         options.thread_extension_init.insert(ToolPolicy {
             allowed_tools: Some(allowed),
@@ -119,6 +129,7 @@ impl Conversation {
             .bind_thread(&spawned.thread, key, state, stop)
             .await;
         Ok(Self {
+            kind: GuardianReviewSessionKind::TrunkNew,
             thread: spawned.thread,
             _stop: stop_guard,
             delivered: 0,

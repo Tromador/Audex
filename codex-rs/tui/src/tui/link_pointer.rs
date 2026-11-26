@@ -7,7 +7,7 @@ use std::io::Write;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 
-use codex_terminal_detection::TerminalName;
+use crate::terminal_capabilities::PointerReset;
 use crossterm::event::MouseEvent;
 use crossterm::event::MouseEventKind;
 use ratatui::layout::Position;
@@ -15,7 +15,7 @@ use ratatui::layout::Position;
 use super::Tui;
 use super::TuiEvent;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum PointerShape {
     #[default]
@@ -28,6 +28,7 @@ pub(crate) enum PointerShape {
 pub(crate) struct LinkHover {
     pub(crate) mouse: Option<MouseEvent>,
     pub(crate) shape: PointerShape,
+    pub(crate) sidebar_divider: bool,
 }
 
 impl LinkHover {
@@ -92,12 +93,12 @@ impl LinkPointer {
     pub(super) fn restore(
         &self,
         writer: &mut impl Write,
-        terminal: TerminalName,
+        reset: PointerReset,
     ) -> std::io::Result<()> {
         if self.0.load(Ordering::Relaxed) != 0 {
             // In Kitty, a named shape persists across mouse capture and screen changes.
             // An empty OSC 22 releases that override back to the terminal's default policy.
-            writer.write_all(if terminal == TerminalName::Kitty {
+            writer.write_all(if reset == PointerReset::Release {
                 b"\x1b]22;\x1b\\"
             } else {
                 b"\x1b]22;text\x1b\\"
@@ -111,12 +112,7 @@ impl LinkPointer {
 
 impl Tui {
     pub(crate) fn set_pointer_shape(&mut self, shape: PointerShape) -> std::io::Result<()> {
-        // OSC 22 names differ between terminals. Restrict CSS names to known implementations;
-        // multiplexers may consume OSC 22 and do not promise pointer-shape passthrough.
-        let info = codex_terminal_detection::terminal_info();
-        if info.multiplexer.is_none()
-            && matches!(info.name, TerminalName::Ghostty | TerminalName::Kitty)
-        {
+        if PointerReset::detect().is_some() {
             super::alternate_screen::ALTERNATE_SCREEN
                 .set_pointer_shape(self.terminal.backend_mut(), shape)?;
         }

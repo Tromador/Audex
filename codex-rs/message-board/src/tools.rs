@@ -34,6 +34,7 @@ use codex_tools::ToolExecutor;
 use codex_tools::ToolExecutorFuture;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
+use codex_utils_cached_str::CodexCachedStr;
 use futures::future::BoxFuture;
 use serde::Serialize;
 use serde_json::Value;
@@ -57,7 +58,7 @@ pub fn message_board_tools(
     namespace: Option<&str>,
     namespace_description: &str,
     tool_messages: Option<&MultiAgentToolMessages>,
-) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
+) -> Vec<Arc<dyn ToolExecutor>> {
     tools
         .iter()
         .map(|&tool| {
@@ -77,7 +78,7 @@ pub fn message_board_tools(
                 namespace: namespace.map(str::to_owned),
                 namespace_description: namespace_description.to_owned(),
                 description: tool_message.and_then(|tool| tool.description.clone()),
-            }) as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>
+            }) as Arc<dyn ToolExecutor>
         })
         .collect()
 }
@@ -89,10 +90,10 @@ struct BoardTool {
     board: Arc<dyn AgentMessageBoard>,
     namespace: Option<String>,
     namespace_description: String,
-    description: Option<String>,
+    description: Option<CodexCachedStr>,
 }
 
-impl<'call> ToolExecutor<ToolCall<'call>> for BoardTool {
+impl ToolExecutor for BoardTool {
     fn tool_name(&self) -> ToolName {
         ToolName::new(self.namespace.clone(), self.tool.name())
     }
@@ -106,13 +107,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for BoardTool {
     }
     fn supports_parallel_tool_calls(&self) -> bool {
         MessageBoardTool::READ_ONLY.contains(&self.tool)
-            || self.tool == MessageBoardTool::SubscribedChannels
     }
 
-    fn handle<'a>(&'a self, call: ToolCall<'call>) -> ToolExecutorFuture<'a>
-    where
-        'call: 'a,
-    {
+    fn handle<'a>(&'a self, call: ToolCall<'a>) -> ToolExecutorFuture<'a> {
         Box::pin(async move {
             let raw = call.function_arguments()?;
             if raw.len() > MAX_TOOL_ARGUMENT_KIB * 1024 {
@@ -217,15 +214,6 @@ impl BoardTool {
                         page: page(limit, cursor.clone(), scale),
                     };
                     board.list_channels(caller, request)
-                })
-                .await
-            }
-            MessageBoardTool::SubscribedChannels => {
-                let arguments::SubscribedChannels { limit, cursor } =
-                    serde_json::from_str(raw).map_err(model_error)?;
-                let limit = page_limit(limit);
-                bounded_read(budget, limit, |scale| {
-                    board.subscribed_channels(caller, page(limit, cursor.clone(), scale))
                 })
                 .await
             }

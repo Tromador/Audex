@@ -28,6 +28,11 @@ fn statusline_typescript_contract_matches_the_bundled_reference() -> color_eyre:
         "StatuslineState",
         "UiTree",
         "RowElement",
+        "ColElement",
+        "BoxElement",
+        "BadgeElement",
+        "SpacerElement",
+        "CodeElement",
         "StatuslineItemId",
         "Color",
     ] {
@@ -58,7 +63,19 @@ fn generate_reference(output: &Path) -> color_eyre::Result<String> {
         "export type StatuslineItemId = {};",
         items.join(" | ")
     )?;
-    for name in ["Text", "Bold", "Italic", "Underline", "Link", "Row"] {
+    for name in [
+        "Text",
+        "Bold",
+        "Italic",
+        "Underline",
+        "Link",
+        "Row",
+        "Col",
+        "Box",
+        "Badge",
+        "Spacer",
+        "Code",
+    ] {
         let tag = name.to_ascii_lowercase();
         writeln!(
             generated,
@@ -66,6 +83,8 @@ fn generate_reference(output: &Path) -> color_eyre::Result<String> {
         )?;
     }
 
+    // Column boxes must exclude row-only props even when direction is dynamic.
+    generated.push_str("type BoxColumnProps = ColProps & { [K in Exclude<keyof RowProps, keyof ColProps>]?: never };\n");
     writeln!(generated, "export {}", RateLimitWindow::decl())?;
     generated.push_str(
         "export type ThemeColor = Extract<Color, \"primary\" | \"surface\" | \"accent\">;\n\

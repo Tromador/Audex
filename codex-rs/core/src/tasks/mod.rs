@@ -37,7 +37,7 @@ use crate::session::SamplingInterrupt;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn::McpStartupRequirements;
-use crate::session::turn::merge_submitted_context;
+use crate::session::turn::record_delivered_additional_context;
 use crate::session::turn::run_hooks_and_record_input_entries;
 use crate::session::turn_context::NewTurnContextOptions;
 use crate::session::turn_context::TurnContext;
@@ -414,15 +414,17 @@ impl Session {
         self.bind_realtime_handoffs_to_turn(&input, &turn_context.sub_id)
             .await;
         let host_admission = self.host_turn_admission();
-        let (agent_execution_guard, task_input, pending_initial_input) = match &host_admission {
-            Some(_) => (None, Vec::new(), Some(input)),
+        let (agent_execution_guard, task_input) = match &host_admission {
+            Some(_) => {
+                turn_context.park_initial_input(input);
+                (None, Vec::new())
+            }
             None => (
                 self.services.agent_control.admit_turn(
                     turn_context.multi_agent_version,
                     &turn_context.session_source,
                 ),
                 input,
-                None,
             ),
         };
         // Native admission is synchronous, including unrestricted turns that have no guard.
@@ -548,7 +550,6 @@ impl Session {
             turn_context: Arc::clone(&turn_context),
             _agent_execution_guard: agent_execution_guard,
             outcome_handoff,
-            pending_initial_input,
             _diagnostics_guard: ACTIVE_TURNS.track(),
             _timer: timer,
         };
@@ -591,10 +592,6 @@ impl Session {
         self: &Arc<Self>,
         sub_id: String,
     ) {
-        if !self.input_queue.has_pending_mailbox_items().await {
-            return;
-        }
-
         let Some(reservation) = self.reserve_pending_work_turn().await else {
             return;
         };
@@ -620,6 +617,7 @@ impl Session {
             prompt_cache_ttl: start_options.prompt_cache_ttl,
             cyber_access_program: start_options.cyber_access_program,
             helper_admission: triggered.then_some(helper_admission).flatten(),
+            goal_daybreak: None,
         };
         let turn_context = self
             .new_turn_with_configuration(sub_id, configuration, options)
@@ -823,11 +821,12 @@ impl Session {
             let task = active_turn.task.take()?;
             task.handle.detach();
             active_turn.finishing = Some(finishing);
+            let initial_input = turn_context.take_initial_input();
             (
                 Arc::clone(&active_turn.turn_state),
-                (task._agent_execution_guard.is_none() && task.pending_initial_input.is_some())
+                (task._agent_execution_guard.is_none() && initial_input.is_some())
                     .then_some(task.task),
-                task.pending_initial_input,
+                initial_input,
                 task.outcome_handoff,
                 sampling_interrupted,
             )
@@ -1246,12 +1245,7 @@ impl Session {
         }
 
         if let Err(error) = self
-            .record_pending_initial_input(
-                &task.turn_context,
-                turn_state,
-                task.pending_initial_input,
-                Some(&reason),
-            )
+            .record_pending_initial_input(&task.turn_context, turn_state, Some(&reason))
             .await
         {
             self.send_event(
@@ -1271,7 +1265,7 @@ impl Session {
         if reason == TurnAbortReason::Interrupted {
             // Injection acknowledges queueing. Preserve accepted agent mail before
             // teardown discards pending input and the host observes TurnAborted.
-            let mut pending_mail = Vec::new();
+            let model_info = task.turn_context.capture_current_model_info();
             let mut remaining_input = Vec::new();
             for input in self
                 .input_queue
@@ -1284,11 +1278,20 @@ impl Session {
                         additional_context,
                     } if matches!(item.item, ResponseItem::AgentMessage { .. }) => {
                         if let Some(context) = additional_context {
-                            pending_mail.extend(
-                                merge_submitted_context(self, &task.turn_context, &context).await,
-                            );
+                            record_delivered_additional_context(
+                                self,
+                                &task.turn_context,
+                                &model_info,
+                                &context,
+                            )
+                            .await;
                         }
-                        pending_mail.push(item);
+                        self.record_annotated_conversation_items(
+                            &task.turn_context,
+                            &model_info,
+                            vec![item],
+                        )
+                        .await;
                     }
                     input => remaining_input.push(input),
                 }
@@ -1297,14 +1300,6 @@ impl Session {
             self.input_queue
                 .extend_pending_input_for_turn_state(turn_state, remaining_input)
                 .await;
-            if !pending_mail.is_empty() {
-                self.record_annotated_conversation_items(
-                    &task.turn_context,
-                    &task.turn_context.capture_current_model_info(),
-                    pending_mail,
-                )
-                .await;
-            }
             self.record_interrupted_turn_history(
                 &task.turn_context,
                 error

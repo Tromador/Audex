@@ -7,6 +7,7 @@ use codex_message_board::LocalAgentMessageBoard;
 use codex_message_board::LocalBoardOptions;
 use codex_message_board::MessageBoardHost;
 use codex_message_board::MessageBoardTool;
+use codex_message_board_mcp::AppServerNotifications;
 use codex_message_board_mcp::MessageBoardMcpServer;
 use codex_state::SqliteConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -28,6 +29,9 @@ struct Args {
     /// Name of the environment variable containing the trusted-host bearer token.
     #[arg(long, default_value = "CODEX_MESSAGE_BOARD_TOKEN")]
     bearer_token_env: String,
+    /// Optional loopback WebSocket app-server URL for queue-only agent notifications.
+    #[arg(long)]
+    app_server: Option<url::Url>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -43,6 +47,10 @@ async fn main() -> anyhow::Result<()> {
     let registry = sqlite
         .open_read_only_pool(&sqlite.state_db_path(), /*busy_timeout*/ None)
         .await?;
+    let app_server = match args.app_server {
+        Some(url) => Some(Arc::new(AppServerNotifications::connect(url).await?)),
+        None => None,
+    };
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     println!(
         "{}",
@@ -62,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
             let host = Arc::new(persisted::PersistedHost {
                 registry: registry.clone(),
                 root: session_id.into(),
+                app_server: app_server.clone(),
             });
             async move {
                 let path = host.agent_path(caller).await.map_err(|error| {

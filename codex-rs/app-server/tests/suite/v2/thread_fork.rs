@@ -2080,7 +2080,7 @@ async fn thread_fork_freezes_active_paginated_turn_as_interrupted(
         [
             RolloutLine { item: RolloutItem::SessionMeta(_), .. },
             RolloutLine {
-                item: RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_)),
+                item: RolloutItem::EventMsg { event: EventMsg::ThreadSettingsApplied(_), .. },
                 ..
             },
             RolloutLine {
@@ -2088,7 +2088,7 @@ async fn thread_fork_freezes_active_paginated_turn_as_interrupted(
                 ..
             },
             RolloutLine {
-                item: RolloutItem::EventMsg(EventMsg::TurnAborted(aborted)),
+                item: RolloutItem::EventMsg { event: EventMsg::TurnAborted(aborted), .. },
                 ..
             },
         ] if matches!(
@@ -2449,6 +2449,8 @@ async fn thread_fork_surfaces_cloud_config_bundle_load_errors() -> Result<()> {
     let refresh_token_url = format!("{}/oauth/token", server.uri());
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        // Startup falls back to defaults after the 401 and ignores config.toml.
+        .with_args(&["-c", &format!("chatgpt_base_url={chatgpt_base_url:?}")])
         .without_auto_env()
         .with_env_overrides(&[
             ("OPENAI_API_KEY", None),

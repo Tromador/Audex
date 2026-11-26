@@ -161,6 +161,9 @@ mod restored_history_prewarm;
 #[path = "scenarios_retained_tool_outputs.rs"]
 mod retained_tool_outputs;
 
+#[path = "scenarios_encrypted_hooks.rs"]
+mod encrypted_hooks;
+
 #[path = "scenarios_exec_tools.rs"]
 mod exec_tools;
 #[path = "scenarios_incremental_tools.rs"]
@@ -256,6 +259,10 @@ mod guardian_agent_messages;
 #[path = "scenarios_guardian_handoff.rs"]
 mod guardian_handoff;
 
+#[cfg(not(target_os = "windows"))]
+#[path = "scenarios_guardian_hosted.rs"]
+mod guardian_hosted;
+
 #[path = "scenarios_guardian_heartbeat.rs"]
 mod guardian_heartbeat;
 
@@ -313,7 +320,6 @@ fn skills_extensions() -> Arc<ExtensionRegistry<Config>> {
         max_context_tokens: config.skill_max_context_tokens,
         bundled_skills_enabled: config.bundled_skills_enabled(),
         cloud_skill_enabled: config.cloud_skill_enabled,
-        shadow_selection_enabled: config.features.enabled(Feature::SkillSearch),
     });
     Arc::new(extensions.build())
 }
@@ -606,17 +612,18 @@ async fn admitted_prompt_id_reaches_responses() -> Result<()> {
 async fn additional_context_tool_outputs(tool_outputs: bool) -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
-    let test = test_codex()
-        .with_config(move |config| {
-            configure_scenario_catalog(config);
-            config.include_environment_context = false;
-            if !tool_outputs {
-                config
-                    .features
-                    .disable(Feature::UntrustedAsToolOutput)
-                    .expect("test config should allow feature update");
-            }
-        })
+    let configure = move |config: &mut Config| {
+        configure_scenario_catalog(config);
+        config.include_environment_context = false;
+        if !tool_outputs {
+            config
+                .features
+                .disable(Feature::UntrustedAsToolOutput)
+                .expect("test config should allow feature update");
+        }
+    };
+    let mut test = test_codex()
+        .with_config(configure)
         .build_with_auto_env(&server)
         .await?;
     let mock = mount_sse_sequence(
@@ -627,7 +634,7 @@ async fn additional_context_tool_outputs(tool_outputs: bool) -> Result<()> {
     )
     .await;
 
-    for (prompt, name, value) in [
+    for (index, (prompt, name, value)) in [
         (
             "Summarize the selected document.",
             Some("browser"),
@@ -648,7 +655,17 @@ async fn additional_context_tool_outputs(tool_outputs: bool) -> Result<()> {
             None,
             "The launch is on Tuesday.",
         ),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index == 2 {
+            // The unchanged submission must use the baseline restored from the rollout.
+            test = test_codex()
+                .with_config(configure)
+                .restart_with_auto_env(&server, &test)
+                .await?;
+        }
         test.codex
             .start_or_steer_turn(
                 TurnInputRequest::user_input(vec![text(prompt)]).with_additional_context(
@@ -1186,7 +1203,7 @@ async fn astra_asks_an_async_question_and_receives_the_answer_while_working() ->
                 .tools
                 .get_or_insert_with(Default::default)
                 .send_user_message_async = Some(ToolMessage {
-                parameters: Some(catalog_parameters),
+                parameters: Some(catalog_parameters.into()),
                 ..Default::default()
             });
             config.model_provider.base_url = Some(base_url);
@@ -1748,7 +1765,6 @@ async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context(
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: false,
             cloud_skill_enabled: false,
-            shadow_selection_enabled: false,
         },
     );
     let mock = mount_sse_sequence(
@@ -2238,7 +2254,6 @@ async fn skill_read_recovers_omitted_installation_and_reads_selected_environment
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: false,
             cloud_skill_enabled: true,
-            shadow_selection_enabled: false,
         },
     );
     let server = start_mock_server().await;
@@ -2387,6 +2402,7 @@ async fn multi_agent_catalog_parameters(
     let test = test_codex()
         .with_config(move |config| {
             configure_scenario_catalog(config);
+            config.multi_agent_v2.expose_spawn_agent_service_tier = true;
             config.multi_agent_v2.disable_native_tools = disable_native_tools;
             config.workspace_roots = vec![config.cwd.clone()];
         })
@@ -2936,11 +2952,11 @@ async fn code_mode_catalog_messages(ranked_search: bool) -> Result<()> {
             model.model_messages.as_mut().expect("model messages").tools
                 .get_or_insert_with(Default::default).code_mode = Some(CodeModeToolMessages {
                     exec: Some(ToolMessage {
-                        description: Some("Catalog exec instructions. Default yield: {{ default_exec_yield_time_ms }} ms.\n{{ image_helper }}".to_string()),
+                        description: Some("Catalog exec instructions. Default yield: {{ default_exec_yield_time_ms }} ms.\n{{ image_helper }}".into()),
                         ..Default::default()
                     }),
                     wait: Some(ToolMessage {
-                        description: Some("Catalog wait instructions: resume the yielded cell.".to_string()),
+                        description: Some("Catalog wait instructions: resume the yielded cell.".into()),
                         parameters: Some(json!({
                             "type": "object",
                             "properties": {
@@ -2951,10 +2967,10 @@ async fn code_mode_catalog_messages(ranked_search: bool) -> Result<()> {
                             },
                             "required": ["cell_id"],
                             "additionalProperties": false
-                        }).to_string()),
+                        }).to_string().into()),
                     }),
-                    deferred_nested_tools_guidance: Some("Catalog discovery: find nested tools by name and description in ALL_TOOLS.".to_string()),
-                    mcp_typescript_preamble: Some("type CallToolResult<T = unknown> = { content: unknown[]; structuredContent?: T; isError?: boolean };".to_string()),
+                    deferred_nested_tools_guidance: Some("Catalog discovery: find nested tools by name and description in ALL_TOOLS.".into()),
+                    mcp_typescript_preamble: Some("type CallToolResult<T = unknown> = { content: unknown[]; structuredContent?: T; isError?: boolean };".into()),
                 });
         })
         .build_with_auto_env(&server)
@@ -4500,8 +4516,8 @@ async fn astra_async_compaction_preserves_exec_catalog(change: ExecCatalogRefres
                 .code_mode
                 .get_or_insert_default();
             messages.exec.get_or_insert_default().description =
-                Some("Previous exec instructions.".to_string());
-            messages.mcp_typescript_preamble = Some("type PreviousResult = string;".to_string());
+                Some("Previous exec instructions.".into());
+            messages.mcp_typescript_preamble = Some("type PreviousResult = string;".into());
         }
     }
     mount_models_once_with_etag(&model_server, catalog.clone(), "\"exec-mode-v2\"").await;
@@ -4643,34 +4659,29 @@ async fn astra_async_compaction_preserves_exec_catalog(change: ExecCatalogRefres
                 core_test_support::responses::namespace_child_tool(item, "functions", "exec")
             })
             .expect("initial exec declaration");
-        assert_eq!(exec_declarations, vec![initial_exec]);
-        assert!(exec_positions[0] < compaction && compaction < user);
-        let is_view_image_update = |item: &&serde_json::Value| {
-            item["role"] == "developer"
-                && item["content"][0]["text"]
-                    .as_str()
-                    .is_some_and(|text| text.lines().any(|line| line == "### `view_image`"))
-        };
-        let live_update = requests[2]["input"]
+        let live_exec = requests[2]["input"]
             .as_array()
             .expect("input before adoption")
             .iter()
-            .find(is_view_image_update)
-            .expect("view_image redefinition during background compaction");
+            .rev()
+            .find_map(|item| {
+                core_test_support::responses::namespace_child_tool(item, "functions", "exec")
+            })
+            .expect("full exec refresh during background compaction");
+        let live_description = live_exec["description"].as_str().expect("exec description");
+        assert!(live_description.starts_with("Previous exec instructions."));
         assert!(
-            live_update["content"][0]["text"]
-                .as_str()
-                .expect("view_image update text")
-                .contains("detail?: \"high\" | \"original\"")
+            live_description
+                .split_once("### `view_image`\n")
+                .and_then(|(_, tool)| tool.split("\n### ").next())
+                .is_some_and(|tool| tool.contains("detail?: \"high\" | \"original\""))
         );
-        assert_eq!(
-            input
-                .iter()
-                .filter(is_view_image_update)
-                .collect::<Vec<_>>(),
-            vec![live_update]
+        assert_eq!(exec_declarations, vec![initial_exec, live_exec]);
+        assert!(
+            exec_positions[0] < compaction
+                && compaction < exec_positions[1]
+                && exec_positions[1] < user
         );
-        assert!(input[compaction + 1..].contains(live_update));
         return Ok(());
     }
     assert_eq!(exec_declarations.len(), 2);

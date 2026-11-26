@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use codex_protocol::mcp::is_node_repl_backed_tool;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemProvenance;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
@@ -31,10 +32,14 @@ use crate::SectionHistory;
 use crate::SectionInput;
 use crate::SectionScope;
 use crate::TranscriptContent;
+use crate::audio_transcripts::collect_audio_transcript;
 
 pub(crate) const TRANSCRIPT_OMISSION_NOTICE: &str = "Some conversation entries were omitted.";
 
-/// Trusted developer marker that preserves an explicit manual action approval.
+/// Content kind for the harness record of an explicit manual action approval.
+pub const MANUAL_APPROVAL_CONTENT_KIND: &str = "guardian.approved_action";
+
+/// Opening text of a rendered manual action approval.
 pub const MANUAL_APPROVAL_DEVELOPER_PREFIX: &str =
     "The user has manually approved a specific action that was previously `Rejected`.";
 
@@ -63,6 +68,8 @@ pub struct ConversationTranscriptOptions {
     /// Preserve calls in this MAv2 namespace for synchronous backend decryption.
     /// `None` keeps the existing text transcript; `functions` selects the default namespace.
     pub native_multi_agent_namespace: Option<String>,
+    /// Distinguish the pending native agent action from historical tool calls.
+    pub frame_native_agent_actions: bool,
 }
 
 impl Default for ConversationTranscriptOptions {
@@ -72,6 +79,7 @@ impl Default for ConversationTranscriptOptions {
             include_tool_outputs: true,
             include_reasoning: false,
             native_multi_agent_namespace: None,
+            frame_native_agent_actions: false,
         }
     }
 }
@@ -182,6 +190,11 @@ fn collect_transcript_for_review(
         .filter(|context| !crate::retained_instructions::has_legacy_order(context));
 
     for (item, source) in history.items_with_sources() {
+        entries.extend(
+            history
+                .audio_transcripts_for(item)
+                .filter_map(|transcript| collect_audio_transcript(transcript, &config.options)),
+        );
         let is_enclosing_call = matches!(
             item,
             ResponseItem::FunctionCall { call_id, .. }
@@ -199,10 +212,29 @@ fn collect_transcript_for_review(
             } => {
                 let text = content
                     .iter()
-                    .filter_map(|item| match item {
+                    .enumerate()
+                    .filter_map(|(index, item)| match item {
                         ContentItem::InputText { text } | ContentItem::OutputText { text, .. }
                             if !text.is_empty() =>
                         {
+                            // Check each approval part before joining developer text.
+                            if role == "developer" {
+                                let metadata =
+                                    internal_chat_message_metadata_passthrough.as_ref()?;
+                                let kinds = metadata.content_item_kinds.as_ref()?;
+                                let sources = metadata.content_item_metadata.as_ref()?;
+                                if !text.starts_with(MANUAL_APPROVAL_DEVELOPER_PREFIX)
+                                    || kinds.len() != content.len()
+                                    || sources.len() != content.len()
+                                    || kinds[index].as_str() != MANUAL_APPROVAL_CONTENT_KIND
+                                    || !matches!(
+                                        sources[index].provenance,
+                                        ContentItemProvenance::Harness { hook: false }
+                                    )
+                                {
+                                    return None;
+                                }
+                            }
                             Some(text.as_str())
                         }
                         ContentItem::InputText { .. }
@@ -226,9 +258,7 @@ fn collect_transcript_for_review(
                         ConversationTranscriptEntryKind::Assistant
                     }
                     "user" => ConversationTranscriptEntryKind::User,
-                    "developer" if text.starts_with(MANUAL_APPROVAL_DEVELOPER_PREFIX) => {
-                        ConversationTranscriptEntryKind::Developer
-                    }
+                    "developer" => ConversationTranscriptEntryKind::Developer,
                     "assistant"
                         if matches!(
                             phase,
@@ -275,7 +305,11 @@ fn collect_transcript_for_review(
             {
                 (
                     ConversationTranscriptEntryKind::ToolCall(format!("tool {name} call")),
-                    TRANSCRIPT_OMISSION_NOTICE.to_owned(),
+                    if config.options.frame_native_agent_actions {
+                        "See the current approval request.".to_owned()
+                    } else {
+                        TRANSCRIPT_OMISSION_NOTICE.to_owned()
+                    },
                 )
             }
             ResponseItem::FunctionCall {

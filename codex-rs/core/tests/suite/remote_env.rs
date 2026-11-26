@@ -15,7 +15,6 @@ use codex_api::AuthProvider;
 use codex_config::types::ApprovalsReviewer;
 use codex_core::CodexThreadSettingsOverrides;
 use codex_core::EnvironmentConfig;
-use codex_core::EnvironmentNetworkPolicy;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::TurnInputSubmission;
@@ -51,6 +50,7 @@ use codex_history::RolloutItem;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 use codex_network_proxy::NetworkProxyConfig;
+use codex_network_proxy::environment_policy_from_config;
 use codex_protocol::approvals::GuardianAssessmentStatus;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -638,6 +638,7 @@ async fn environment_permissions_follow_configuration_ownership() -> Result<()> 
                         windows_sandbox_type: test.config.permissions.windows_sandbox_type,
                         use_legacy_landlock: test.config.features.use_legacy_landlock(),
                         exec_policy: None,
+                        plugins: Default::default(),
                         mcp_policy: None,
                         network_policy: None,
                         selected_capability_roots: Vec::new(),
@@ -1706,6 +1707,7 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
             windows_sandbox_type: test.config.permissions.windows_sandbox_type,
             use_legacy_landlock: test.config.features.use_legacy_landlock(),
             exec_policy: None,
+            plugins: Default::default(),
             mcp_policy: None,
             network_policy: None,
             selected_capability_roots: vec![root("duplicate"), root("duplicate")],
@@ -1749,6 +1751,7 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
                     windows_sandbox_type: test.config.permissions.windows_sandbox_type,
                     use_legacy_landlock: test.config.features.use_legacy_landlock(),
                     exec_policy: None,
+                    plugins: Default::default(),
                     mcp_policy: None,
                     network_policy: None,
                     selected_capability_roots: vec![root("startup-root"), root("second-root")],
@@ -1776,6 +1779,7 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
                         windows_sandbox_type: test.config.permissions.windows_sandbox_type,
                         use_legacy_landlock: test.config.features.use_legacy_landlock(),
                         exec_policy: None,
+                        plugins: Default::default(),
                         mcp_policy: None,
                         network_policy: None,
                         selected_capability_roots: vec![root("first-root")],
@@ -1838,6 +1842,7 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
                             windows_sandbox_type: test.config.permissions.windows_sandbox_type,
                             use_legacy_landlock: test.config.features.use_legacy_landlock(),
                             exec_policy: None,
+                            plugins: Default::default(),
                             mcp_policy: None,
                             network_policy: None,
                             selected_capability_roots: vec![root("first-updated-root")],
@@ -1899,8 +1904,9 @@ async fn owner_network_policy_rejects_unsupported_environment_authority() -> Res
         windows_sandbox_type: test.config.permissions.windows_sandbox_type,
         use_legacy_landlock: test.config.features.use_legacy_landlock(),
         exec_policy: None,
+        plugins: Default::default(),
         mcp_policy: None,
-        network_policy: Some(EnvironmentNetworkPolicy::from_config(
+        network_policy: Some(environment_policy_from_config(
             &NetworkProxyConfig::default(),
             /*managed_allowed_domains_only*/ true,
         )),
@@ -2001,6 +2007,7 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
         windows_sandbox_type: test.config.permissions.windows_sandbox_type,
         use_legacy_landlock: test.config.features.use_legacy_landlock(),
         exec_policy: None,
+        plugins: Default::default(),
         mcp_policy: None,
         network_policy: None,
         selected_capability_roots: vec![root(id)],
@@ -2453,6 +2460,7 @@ async fn future_pending_environment_can_finish_without_retargeting_the_active_tu
         windows_sandbox_type: test.config.permissions.windows_sandbox_type,
         use_legacy_landlock: test.config.features.use_legacy_landlock(),
         exec_policy: None,
+        plugins: Default::default(),
         mcp_policy: None,
         network_policy: None,
         selected_capability_roots: vec![SelectedCapabilityRoot {
@@ -2714,7 +2722,7 @@ async fn ready_before_selection_resolves_resumed_thread_capability_root_after_wa
         .await;
 
     let runtime_paths = ExecServerRuntimeOptions::new(
-        std::env::current_exe()?,
+        core_test_support::exec_server_helper_exe()?,
         /*codex_linux_sandbox_exe*/ None,
     )?;
     let remote_config = RemoteEnvironmentConfig::new(
@@ -3161,6 +3169,7 @@ async fn deferred_executor_spawn_agent_inherits_ready_step_environments(
             windows_sandbox_type: test.config.permissions.windows_sandbox_type,
             use_legacy_landlock: test.config.features.use_legacy_landlock(),
             exec_policy: None,
+            plugins: Default::default(),
             mcp_policy: None,
             network_policy: None,
             selected_capability_roots: Vec::new(),

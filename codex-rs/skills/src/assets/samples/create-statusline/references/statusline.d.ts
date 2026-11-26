@@ -14,6 +14,23 @@ export type ApprovalPolicy = "untrusted" | "on-request" | "granular" | "never";
 
 export type ApprovalReviewer = "user" | "auto-review";
 
+export type BadgeColor = "secondary" | "info" | "success" | "warning" | "danger";
+
+export type BadgeProps = { color?: BadgeColor, };
+
+/**
+ * A box defaults to a column when direction is omitted.
+ * Horizontal boxes group adjacent strings even without justify. Use separate elements for a gap.
+ */
+export type BoxProps = DirectedBox | BoxColumnProps & { direction?: never };
+
+export type ColProps = {
+/**
+ * Blank terminal rows between flex items, as a non-negative JavaScript-safe integer.
+ * Adjacent strings form one item. Separate elements each take a slot, even when empty.
+ */
+gap: number, };
+
 export type Color = "primary" | "surface" | "accent" | "black" | "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white" | StatusColor | HexRgb;
 
 export type Config = { statusline_items: StatuslineItemId[], profile?: string, };
@@ -22,9 +39,11 @@ export type Context = { context_window_size?: number, used_tokens?: number, used
 
 export type Cost = { total_cost_usd?: number, total_credits?: number, };
 
+export type DirectedBox = { "direction": "row" } & RowProps | { "direction": "col" } & BoxColumnProps;
+
 export type DisplayMode = "standard" | "raw";
 
-export type Element = { "type": "text", props?: TextProps, children: Array<Element | null>, } | { "type": "link", props: LinkProps, children: Array<Element | null>, } | { "type": "row", props: RowProps, children: Array<Element | null>, } | { "type": "bold", children: Array<Element | null>, } | { "type": "italic", children: Array<Element | null>, } | { "type": "underline", children: Array<Element | null>, } | string;
+export type Element = { "type": "text", props?: TextProps, children: Array<Element | null>, } | { "type": "link", props: LinkProps, children: Array<Element | null>, } | { "type": "row", props: RowProps, children: Array<Element | null>, } | { "type": "spacer", children?: [], } | { "type": "badge", props?: BadgeProps, children: [string], } | { "type": "box", props: BoxProps, children: Array<Element | null>, } | { "type": "col", props: ColProps, children: Array<Element | null>, } | { "type": "bold", children: Array<Element | null>, } | { "type": "italic", children: Array<Element | null>, } | { "type": "underline", children: Array<Element | null>, } | { "type": "code", children: Array<Element | null>, } | string;
 
 export type FileSystem = { "type": "restricted" } | { "type": "unrestricted" };
 
@@ -51,7 +70,8 @@ export type RowJustify = "start" | "center" | "end" | "between";
 /**
  * A root row receives the available footer width. A row inside another row takes up to its content width.
  * An explicit `justify` groups adjacent bare strings into one item. Use separate `text` or `row`
- * elements to position fields independently. Omitting `justify` keeps gaps between authored children.
+ * elements to position fields independently. Rows with a direct spacer also group adjacent strings. Other rows with omitted
+ * `justify` keep gaps between authored children.
  */
 export type RowProps = {
 /**
@@ -72,7 +92,16 @@ export type StatusColor = "status-model" | "status-path" | "status-branch" | "st
 
 export type StatuslineState = { account: Account, app: App, config: Config, thread: Thread, };
 
-export type TextProps = { color?: Color | null, weight?: TextWeight | null, italic?: boolean | null, underline?: boolean | null, };
+export type TextProps = { color?: Color | null, weight?: TextWeight | null, italic?: boolean | null, underline?: boolean | null,
+/**
+ * Preserve spaces and tabs across styled children.
+ */
+preserveWhitespace?: boolean,
+/**
+ * Clamp this text block after wrapping. Must be a positive safe integer.
+ * If support is unknown for app.cli_version, return a literal string for the entire tree.
+ */
+maxLines?: number, };
 
 export type TextWeight = "normal" | "bold";
 
@@ -97,6 +126,12 @@ export type ItalicElement = Extract<Element, { type: "italic" }>;
 export type UnderlineElement = Extract<Element, { type: "underline" }>;
 export type LinkElement = Extract<Element, { type: "link" }>;
 export type RowElement = Extract<Element, { type: "row" }>;
+export type ColElement = Extract<Element, { type: "col" }>;
+export type BoxElement = Extract<Element, { type: "box" }>;
+export type BadgeElement = Extract<Element, { type: "badge" }>;
+export type SpacerElement = Extract<Element, { type: "spacer" }>;
+export type CodeElement = Extract<Element, { type: "code" }>;
+type BoxColumnProps = ColProps & { [K in Exclude<keyof RowProps, keyof ColProps>]?: never };
 export type RateLimitWindow = {
 /**
  * Percentage of the allowance consumed during the window. Can exceed 100.

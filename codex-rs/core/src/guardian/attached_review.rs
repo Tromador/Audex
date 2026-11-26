@@ -1,49 +1,68 @@
-//! Holds one action's prepared reviewer and its pre-capture authorization revision.
+//! Holds the attached reviewer through the verdict. New evidence can wait for the next review.
 //! Native retries take a new reservation under the original verdict deadline.
 use super::super::*;
 use super::PreparedApproval;
-use super::ReviewAuthorization;
 use crate::guardian::input_budget::PendingReviewContext;
 use crate::guardian::review_session::PreparedVerdictTurn;
 use crate::guardian::review_session::ensure_guardian_followup_reminder;
 use crate::guardian::review_session::prepare_verdict_session;
 use crate::guardian::review_session::review_turn;
-use crate::guardian_review::BoundReviewer;
+use crate::guardian_review::AttachedReviewer;
 use crate::guardian_review::PreparedAssessment;
 use crate::guardian_review::ReviewPreparationError;
 use codex_analytics::GuardianReviewSessionKind;
 use codex_guardian_context::ComposedContext;
 use codex_guardian_reviewer::GuardianReviewSessionOutcome;
 use codex_guardian_reviewer::SessionDisposition;
-use codex_protocol::protocol::GuardianAssessmentOutcome;
 use codex_protocol::user_input::UserInput;
 use tokio::sync::Mutex;
 
+pub(super) async fn root_history_version(
+    parent: &Session,
+    reviewer: &dyn AttachedReviewer,
+) -> codex_protocol::error::Result<Option<super::RootHistory>> {
+    // A hosted worker's authoritative runtime and reset version come from its host.
+    if parent.host_guardian_context().is_some() {
+        return Ok(parent
+            .guardian_root_snapshot()
+            .await?
+            .as_ref()
+            .map(super::root_history_key));
+    }
+    let Some(root) = reviewer.root_thread().await else {
+        return Ok(None);
+    };
+    Ok(root
+        .session
+        .guardian_root_history_version()
+        .await
+        .map(|(id, version)| (id, None, version)))
+}
+
 pub(super) struct AttachedApproval {
-    provider: BoundReviewer,
+    provider: Arc<dyn AttachedReviewer>,
     config: GuardianReviewSessionConfig,
-    first: Mutex<Option<(ReviewAuthorization, Box<dyn PreparedAssessment>)>>,
+    first: Mutex<Option<Box<dyn PreparedAssessment>>>,
 }
 
 impl AttachedApproval {
     pub async fn prepare(
-        provider: BoundReviewer,
-        authorization: ReviewAuthorization,
+        provider: Arc<dyn AttachedReviewer>,
         parent: &Arc<Session>,
         context: &GuardianReviewContext,
         deadline: ReviewDeadline,
         cancel: &CancellationToken,
     ) -> Result<Self, ReviewPreparationError> {
         let prepare = async {
-            let config =
-                guardian_review_session_config(parent, context, provider.retrieval.clone())
-                    .await
-                    .map_err(|_| ReviewPreparationError::ReviewerUnavailable)?;
-            let reserved = Self::reserve(&provider, &config, parent, context, cancel).await?;
+            let config = guardian_review_session_config(parent, context, provider.retrieval())
+                .await
+                .map_err(|_| ReviewPreparationError::ReviewerUnavailable)?;
+            let reserved =
+                Self::reserve(provider.as_ref(), &config, parent, context, cancel).await?;
             Ok(Self {
                 provider,
                 config,
-                first: Mutex::new(Some((authorization, reserved))),
+                first: Mutex::new(Some(reserved)),
             })
         };
         tokio::select! {
@@ -55,7 +74,7 @@ impl AttachedApproval {
     }
 
     async fn reserve(
-        provider: &BoundReviewer,
+        provider: &dyn AttachedReviewer,
         config: &GuardianReviewSessionConfig,
         parent: &Arc<Session>,
         context: &GuardianReviewContext,
@@ -67,10 +86,11 @@ impl AttachedApproval {
             config.spawn_config.clone(),
             &parent.clone_history().await,
             &config.node_repl_policy,
+            /*uses_root_evidence*/ false,
         )
         .await
         .map_err(|_| ReviewPreparationError::ReviewerUnavailable)?;
-        provider.preparation.prepare(&setup, cancel).await
+        provider.prepare(&setup, cancel).await
     }
 
     pub async fn attempt(
@@ -78,29 +98,36 @@ impl AttachedApproval {
         parent: &Arc<Session>,
         approval: &PreparedApproval,
         reasons: &ApprovalRequestReasons,
-        authorization: ReviewAuthorization,
         deadline: ReviewDeadline,
         cancel: &CancellationToken,
     ) -> (GuardianReviewOutcome, GuardianReviewAnalyticsResult) {
+        let root_error = |error: codex_protocol::error::CodexErr| match error.details() {
+            super::CodexErrorDetails::Timeout => GuardianReviewSessionOutcome::TimedOut,
+            _ => GuardianReviewSessionOutcome::Aborted,
+        };
         let mut reservation = None;
         let mut analytics = GuardianReviewAnalyticsResult::without_session();
         let mut usage_at_start = None;
         let prepare = async {
-            let first = self.first.lock().await.take();
-            let (authorization, model) = match first {
-                Some(first) => first,
-                None => (
-                    authorization,
-                    Self::reserve(
-                        &self.provider,
-                        &self.config,
-                        parent,
-                        &approval.context,
-                        cancel,
-                    )
+            if approval.root_history
+                != root_history_version(parent, self.provider.as_ref())
                     .await
-                    .map_err(|err| GuardianReviewSessionOutcome::PromptBuildFailed(err.into()))?,
-                ),
+                    .map_err(root_error)?
+            {
+                return Err(GuardianReviewSessionOutcome::Aborted);
+            }
+            let first = self.first.lock().await.take();
+            let model = match first {
+                Some(first) => first,
+                None => Self::reserve(
+                    self.provider.as_ref(),
+                    &self.config,
+                    parent,
+                    &approval.context,
+                    cancel,
+                )
+                .await
+                .map_err(|err| GuardianReviewSessionOutcome::PromptBuildFailed(err.into()))?,
             };
             let model = reservation.insert(model);
             let config = &self.config;
@@ -113,10 +140,6 @@ impl AttachedApproval {
                 kind,
                 matches!(kind, GuardianReviewSessionKind::TrunkReused),
             );
-            if let Some(stale) = authorization.invalidation(parent, Some(cancel)).await {
-                analytics.context_changed = stale.context_changed;
-                return Err(stale.outcome);
-            }
             let action = codex_guardian_reviewer::build_guardian_planned_action(
                 &approval.request,
                 reasons.retry.clone().or_else(|| reasons.approval.clone()),
@@ -132,6 +155,7 @@ impl AttachedApproval {
                 action,
                 permissions.as_ref(),
                 config.spawn_config.guardian_context_budgeting(),
+                approval.context.frame_native_agent_actions(),
             )
             .map_err(|err| GuardianReviewSessionOutcome::PromptBuildFailed(err.into()))?;
             let request = review_turn(
@@ -166,38 +190,34 @@ impl AttachedApproval {
             )
             .await
             .map_err(GuardianReviewSessionOutcome::PromptBuildFailed)?;
-            Ok((runtime, authorization, turn))
+            Ok((runtime, turn))
         };
         let prepared = run_before_review_deadline(deadline, Some(cancel), prepare).await;
         let result = async {
-            let (runtime, authorization, turn) = prepared??;
+            let (runtime, turn) = prepared??;
             // Let the runner interrupt and drain the turn before it finalizes a provisional denial.
             let (turn, _) = runtime
-                .run_sync_verdict(&approval.context, turn, deadline, Some(cancel), &mut analytics)
+                .run_sync_verdict(
+                    &approval.context,
+                    turn,
+                    deadline,
+                    Some(cancel),
+                    &mut analytics,
+                )
                 .await?;
-            let stale = tokio::select! {
+            tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return Err(GuardianReviewSessionOutcome::Aborted),
                 _ = deadline.wait() => {
-                    // An interrupted second sample may still carry the first denial.
-                    let recovered_denial = match &turn.outcome {
-                        GuardianReviewSessionOutcome::Completed(Ok(Some(response))) if !turn.turn_completed => {
-                            response.assessment().is_ok_and(|assessment| {
-                                assessment.outcome == GuardianAssessmentOutcome::Deny
-                            })
-                        }
-                        _ => false,
-                    };
-                    if !recovered_denial {
+                    if !turn.outcome.is_recovered_denial() {
                         return Err(GuardianReviewSessionOutcome::TimedOut);
                     }
-                    None
                 }
-                stale = authorization.invalidation(parent, Some(cancel)) => stale,
-            };
-            if let Some(stale) = stale {
-                analytics.context_changed |= stale.context_changed;
-                return Err(stale.outcome);
+                root = root_history_version(parent, self.provider.as_ref()) => {
+                    if approval.root_history != root.map_err(root_error)? {
+                        return Err(GuardianReviewSessionOutcome::Aborted);
+                    }
+                }
             }
             Ok((turn.outcome, turn.disposition))
         }

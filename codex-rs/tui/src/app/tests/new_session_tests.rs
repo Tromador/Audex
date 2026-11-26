@@ -17,8 +17,86 @@ use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
-async fn new_session_refreshes_account_for_the_started_provider() -> Result<()> {
-    let (mut app, _events, _ops) = make_test_app_with_channels().await;
+async fn session_lookup_distinguishes_missing_and_unreadable_rollouts() -> color_eyre::Result<()> {
+    use crate::resume_picker::SessionPickerAction;
+
+    let (mut app, mut events, _op_rx) = make_test_app_with_channels().await;
+    let config = &app.config;
+    let id = crate::tests::write_session_rollout(
+        config.codex_home.as_path(),
+        "2025-01-02T10-00-00",
+        "2025-01-02T10:00:00Z",
+        "saved session",
+        &config.model_provider_id,
+        config.cwd.as_path(),
+    )?;
+    let mut server = crate::start_embedded_app_server_for_picker(config).await?;
+    let mut lookup = async |action, id: ThreadId| {
+        crate::lookup_session_target_with_app_server(action, &mut server, config, &id.to_string())
+            .await
+    };
+    let missing = lookup(SessionPickerAction::Resume, ThreadId::new()).await?;
+    assert!(missing.is_none());
+
+    let target = lookup(SessionPickerAction::Resume, id)
+        .await?
+        .expect("saved session");
+    let path = target.path.expect("saved session has a rollout");
+    std::fs::write(&path, "")?;
+    let err = lookup(SessionPickerAction::Fork, id)
+        .await
+        .expect_err("unreadable session metadata");
+    let message = err.to_string().replace(path.to_str().unwrap(), "<rollout>");
+    insta::assert_snapshot!(message, @"thread/read failed: failed to read thread: thread-store internal error: failed to read session metadata <rollout>: thread-store internal error: failed to read session metadata <rollout>: rollout at <rollout> is empty (code -32603)");
+
+    let current = ThreadId::new();
+    app.active_thread_id = Some(current);
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let control = app
+        .handle_event(
+            &mut tui,
+            &mut server,
+            AppEvent::ResumeSessionByIdOrName(id.to_string()),
+        )
+        .await?;
+    assert!(matches!(control, AppRunControl::Continue));
+    assert_eq!(app.active_thread_id, Some(current));
+    assert!(next_history_message(&mut events).contains("thread/read failed"));
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cloud_resume_by_id_points_to_picker_for_unopened_chat() -> Result<()> {
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    let (client, mut commands, _events) =
+        codex_app_server_client::CloudClient::channel(/*capacity*/ 1);
+    let mut server = AppServerSession::new(
+        crate::backend_id::BackendId::new(),
+        codex_app_server_client::AppServerClient::Cloud(client),
+        crate::ThreadParamsMode::Cloud,
+    );
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let event = AppEvent::ResumeSessionByIdOrName(ThreadId::new().to_string());
+    let (control, ()) = tokio::join!(app.handle_event(&mut tui, &mut server, event), async {
+        let command = commands.recv().await.expect("thread/read");
+        command
+            .response
+            .send(Ok(Err(JSONRPCErrorError {
+                code: -32000,
+                message: "Open this cloud conversation before reading its transcript.".into(),
+                data: None,
+            })))
+            .unwrap();
+    });
+    assert!(matches!(control?, AppRunControl::Continue));
+    insta::assert_snapshot!(next_history_message(&mut events), @"■ Run /resume without an ID and select the Cloud chat from the picker.");
+    Ok(())
+}
+
+#[tokio::test]
+async fn new_and_resumed_sessions_use_quota_for_the_active_provider() -> Result<()> {
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
     crate::chatwidget::tests::helpers::set_fast_mode_test_catalog_for_models(
         &mut app.chat_widget,
         "gpt-5.5",
@@ -47,7 +125,7 @@ async fn new_session_refreshes_account_for_the_started_provider() -> Result<()> 
     std::fs::write(
         home.path().join("config.toml"),
         format!(
-            "model_provider = 'amazon-bedrock'\nmodel = 'gpt-5.5'\ncli_auth_credentials_store = 'file'\nchatgpt_base_url = {:?}\nmodel_catalog_json = {catalog_path:?}\nfeatures.apps = true\n\n[model_providers.alt]\nname = 'Alt'\nwire_api = 'responses'\nrequires_openai_auth = true\n",
+            "model_provider = 'amazon-bedrock'\nmodel = 'gpt-5.5'\ncli_auth_credentials_store = 'file'\nchatgpt_base_url = {:?}\nmodel_catalog_json = {catalog_path:?}\nfeatures.apps = true\n\n[model_providers.alt]\nname = 'Alt'\nwire_api = 'responses'\nrequires_openai_auth = true\n\n[model_providers.custom]\nname = 'Custom'\nrequires_openai_auth = false\n",
             backend.uri(),
         ),
     )?;
@@ -58,12 +136,25 @@ async fn new_session_refreshes_account_for_the_started_provider() -> Result<()> 
         endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
     };
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    for provider in [
-        "amazon-bedrock",
-        "openai",
-        "alt",
-        "openai",
-        "amazon-bedrock",
+    super::backend_banner_recovery_tests::mock_account_usage(/*used*/ 91)
+        .expect(/*r*/ 5)
+        .mount(&backend)
+        .await;
+    for (provider, saved_providers) in [
+        ("amazon-bedrock", &[][..]),
+        ("openai", &[]),
+        ("alt", &[]),
+        (
+            "openai",
+            &[
+                ("custom", false),
+                ("alt", true),
+                ("alt", false),
+                ("openai", true),
+            ],
+        ),
+        ("amazon-bedrock", &[]),
+        ("custom", &[("openai", true)]),
     ] {
         if app.chat_widget.config_ref().model_provider_id == "alt" {
             // The task list uses the client default, which is also the next provider.
@@ -160,9 +251,157 @@ async fn new_session_refreshes_account_for_the_started_provider() -> Result<()> 
                 chatgpt.then_some(codex_protocol::account::PlanType::Pro)
             )
         );
+        // Resume saved chats without changing the server default or its login.
+        for &(provider, shares_quota) in saved_providers {
+            if provider == "alt" && !shares_quota {
+                crate::config_update::write_config_batch(
+                    server.request_handle(),
+                    vec![crate::config_update::replace_config_value(
+                        "model_providers.alt.requires_openai_auth",
+                        false.into(),
+                    )],
+                )
+                .await?;
+            }
+            server_config.model_provider_id = provider.into();
+            let id =
+                create_history_rollout(&server_config, ThreadHistoryMode::Legacy, "Saved chat")?;
+            let resume = AppEvent::ResumeSessionByIdOrName(id.to_string());
+            Box::pin(app.handle_event(&mut tui, &mut server, resume)).await?;
+            app.drain_active_thread_events(&mut tui).await?;
+            assert_eq!(app.chat_widget.quota_provider_id(), provider);
+            assert_eq!(app.chat_widget.has_chatgpt_account(), chatgpt);
+            assert_eq!(
+                app.chat_widget.rate_limit_refresh_interval().is_some(),
+                chatgpt && shares_quota
+            );
+
+            // An explicit /usage read can complete even when automatic polling is off.
+            let origin = RateLimitRefreshOrigin::ResetPicker {
+                request_id: app.chat_widget.show_rate_limit_reset_loading_popup(),
+            };
+            app.refresh_rate_limits(&server, origin);
+            let read =
+                super::backend_banner_recovery_tests::next_rate_limits_loaded(&mut events).await?;
+            Box::pin(app.handle_event(&mut tui, &mut server, read)).await?;
+            assert_eq!(
+                app.chat_widget.usage_notice(/*width*/ 100).is_some(),
+                shares_quota
+            );
+        }
     }
     server.shutdown().await?;
     proxy.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cloud_fresh_session_refreshes_account_without_project_config() -> Result<()> {
+    use crate::app::session_lifecycle::PreparedFreshSession;
+    use crate::app::session_lifecycle::ThreadAttachPresentation;
+    use codex_app_server_client::AppServerClient;
+    use codex_app_server_client::CloudClient;
+    use codex_app_server_client::CloudOperation;
+
+    // Either a pending provider change or a different resolved provider refreshes the account.
+    for (provider, provider_may_have_changed) in [("openai", true), ("cloud-provider", false)] {
+        let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+        app.app_server_target = AppServerTarget::Cloud;
+        app.local_settings.tui.show_tooltips = false;
+        *app.model_catalog.provider_write.lock().await = provider_may_have_changed;
+        let id = ThreadId::new();
+        let mut session = test_thread_session(id, app.config.cwd.to_path_buf());
+        session.model_provider_id = provider.into();
+        let prepared = PreparedFreshSession {
+            started: AppServerStartedThread {
+                session,
+                turns: Vec::new(),
+                blocks_direct_input: false,
+                task_tools_available: false,
+            },
+            config: app.config.clone(),
+            local_settings: app.local_settings.clone(),
+        };
+        let (client, mut commands, _server_events) = CloudClient::channel(/*capacity*/ 1);
+        let mut server = AppServerSession::new(
+            crate::backend_id::BackendId::new(),
+            AppServerClient::Cloud(client),
+            crate::ThreadParamsMode::Cloud,
+        );
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        while events.try_recv().is_ok() {}
+        let mut requests = Vec::new();
+        {
+            let mut adopt = Box::pin(app.adopt_fresh_session(
+                &mut tui,
+                &mut server,
+                prepared,
+                ThreadAttachPresentation::Fresh,
+                /*initial_user_message*/ None,
+                /*new_thread_name*/ None,
+            ));
+            loop {
+                tokio::select! {
+                    () = &mut adopt => break,
+                    command = commands.recv() => {
+                        let command = command.expect("account request");
+                        let CloudOperation::Request(request) = command.operation else {
+                            panic!("expected account/read");
+                        };
+                        requests.push(request.method_name().to_owned());
+                        let response = match *request {
+                            ClientRequest::GetAccount { .. } => Ok(serde_json::json!({
+                                "account": {
+                                    "type": "chatgpt",
+                                    "email": "user@example.com",
+                                    "planType": "pro",
+                                    "workspaceName": "Cloud workspace"
+                                },
+                                "requiresOpenaiAuth": true
+                            })),
+                            _ => Err(JSONRPCErrorError {
+                                code: -32601,
+                                message: format!("{} is not supported by the cloud backend yet.", request.method_name()),
+                                data: None,
+                            }),
+                        };
+                        command.response.send(Ok(response)).unwrap();
+                    }
+                }
+            }
+        }
+        assert_eq!(requests, ["account/read"]);
+        assert_eq!(app.active_thread_id, Some(id));
+        assert_eq!(
+            (
+                app.chat_widget.has_chatgpt_account(),
+                app.chat_widget.has_codex_backend_auth(),
+                app.chat_widget.requires_openai_auth,
+                app.chat_widget.current_plan_type(),
+            ),
+            (
+                true,
+                true,
+                true,
+                Some(codex_protocol::account::PlanType::Pro)
+            )
+        );
+        let history = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::InsertHistoryCell(cell) => {
+                    Some(lines_to_single_string(&cell.display_lines(/*width*/ 1000)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(normalize_snapshot_paths(history).trim(), @"
+            >_ OpenAI Codex (v0.0.0)
+                 /tmp/project
+            ");
+        }
+    }
     Ok(())
 }
 
@@ -1089,7 +1328,7 @@ async fn replacement_failure_keeps_current_task_and_restores_input() -> Result<(
         .await;
         assert_eq!(app.chat_widget.thread_id(), Some(current));
         assert_eq!(app.active_thread_id, Some(current));
-        assert!(app.active_thread_rx.is_some());
+        assert!(app.active_thread_rx().is_some());
         assert_eq!(app.config, original_config);
         assert_eq!(
             app.chat_widget.composer_text_with_pending(),
@@ -1152,7 +1391,7 @@ async fn replacement_failure_keeps_current_task_and_restores_input() -> Result<(
             assert_eq!(backends.displayed_owner(), source_id);
             assert_eq!(app.config, original_config);
             assert_eq!(app.active_thread_id, Some(current));
-            assert!(app.active_thread_rx.is_some());
+            assert!(app.active_thread_rx().is_some());
             assert_eq!(app.chat_widget.thread_id(), Some(current));
             assert_eq!(
                 app.chat_widget.composer_text_with_pending(),
@@ -1246,8 +1485,8 @@ async fn backend_handoff_errors_are_snapshotted() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resumed_backend_handoff_detaches_through_the_source_connection() -> Result<()> {
-    let mut app = make_test_app().await;
-    let (source, source_requests, source_proxy) = start_recording_app_server(
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    let (mut source, source_requests, source_proxy) = start_recording_app_server(
         &app.config,
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
@@ -1276,18 +1515,57 @@ async fn resumed_backend_handoff_detaches_through_the_source_connection() -> Res
         Vec::new(),
     )
     .await?;
-    let target = crate::resume_picker::SessionTarget {
-        backend_id: destination_id,
-        path: None,
-        thread_id: resumed_id,
-        cwd: Some(resumed.session.cwd.to_path_buf()),
-        history_mode: None,
+    let task = destination
+        .thread_read(resumed_id, /*include_turns*/ false)
+        .await?;
+    app.backend_registry
+        .register_started(destination_id, &resumed)?;
+    app.agents_overview
+        .threads
+        .insert(resumed_id, Some(task.clone()));
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    tui.set_owned_screen(/*owned*/ true)?;
+    app.local_settings.transcript_mode = tui.transcript_mode();
+    app.config.features.enable(Feature::TuiWorkspace)?;
+    app.open_agents_overview(&source);
+    assert!(app.workspace_center_owns_input());
+    let view = app.agents_overview_view(vec![task], Some(resumed_id));
+    app.agents_overview.workspace.replace_view(view);
+    app.startup_protected_input_boundary = false;
+    app.local_settings.tui.animations = false;
+    boxed_future!(app.handle_workspace_key(&mut tui, &mut source, KeyCode::Enter.into())).await;
+    let target = loop {
+        match events.try_recv()? {
+            AppEvent::SelectAgentsOverviewThread { thread_id } => {
+                app.select_agents_overview_thread(&mut tui, &mut source, thread_id)
+                    .await?;
+            }
+            AppEvent::ResumeBackendSession(target) => break target,
+            _ => {}
+        }
     };
+    let frame = buffer_text(tui.terminal.previous_buffer());
+    let footer = frame
+        .lines()
+        .last()
+        .unwrap()
+        .split('│')
+        .next()
+        .unwrap()
+        .trim();
+    insta::assert_snapshot!(footer, @"◌ Opening task…");
+    let approval = exec_approval_request(resumed_id, "turn", "call", /*approval_id*/ None);
+    let buffered = crate::app::app_server_requests::BufferedServerRequest::new(
+        approval,
+        &destination.request_handle(),
+    );
+    app.agents_overview
+        .dispatched_requests
+        .insert(resumed_id, vec![buffered]);
     let mut backends = BackendSessions::from_initial(source, vec![destination]);
     backends
         .settings
         .insert(destination_id, app.backend_settings());
-    let mut tui = crate::tui::test_support::make_test_tui()?;
     let mut stale_input = app.chat_widget.capture_thread_input_state().unwrap();
     stale_input.provider_error = Some(
         codex_app_server_protocol::ModelProviderError::ModelProviderNotConfigured {
@@ -1304,6 +1582,24 @@ async fn resumed_backend_handoff_detaches_through_the_source_connection() -> Res
     app.resume_backend_session(&mut tui, &mut backends, target)
         .await?;
 
+    assert!(app.finish_docked_task_opening(&tui, resumed_id));
+    assert!(app.startup_protected_input_boundary);
+    while let Ok(event) = app.active_thread_rx_mut().unwrap().try_recv() {
+        app.handle_thread_event_now(event);
+    }
+    assert!(app.chat_widget.has_active_modal());
+    // The modal input drain refreshes the guard before input routing resumes.
+    app.chat_widget
+        .protect_modal_from_held_activation_key(Instant::now());
+    assert!(
+        app.route_key_chord_event(&mut tui, KeyCode::Enter.into())
+            .is_none()
+    );
+    let held = KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat);
+    assert!(app.route_key_chord_event(&mut tui, held).is_none());
+    assert!(app.chat_widget.has_active_modal());
+    assert!(app.agents_overview.workspace.is_open());
+    assert!(!app.workspace_center_owns_input());
     assert_eq!(backends.displayed_owner(), destination_id);
     assert_eq!(app.chat_widget.thread_id(), Some(resumed_id));
     assert!(!app.chat_widget.has_provider_error());

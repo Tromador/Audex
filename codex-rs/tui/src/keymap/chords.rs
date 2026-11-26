@@ -71,7 +71,7 @@ const COMPOSER_SUBMIT: u64 = 1 << 33;
 const TRANSCRIPT_BROWSING: u64 = 1 << 14;
 
 impl KeymapContextSet {
-    /// Retain submission while an argument suggestion is open.
+    /// Retain submission without enabling other composer shortcuts in a popup.
     pub(crate) const fn with_composer_submit(self) -> Self {
         Self(self.0 | COMPOSER_SUBMIT)
     }
@@ -249,6 +249,7 @@ impl KeymapContextSet {
         }
         if action.context == KeymapContext::Global {
             match action.action {
+                "open_agents" if self.0 & MAIN_COMPOSER_FOCUS != 0 => return true,
                 "change_host" => return self.0 & BACKEND_CYCLING != 0,
                 "choose_cloud_environment" => return self.0 & CLOUD_ENVIRONMENT_SELECTION != 0,
                 _ => {}
@@ -527,6 +528,9 @@ Reduce `tui.keymap.global.leader` alternatives or `leader ...` bindings."
                         && binding.action.action == "close_transcript"),
                     !(contexts.0 & TRANSCRIPT_ACTIONS != 0
                         && binding.action.context == KeymapContext::Pager),
+                    contexts.0 & MAIN_COMPOSER_FOCUS != 0
+                        && contexts.contains(KeymapContext::Agents)
+                        && binding.action.context != KeymapContext::Agents,
                     contexts.is_warnings() && binding.action.context != KeymapContext::List,
                     contexts.is_warnings() && binding.action.context == KeymapContext::Global,
                 )

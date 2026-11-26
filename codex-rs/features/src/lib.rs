@@ -41,6 +41,7 @@ pub use feature_configs::NonPrefixedMcpToolNamesConfigToml;
 pub use feature_configs::RemoteMessageBoardConfigToml;
 use feature_configs::RemovedAppsMcpPathOverrideConfigToml;
 pub use feature_configs::RolloutBudgetConfigToml;
+pub use feature_configs::SendMessageToUserAsyncConfigToml;
 pub use feature_configs::SleepToolConfigToml;
 pub use feature_configs::SleepToolMode;
 pub use feature_configs::TokenBudgetConfigToml;
@@ -112,6 +113,8 @@ pub enum Feature {
     DaybreakProgramPropagation,
     /// Restrict CLI resume of attributed local threads to their creator.
     CliResumeAccountCheck,
+    /// Fetch Statsig decisions for this harness.
+    StatsigGates,
     /// Removed no-op; use `tui.fullscreen_transcript` instead.
     TranscriptV2,
     // Stable.
@@ -155,6 +158,8 @@ pub enum Feature {
     CodeMode,
     /// Expose ranked tool discovery inside JavaScript code mode.
     CodeModeToolSearch,
+    /// Omit duplicate MCP text fallbacks when Code Mode prints the original result.
+    CodeModeMcpResultDedup,
     /// Removed compatibility flag for the configurable code-mode exec yield timeout.
     CodeModeBufferedExec,
     /// Run JavaScript code mode in the standalone host process.
@@ -413,6 +418,8 @@ pub enum Feature {
     ExternalMigration,
     /// Enable extension-backed image generation.
     ImageGeneration,
+    /// Load the image generation tool definition on demand in code mode.
+    DeferImageGeneration,
     /// Allow the image-generation tool to request a backend-assembled GIF.
     ImageGenerationAnimation,
     /// Omit inline image and audio content from app-server item notifications.
@@ -437,7 +444,7 @@ pub enum Feature {
     SkillMcpDependencyInstall,
     /// Omit descriptions from the model-visible available-skills catalog.
     OmitSkillDescriptions,
-    /// Run cheap skill-search methods in shadow mode and emit experiment metrics.
+    /// Removed compatibility flag for shadow skill ranking.
     SkillSearch,
     /// Append skill additions and edits within a cumulative context budget.
     SkillCatalogDeltas,
@@ -466,6 +473,8 @@ pub enum Feature {
     GuardianRootHandoffContext,
     /// Review state-changing MAv2 calls and preserve native calls in Guardian history.
     GuardianNativeMultiAgentHistory,
+    /// Frame the current native agent call as a distinct Guardian approval request.
+    GuardianNativeActionFraming,
     /// Include the verified enclosing invocation in nested Guardian approvals.
     GuardianNestedApprovalContext,
     /// Include completed node_repl or cua_repl Code Mode responses in Guardian reviews.
@@ -484,6 +493,8 @@ pub enum Feature {
     GuardianV2DecisionsComparison,
     /// Enable Guardian V3 integrations.
     GuardianV3,
+    /// Observe Guardian V3 alongside the existing automatic reviewer.
+    GuardianV3Shadow,
     /// Removed compatibility flag for the unused Guardian extension prototype.
     GuardianExt,
     /// Enable persisted thread goals and automatic goal continuation.
@@ -634,6 +645,9 @@ pub struct LegacyFeatureUsage {
 pub struct Features {
     enabled: BTreeSet<Feature>,
     legacy_usages: BTreeSet<LegacyFeatureUsage>,
+    /// Spawned agents require their own opt-in, independent of the root feature flag.
+    pub subagent_async_messages_enabled: bool,
+    pub async_messages_in_code_mode: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -671,12 +685,16 @@ impl Features {
         }
         Self {
             enabled: set,
-            legacy_usages: BTreeSet::new(),
+            ..Self::default()
         }
     }
 
     pub fn enabled(&self, f: Feature) -> bool {
         self.enabled.contains(&f)
+    }
+
+    pub fn defer_image_generation_enabled(&self) -> bool {
+        self.enabled(Feature::DeferImageGeneration)
     }
 
     /// Whether to advertise GIF output in the image-generation tool.
@@ -816,7 +834,7 @@ impl Features {
                 "personality" | "plugin_discovery_prefetch" | "plugin_hooks" => {
                     continue;
                 }
-                "skill_env_var_dependency_prompt" => {
+                "skill_env_var_dependency_prompt" | "skill_search" => {
                     continue;
                 }
                 "terminal_resize_reflow" => {
@@ -984,6 +1002,14 @@ pub fn canonical_feature_for_key(key: &str) -> Option<Feature> {
         .map(|spec| spec.id)
 }
 
+/// Field that carries a feature's boolean shorthand when it is written as a table.
+pub fn feature_toggle_field(key: &str) -> &'static str {
+    match key {
+        "send_message_to_user_async" => "root_agent",
+        _ => "enabled",
+    }
+}
+
 /// Returns `true` if the provided string matches a known `[features]` key.
 pub fn is_known_feature_key(key: &str) -> bool {
     key == "tool_registry" || feature_for_key(key).is_some()
@@ -1021,6 +1047,8 @@ pub struct FeaturesToml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_time_reminder: Option<FeatureToml<CurrentTimeReminderConfigToml>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_message_to_user_async: Option<FeatureToml<SendMessageToUserAsyncConfigToml>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep_tool: Option<FeatureToml<SleepToolConfigToml>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_agent_instances: Option<FeatureToml<RuntimeAgentInstancesConfigToml>>,
@@ -1035,6 +1063,14 @@ pub struct FeaturesToml {
 
 impl Features {
     fn apply_toml(&mut self, features: &FeaturesToml) {
+        if let Some(FeatureToml::Config(config)) = &features.send_message_to_user_async {
+            if let Some(subagents) = config.subagents {
+                self.subagent_async_messages_enabled = subagents;
+            }
+            if let Some(direct_only) = config.direct_only {
+                self.async_messages_in_code_mode = !direct_only;
+            }
+        }
         let entries = features.entries();
         self.apply_map(&entries);
     }
@@ -1100,6 +1136,13 @@ impl FeaturesToml {
         }
         if let Some(enabled) = self.network_proxy.as_ref().and_then(FeatureToml::enabled) {
             entries.insert(Feature::NetworkProxy.key().to_string(), enabled);
+        }
+        if let Some(enabled) = self
+            .send_message_to_user_async
+            .as_ref()
+            .and_then(FeatureToml::enabled)
+        {
+            entries.insert(Feature::SendMessageToUserAsync.key().to_string(), enabled);
         }
         if let Some(enabled) = self.sleep_tool.as_ref().and_then(FeatureToml::enabled) {
             entries.insert(Feature::SleepTool.key().to_string(), enabled);
@@ -1171,6 +1214,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::CliResumeAccountCheck,
         key: "cli_resume_account_check",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::StatsigGates,
+        key: "statsig_gates",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1366,6 +1415,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::CodeModeToolSearch,
         key: "code_mode_tool_search",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::CodeModeMcpResultDedup,
+        key: "code_mode_mcp_result_dedup",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1830,8 +1885,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::McpSharedReplCwd,
         key: "mcp_shared_repl_cwd",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::McpLazyStdioStartup,
@@ -2098,6 +2153,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::DeferImageGeneration,
+        key: "defer_image_generation",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::ImageGenerationAnimation,
         key: "image_generation_animation",
         stage: Stage::UnderDevelopment,
@@ -2172,8 +2233,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::SkillSearch,
         key: "skill_search",
-        stage: Stage::Stable,
-        default_enabled: true,
+        stage: Stage::Removed,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::SkillCatalogDeltas,
@@ -2266,6 +2327,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::GuardianNativeActionFraming,
+        key: "guardian_native_action_framing",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::GuardianNestedApprovalContext,
         key: "guardian_nested_approval_context",
         stage: Stage::UnderDevelopment,
@@ -2316,6 +2383,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::GuardianV3,
         key: "guardianv3",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::GuardianV3Shadow,
+        key: "guardianv3_shadow",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -2571,7 +2644,7 @@ pub fn unstable_features_warning_event(
             let is_enabled = value.as_bool() == Some(true)
                 || value
                     .as_table()
-                    .and_then(|table| table.get("enabled"))
+                    .and_then(|table| table.get(feature_toggle_field(key)))
                     .and_then(toml::Value::as_bool)
                     == Some(true);
             if !is_enabled {

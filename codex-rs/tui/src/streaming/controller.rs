@@ -148,16 +148,19 @@ impl StreamCore {
     /// immediately disappear on the next delta. Unterminated prose gets a separate,
     /// bounded preview that never advances the stable boundary.
     fn push_delta(&mut self, delta: &str) -> bool {
-        if !delta.is_empty() {
-            self.state.has_seen_delta = true;
-        }
         self.state.collector.push_delta(delta);
+        // Keep leading whitespace for Markdown indentation, but don't display it on its own.
+        let first_text = !self.state.has_text;
+        if first_text && delta.trim().is_empty() {
+            return false;
+        }
+        self.state.has_text = true;
 
         if delta.contains('\n') {
             self.preview = ProsePreview::default();
         }
         let mut enqueued = false;
-        if delta.contains('\n')
+        if (first_text || delta.contains('\n'))
             && let Some(range) = self.state.collector.commit_complete_source()
         {
             let source = self.state.collector.committed_source();
@@ -179,6 +182,9 @@ impl StreamCore {
     }
 
     fn refresh_preview(&mut self) -> bool {
+        if !self.state.has_text {
+            return false;
+        }
         let pending = self.state.collector.pending_source();
         let prose_preview = self.holdback_scanner.allows_prose_preview();
         let math = self.render_mode == HistoryRenderMode::Rich
@@ -589,7 +595,7 @@ impl StreamCore {
 /// Wraps [`StreamCore`] and adds `AgentMessageCell` emission styling.
 pub(crate) struct StreamController {
     core: StreamCore,
-    header_emitted: bool,
+    emitted_cells: usize,
 }
 
 impl StreamController {
@@ -622,8 +628,12 @@ impl StreamController {
     ) -> Self {
         Self {
             core: StreamCore::new(width, cwd, render_mode, inline_visualization_context),
-            header_emitted: false,
+            emitted_cells: 0,
         }
+    }
+
+    pub(crate) fn has_text(&self) -> bool {
+        self.core.state.has_text
     }
 
     pub(crate) fn push(&mut self, delta: &str) -> bool {
@@ -634,7 +644,7 @@ impl StreamController {
     /// markdown source for consolidation.
     pub(crate) fn finalize(&mut self) -> (Option<Box<dyn HistoryCell>>, Option<String>) {
         let (remaining, source) = self.core.finalize_remaining();
-        if source.is_empty() {
+        if !self.has_text() {
             self.core.reset();
             return (None, None);
         }
@@ -676,12 +686,17 @@ impl StreamController {
 
     #[inline]
     pub(crate) fn tail_starts_stream(&self) -> bool {
-        !self.header_emitted && self.core.enqueued_stable_len == 0
+        self.emitted_cells == 0 && self.core.enqueued_stable_len == 0
     }
 
     #[inline]
     pub(crate) fn has_live_tail(&self) -> bool {
         self.core.has_tail()
+    }
+
+    /// Includes the final fragment, if any, after `finalize`.
+    pub(crate) fn emitted_cells(&self) -> usize {
+        self.emitted_cells
     }
 
     /// Include the unterminated line when handing an in-flight answer to another view.
@@ -729,12 +744,9 @@ impl StreamController {
         if lines.is_empty() {
             return None;
         }
+        self.emitted_cells += 1;
         Some(Box::new(
-            history_cell::AgentMessageCell::new_hyperlink_lines(lines, {
-                let header_emitted = self.header_emitted;
-                self.header_emitted = true;
-                !header_emitted
-            }),
+            history_cell::AgentMessageCell::new_hyperlink_lines(lines, self.emitted_cells == 1),
         ))
     }
 }
@@ -2054,14 +2066,15 @@ mod tests {
 
     #[test]
     fn table_holdback_state_treats_indented_fence_text_as_plain_content() {
-        let source = "    ```sh\n| Key | Description |\n| --- | --- |\n";
-        assert!(
-            matches!(
-                table_holdback_state(source),
-                TableHoldbackState::Confirmed { .. }
-            ),
-            "indented fence-like text should not open a fence and should not block table detection",
-        );
+        for prefix in ["    ```sh\n", "\t```sh\n"] {
+            let source = format!("{prefix}| Key | Description |\n| --- | --- |\n");
+            assert_eq!(
+                table_holdback_state(&source),
+                TableHoldbackState::Confirmed {
+                    table_start: prefix.len()
+                }
+            );
+        }
     }
 
     #[test]

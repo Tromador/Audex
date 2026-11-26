@@ -1289,7 +1289,7 @@ async fn executor_stop_hook_rejects_mismatched_environment() -> Result<()> {
             let executor_url = format!("ws://{executor_address}");
             drop(listener);
             let runtime_paths = ExecServerRuntimeOptions::new(
-                std::env::current_exe()?,
+                core_test_support::exec_server_helper_exe()?,
                 /*codex_linux_sandbox_exe*/ None,
             )?;
             let http_client_factory = fixture.test.config.http_client_factory();
@@ -1854,6 +1854,7 @@ impl ExecutorHookFixture {
                     windows_sandbox_type: self.test.config.permissions.windows_sandbox_type,
                     use_legacy_landlock: self.test.config.features.use_legacy_landlock(),
                     exec_policy: None,
+                    plugins: Default::default(),
                     mcp_policy: None,
                     network_policy: None,
                     selected_capability_roots: self

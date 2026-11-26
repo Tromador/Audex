@@ -2,13 +2,13 @@
 source: tui/src/app/sidebar_agent_status_tests.rs
 expression: rows
 ---
-                                     +
+                                  +  ›
  Open in sidebar
  › + New side chat
      Available after first message
  Subagents  2
-   ○ Source navigation reviewer with…
-     Idle
+   ● Source navigation reviewer with…
+     Starting
    ○ Builder
      Completed
  esc back · ↑/↓ move · ⌃x - hide pane

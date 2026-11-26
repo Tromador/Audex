@@ -29,6 +29,7 @@ use codex_hooks::hook_execution_mode_label;
 use codex_hooks::hook_handler_type_label;
 use codex_otel::HOOK_RUN_DURATION_METRIC;
 use codex_otel::HOOK_RUN_METRIC;
+use codex_protocol::SessionId;
 use codex_protocol::items::FunctionCallOutputItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
@@ -58,6 +59,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Map;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
 use crate::context::ContextualUserFragment;
@@ -133,8 +135,9 @@ impl From<UserPromptSubmitOutcome> for ContextInjectingHookOutcome {
 pub(crate) async fn run_pending_session_start_hooks(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
+    cancellation_token: &CancellationToken,
 ) -> bool {
-    while let Some(session_start_source) = sess.take_pending_session_start_source().await {
+    while let Some(session_start_source) = sess.pending_session_start_source().await {
         // Spawned subagents can start fresh or fork their parent's history, so both
         // sources dispatch SubagentStart. Internal/system subagents skip start hooks.
         let target = match &turn_context.session_source {
@@ -152,7 +155,10 @@ pub(crate) async fn run_pending_session_start_hooks(
                     agent_type: context.agent_type,
                 }
             }
-            SessionSource::SubAgent(_) => return false,
+            SessionSource::SubAgent(_) => {
+                sess.take_pending_session_start_source().await;
+                return false;
+            }
             _ => StartHookTarget::SessionStart {
                 source: session_start_source,
             },
@@ -172,7 +178,16 @@ pub(crate) async fn run_pending_session_start_hooks(
             &turn_context.initial_environments.refresh_readiness(),
         );
         let preview_runs = hooks.preview_session_start(&request);
-        if run_context_injecting_hook(
+        if cancellation_token.is_cancelled()
+            && preview_runs
+                .iter()
+                .any(|run| run.execution_mode == HookExecutionMode::Sync)
+        {
+            return true;
+        }
+        // Only the running turn consumes sources. Keep this one queued until
+        // its outcome is handled so forced teardown cannot skip a blocking hook.
+        let should_stop = run_context_injecting_hook(
             sess,
             turn_context,
             preview_runs,
@@ -180,8 +195,9 @@ pub(crate) async fn run_pending_session_start_hooks(
         )
         .await
         .record_additional_contexts(sess, turn_context)
-        .await
-        {
+        .await;
+        sess.take_pending_session_start_source().await;
+        if should_stop {
             return true;
         }
     }
@@ -456,6 +472,11 @@ pub(crate) async fn run_turn_stop_hooks(
 
 #[instrument(level = "trace", skip_all)]
 pub(crate) async fn run_session_end_hooks(sess: &Arc<Session>) {
+    // A hosted child can share the root's session ID without a SubAgent session source.
+    if sess.session_id() != SessionId::from(sess.thread_id()) {
+        return;
+    }
+
     // Building a turn can read plugins and skills from a remote executor. Check
     // the captured hook declarations before spending any of the shutdown deadline.
     let environments = sess.services.turn_environments.snapshot_now();
@@ -702,7 +723,6 @@ pub(crate) async fn run_legacy_after_agent_hook(
         misalignment: None,
         message,
         codex_error_info: Some(CodexErrorInfo::Other),
-        rejected_audio_file_ids: Vec::new(),
     });
     sess.send_event(turn_context, event).await;
     true
@@ -833,7 +853,7 @@ pub(crate) async fn drain_async_hook_results(
             .iter()
             .filter(|entry| entry.kind == HookOutputEntryKind::Context)
             .map(|entry| codex_hooks::HookContext {
-                text: entry.text.clone(),
+                payload: codex_hooks::HookContextPayload::Text(entry.text.clone()),
                 metadata: codex_protocol::models::ContentItemMetadata::command_hook(),
             })
             .collect::<Vec<_>>();
@@ -914,8 +934,34 @@ fn additional_context_messages(
 ) -> Vec<ResponseItem> {
     additional_contexts
         .into_iter()
-        .map(HookAdditionalContext::new)
-        .map(ContextualUserFragment::into)
+        .map(|context| match context.payload {
+            codex_hooks::HookContextPayload::Text(text) => {
+                ContextualUserFragment::into(HookAdditionalContext::new(text, context.metadata))
+            }
+            codex_hooks::HookContextPayload::EncryptedToolOutput {
+                name,
+                namespace,
+                encrypted_content,
+            } => ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: None,
+                name: Some(name),
+                namespace,
+                output: codex_protocol::models::FunctionCallOutputPayload::from_content_items(
+                    vec![
+                        codex_protocol::models::FunctionCallOutputContentItem::EncryptedContent {
+                            encrypted_content,
+                        },
+                    ],
+                ),
+                internal_chat_message_metadata_passthrough: Some(
+                    codex_protocol::models::InternalChatMessageMetadataPassthrough {
+                        content_item_metadata: Some(vec![context.metadata]),
+                        ..Default::default()
+                    },
+                ),
+            },
+        })
         .collect()
 }
 

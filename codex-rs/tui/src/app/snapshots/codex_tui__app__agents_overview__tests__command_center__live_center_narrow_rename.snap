@@ -9,6 +9,7 @@ expression: rendered
       Tasks
   /tmp/project  1
   › ○ Retained task
+      Ready
 
 
 
@@ -18,5 +19,4 @@ expression: rendered
 
 
 
-
-  esc back  enter rename
+  esc back · enter rename

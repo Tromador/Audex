@@ -1,0 +1,16 @@
+---
+source: tui/src/app/sidebar_open_in_codex_tests.rs
+expression: sidebar.trim_end()
+---
+ PLAN.md    ×                     +  ›
+ Snapshot
+ Use the sidebar.                     ↑
+
+
+
+
+
+
+
+
+ ⌃x s focus sidebar

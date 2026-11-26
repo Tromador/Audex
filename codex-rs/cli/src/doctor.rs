@@ -649,6 +649,7 @@ async fn load_config(
         &root_config_overrides,
         LoaderOverrides::default(),
         overrides,
+        /*resolution*/ None,
     )
     .await?
     .build()
@@ -1909,6 +1910,7 @@ fn terminal_name(info: &TerminalInfo) -> &'static str {
         TerminalName::AppleTerminal => "Apple Terminal",
         TerminalName::Ghostty => "Ghostty",
         TerminalName::Rex => "Rex",
+        TerminalName::Orca => "Orca",
         TerminalName::Iterm2 => "iTerm2",
         TerminalName::WarpTerminal => "Warp",
         TerminalName::VsCode => "VS Code",

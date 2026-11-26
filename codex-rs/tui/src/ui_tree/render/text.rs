@@ -6,6 +6,7 @@ use super::RenderTheme;
 use super::Visit;
 use super::sanitize_leaf;
 use crate::line_truncation::span_width;
+use crate::ui_tree::BadgeColor;
 use crate::ui_tree::theme::Color;
 use ratatui::buffer::CellWidth;
 use ratatui::style::Style;
@@ -25,6 +26,10 @@ pub(super) struct Paint {
     pub(super) foreground: Option<Color>,
     pub(super) background: Option<Color>,
     pub(super) href: Option<Arc<String>>,
+    pub(super) badge: Option<BadgeColor>,
+    pub(super) inline_code: bool,
+    pub(super) preserve_whitespace: bool,
+    pub(super) break_long_words: bool,
 }
 
 impl Paint {
@@ -32,12 +37,22 @@ impl Paint {
         let mut style = self.modifiers;
         style.fg = self.foreground.map(|c| theme.resolve(c));
         style.bg = self.background.map(|c| theme.resolve(c));
+        if self.inline_code {
+            style = theme.inline_code_style(style);
+        }
+        if let Some(color) = self.badge {
+            style = style.patch(theme.badge_style(color, style.bg));
+            if self.href.is_some() {
+                style = style.add_modifier(ratatui::style::Modifier::UNDERLINED);
+            }
+        }
         style
     }
 }
 
 #[derive(Debug, PartialEq)]
 struct Run {
+    break_before: bool,
     text: RunText,
     paint: Paint,
 }
@@ -86,8 +101,17 @@ impl PartialEq for RunText {
 #[derive(Debug, Default, PartialEq)]
 pub(super) struct Chunk {
     runs: Vec<Run>,
-    pub(super) width_cells: usize,
+    width_cells: usize,
     pub(super) trailing_space: Option<Paint>,
+    break_before: BreakBefore,
+}
+
+#[derive(Debug, Default, PartialEq)]
+enum BreakBefore {
+    #[default]
+    Preferred,
+    AfterHyphenBeforeDigit,
+    Emergency,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -98,35 +122,107 @@ pub(super) struct PreparedText {
 
 #[derive(Default)]
 pub(super) struct InlineText {
+    after_span: bool,
     text: PreparedText,
+    completed: Vec<Chunk>,
     line: Vec<Run>,
     space: Option<Paint>,
 }
 
 impl InlineText {
+    /// Returning to normal prose allows a break before a sibling’s first literal space.
+    pub(super) fn end_span(&mut self) {
+        self.after_span = true;
+    }
+
+    /// Whitespace-only text nodes join an existing anonymous flex item but cannot start one.
+    pub(super) fn push_flex_leaf(&mut self, raw: String, paint: Paint) {
+        let raw = sanitize_leaf(raw);
+        if self.line.is_empty() && self.text.lines.is_empty() && raw.trim_ascii().is_empty() {
+            return;
+        }
+        self.push_sanitized(raw, paint);
+    }
+
     pub(super) fn push_leaf(&mut self, raw: String, paint: Paint) {
-        let text = RunText::new(sanitize_leaf(raw));
+        self.push_sanitized(sanitize_leaf(raw), paint);
+    }
+
+    pub(super) fn push_badge(&mut self, label: String, color: BadgeColor, mut paint: Paint) {
+        let label = if label.contains('\r') {
+            label.replace('\r', " ")
+        } else {
+            label
+        };
+        let label = sanitize_leaf(label);
+        let label = label.split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+        let text = RunText::new(format!(" {label} "));
+        paint.badge = Some(color);
+        // An inline-flex badge forms one unbreakable box with a break on either side.
+        self.completed
+            .extend(chunks(std::mem::take(&mut self.line)));
+        if let Some(last) = self.completed.last_mut() {
+            last.trailing_space = self.space.take();
+        }
+        self.completed.push(Chunk {
+            width_cells: span_width(&Span::raw(&*text)),
+            runs: vec![Run {
+                break_before: false,
+                text,
+                paint,
+            }],
+            ..Chunk::default()
+        });
+    }
+
+    fn finish_line(&mut self) {
+        let mut line = std::mem::take(&mut self.completed);
+        let rest = chunks(std::mem::take(&mut self.line));
+        if line.is_empty() {
+            line = rest;
+        } else {
+            line.extend(rest);
+        }
+        self.text.lines.push(line);
+    }
+
+    fn push_sanitized(&mut self, raw: String, paint: Paint) {
+        let after_span = !raw.is_empty() && std::mem::take(&mut self.after_span);
+        let break_before = after_span && paint.preserve_whitespace && raw.starts_with([' ', '\t']);
+        let separators: &[char] = if paint.preserve_whitespace {
+            &['\n']
+        } else {
+            &[' ', '\t', '\n']
+        };
+        let text = RunText::new(raw);
         let mut start = 0;
         for (end, ch) in text
-            .match_indices([' ', '\t', '\n'])
+            .match_indices(separators)
             .chain(std::iter::once((text.len(), "")))
         {
             if start < end {
+                if self.line.is_empty()
+                    && let Some(last) = self.completed.last_mut()
+                {
+                    last.trailing_space = self.space.take();
+                }
                 if let Some(paint) = self.space.take() {
                     self.line.push(Run {
+                        break_before: false,
                         text: RunText::Space,
                         paint,
                     });
                 }
                 self.line.push(Run {
+                    break_before: break_before && start == 0,
                     text: text.slice(start..end),
                     paint: paint.clone(),
                 });
             }
             if ch == "\n" {
-                self.text.lines.push(chunks(std::mem::take(&mut self.line)));
+                self.finish_line();
                 self.space = None;
-            } else if !ch.is_empty() && !self.line.is_empty() {
+            } else if !ch.is_empty() && (!self.line.is_empty() || !self.completed.is_empty()) {
                 self.space.get_or_insert_with(|| paint.clone());
             }
             start = end + ch.len();
@@ -135,8 +231,8 @@ impl InlineText {
 
     pub(super) fn finish(mut self) -> PreparedText {
         self.text.has_authored_break = !self.text.lines.is_empty();
-        if !self.line.is_empty() {
-            self.text.lines.push(chunks(self.line));
+        if !self.line.is_empty() || !self.completed.is_empty() {
+            self.finish_line();
         }
         self.text
     }
@@ -178,6 +274,7 @@ fn join_graphemes(runs: Vec<Run>) -> Vec<Run> {
         let prefix = run.text.len() - split;
         if prefix > 0 {
             joined.push(Run {
+                break_before: run.break_before,
                 text: run.text.slice(0..prefix),
                 paint: paint.clone(),
             });
@@ -201,6 +298,7 @@ fn join_graphemes(runs: Vec<Run>) -> Vec<Run> {
             }
             if consumed < next.text.len() {
                 if consumed > 0 {
+                    next.break_before = false;
                     next.text = next.text.slice(consumed..next.text.len());
                 }
                 break;
@@ -208,6 +306,7 @@ fn join_graphemes(runs: Vec<Run>) -> Vec<Run> {
             runs.next();
         }
         joined.push(Run {
+            break_before: prefix == 0 && run.break_before,
             text: RunText::new(cluster),
             paint,
         });
@@ -257,6 +356,19 @@ fn break_offsets<'a>(runs: impl Iterator<Item = &'a str>) -> Vec<usize> {
     breaks
 }
 
+/// Preferred breaks between ASCII graphics in Chromium's break-word layout.
+fn ascii_word_break(previous: char, next: u8, word_hyphen: bool) -> bool {
+    match previous {
+        '-' if next.is_ascii_digit() => word_hyphen,
+        '-' => !b"!$),./:;?]}".contains(&next),
+        '?' => !b"!\"'),./:;?]}".contains(&next),
+        _ if matches!(next, b'(' | b'<' | b'[' | b'{') => {
+            "!\"#%&)*+,.:;=>\\]|}~".contains(previous)
+        }
+        _ => false,
+    }
+}
+
 fn chunks(runs: Vec<Run>) -> Vec<Chunk> {
     let runs = join_graphemes(runs);
     let mut breaks = break_offsets(runs.iter().map(|run| run.text.as_ref()))
@@ -265,30 +377,74 @@ fn chunks(runs: Vec<Run>) -> Vec<Chunk> {
     let mut out = Vec::new();
     let mut chunk = Chunk::default();
     let mut offset = 0;
-    let mut previous = None;
+    let mut previous: Option<char> = None;
     let mut word_hyphen = false;
+    let mut previous_break_words = false;
     for run in runs {
+        let break_words = run.paint.preserve_whitespace || run.paint.break_long_words;
         let mut start = 0;
         for (i, grapheme) in run.text.grapheme_indices(true) {
             let position = offset + i;
             while breaks.next_if(|b| *b < position).is_some() {}
-            // Match textwrap's default hyphen splitter, even across style boundaries.
+            // Ordinary text uses textwrap’s word hyphens. In break-word text, Chromium also breaks
+            // at flag hyphens and keeps paths and shell operators within a word.
+            let first = grapheme.as_bytes()[0];
             let can_break = match previous {
+                _ if i == 0 && run.break_before => true,
+                Some(prev)
+                    if (previous_break_words || break_words)
+                        && prev.is_ascii_graphic()
+                        && first.is_ascii_graphic() =>
+                {
+                    ascii_word_break(prev, first, word_hyphen)
+                }
                 Some('-') => word_hyphen && grapheme.starts_with(char::is_alphanumeric),
+                // A collapsed separator can wrap before the first preserved space.
+                Some(' ' | '\t')
+                    if previous_break_words
+                        || (run.paint.preserve_whitespace && matches!(first, b' ' | b'\t')) =>
+                {
+                    true
+                }
                 Some('\u{ad}') => false,
                 _ => breaks.peek() == Some(&position),
             };
-            if can_break {
-                chunk.push(&run, start..i);
-                if chunk.runs.last().is_some_and(|r| &*r.text == " ") {
+            // Preserve normal word breaks first. An overlong preserved or clamped word can also
+            // wrap at a grapheme boundary, as it does under overflow-wrap: break-word.
+            let emergency_boundary = position > 0
+                && (break_words || previous_break_words)
+                && !matches!(run.text, RunText::Space);
+            if can_break || emergency_boundary {
+                // A break after a literal space or tab can precede a collapsed
+                // prose separator. Keep the separator on this chunk, so only
+                // the prose space disappears when the line wraps.
+                let end = if previous_break_words && matches!(run.text, RunText::Space) {
+                    run.text.len()
+                } else {
+                    i
+                };
+                chunk.push(&run, start..end);
+                start = end;
+                if chunk
+                    .runs
+                    .last()
+                    .is_some_and(|r| matches!(r.text, RunText::Space))
+                {
                     chunk.trailing_space = chunk.runs.pop().map(|r| r.paint);
                     chunk.width_cells -= 1;
                 }
                 if !chunk.runs.is_empty() {
                     out.push(std::mem::take(&mut chunk));
                 }
-                start = i;
+                chunk.break_before = if !can_break {
+                    BreakBefore::Emergency
+                } else if previous_break_words && word_hyphen && first.is_ascii_digit() {
+                    BreakBefore::AfterHyphenBeforeDigit
+                } else {
+                    BreakBefore::Preferred
+                };
             }
+            previous_break_words = break_words;
             for ch in grapheme.chars() {
                 word_hyphen = ch == '-' && previous.is_some_and(char::is_alphanumeric);
                 previous = Some(ch);
@@ -303,12 +459,54 @@ fn chunks(runs: Vec<Run>) -> Vec<Chunk> {
     out
 }
 
+const TAB_SPACES: &str = "        ";
+
 impl Chunk {
+    fn is_badge(&self) -> bool {
+        self.runs
+            .first()
+            .is_some_and(|run| run.paint.badge.is_some())
+    }
+
+    pub(super) fn prefers_break_before(&self, index_in_line: usize) -> bool {
+        match self.break_before {
+            BreakBefore::Preferred => true,
+            // A preserved hyphen occupies its own chunk. When wrapping puts it at the
+            // start of a visual line, keep it with the digits that follow.
+            BreakBefore::AfterHyphenBeforeDigit => index_in_line > 1,
+            BreakBefore::Emergency => false,
+        }
+    }
+
+    fn tab_paint(&self) -> Option<&Paint> {
+        match self.runs.as_slice() {
+            [run] if run.paint.preserve_whitespace && &*run.text == "\t" => Some(&run.paint),
+            _ => None,
+        }
+    }
+
+    pub(super) fn minimum_cells(&self) -> usize {
+        if self.tab_paint().is_some() {
+            1
+        } else {
+            self.width_cells
+        }
+    }
+
+    pub(super) fn width_at(&self, column: usize) -> usize {
+        if self.tab_paint().is_some() {
+            TAB_SPACES.len() - column % TAB_SPACES.len()
+        } else {
+            self.width_cells
+        }
+    }
+
     fn push(&mut self, run: &Run, range: Range<usize>) {
         if !range.is_empty() {
             let text = run.text.slice(range);
             self.width_cells += span_width(&Span::raw(&*text));
             self.runs.push(Run {
+                break_before: false,
                 text,
                 paint: run.paint.clone(),
             });
@@ -323,62 +521,109 @@ impl PreparedText {
         limit: usize,
         visit: &mut Visit<'a, '_>,
     ) -> usize {
+        let visible = width.visible;
         let width = width.cells;
         let mut y = 0;
         for line in &self.lines {
-            let mut start = 0;
-            let mut used = 0;
-            let mut space = 0;
-            for (i, chunk) in line.iter().enumerate() {
-                if i > start && used + space + chunk.width_cells > width {
-                    visit(y, Fragment::Text(&line[start..i], used));
-                    y += 1;
-                    if y == limit {
-                        return y;
-                    }
-                    start = i;
-                    used = 0;
-                    space = 0;
+            let mut remaining = line.as_slice();
+            loop {
+                let (end, cells) = fit_visual_line(remaining, width);
+                let (fitted, rest) = remaining.split_at(end);
+                // Keep both gutters for wrapping. At the viewport edge the
+                // decorative right gutter can clip while the entire label fits.
+                let cells = if cells == visible + 1 && fitted.last().is_some_and(Chunk::is_badge) {
+                    visible
+                } else {
+                    cells
+                };
+                visit(y, Fragment::Text(fitted, cells));
+                y += 1;
+                if y == limit {
+                    return y;
                 }
-                used += space + chunk.width_cells;
-                space = usize::from(chunk.trailing_space.is_some());
-            }
-            visit(y, Fragment::Text(&line[start..], used));
-            y += 1;
-            if y == limit {
-                break;
+                if rest.is_empty() {
+                    break;
+                }
+                remaining = rest;
             }
         }
         y
     }
 }
 
+/// Fit one screen row, preferring the last word boundary before splitting a preserved word.
+fn fit_visual_line(line: &[Chunk], width: usize) -> (usize, usize) {
+    let mut used = 0;
+    let mut space = 0;
+    let mut last_break = None;
+    for (i, chunk) in line.iter().enumerate() {
+        if i > 0 && chunk.prefers_break_before(i) {
+            last_break = Some((i, used));
+        }
+        let next = used + space + chunk.width_at(used + space);
+        if i > 0 && next > width {
+            return last_break.unwrap_or((i, used));
+        }
+        // A whole tab wider than its line paints only the visible spaces.
+        used = if i == 0 && chunk.tab_paint().is_some() {
+            next.min(width)
+        } else {
+            next
+        };
+        space = usize::from(chunk.trailing_space.is_some());
+    }
+    (line.len(), used)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Cut {
+    Viewport,
+    LineClamp { prior_content: bool },
+}
+
 pub(super) fn visit_chunks<'a>(
     chunks: &'a [Chunk],
     limit: usize,
+    cut: Cut,
     mut draw: impl FnMut(usize, &str, usize, &'a Paint),
 ) -> usize {
     let mut used = 0;
 
     for (index, chunk) in chunks.iter().enumerate() {
-        for run in &chunk.runs {
-            let text = &*run.text;
-            let mut bytes = 0;
-            let mut cells = 0;
-            for g in text.graphemes(true) {
-                let w = usize::from(g.cell_width());
-                if used + cells + w > limit {
-                    break;
-                }
-                cells += w;
-                bytes += g.len();
-            }
-            if bytes > 0 && (used < limit || bytes == text.len()) {
-                draw(used, &text[..bytes], cells, &run.paint);
-            }
-            used += cells;
-            if bytes < text.len() {
+        if let Cut::LineClamp { prior_content } = cut
+            && (prior_content || used > 0)
+            && chunk.is_badge()
+            && chunk.width_cells > limit - used
+        {
+            return used;
+        }
+        if let Some(paint) = chunk.tab_paint() {
+            let cells = chunk.width_at(used).min(limit.saturating_sub(used));
+            if cells == 0 {
                 return used;
+            }
+            draw(used, &TAB_SPACES[..cells], cells, paint);
+            used += cells;
+        } else {
+            for run in &chunk.runs {
+                let text = &*run.text;
+                let mut bytes = 0;
+                let mut cells = 0;
+                for g in text.graphemes(true) {
+                    let w = usize::from(g.cell_width());
+                    if used + cells + w > limit {
+                        break;
+                    }
+                    cells += w;
+                    bytes += g.len();
+                }
+                if bytes > 0 && (used < limit || bytes == text.len()) {
+                    draw(used, &text[..bytes], cells, &run.paint);
+                }
+                used += cells;
+                if bytes < text.len() {
+                    return used;
+                }
             }
         }
         if index + 1 < chunks.len()

@@ -514,7 +514,7 @@ impl App {
         self.detach_current_thread_for_navigation(outgoing_session, Some(thread_id))
             .await;
         let destination = backends.session_at_mut(destination_slot);
-        self.store_active_thread_receiver().await;
+        self.save_active_thread_state().await;
         self.clear_active_thread().await;
         self.agents_overview.search_matches.clear();
         self.agents_overview.pending_usage = None;
@@ -542,7 +542,7 @@ impl App {
         self.file_search.on_user_query(String::new());
         self.bind_backend_workspace(destination, cwd);
         self.model_catalog = Arc::new(
-            ModelCatalog::new(bootstrap.available_models)
+            ModelCatalog::new(bootstrap.available_models, bootstrap.catalog_provider)
                 .for_backend(destination.backend_id(), &mut self.provider_writes)
                 .with_collaboration_modes(bootstrap.collaboration_modes),
         );
@@ -630,7 +630,10 @@ impl App {
             };
             let destination = backends.session_at_mut(destination_slot);
             self.cancel_cloud_inventory_refresh(destination).await;
-            let bootstrap = match destination.bootstrap(&settings.config).await {
+            let bootstrap = match self
+                .wait_for_opening_task(tui, destination.bootstrap(&settings.config))
+                .await
+            {
                 Ok(bootstrap) => bootstrap,
                 Err(error) => {
                     let message = format!("Failed to prepare the conversation: {error}");
@@ -663,7 +666,7 @@ impl App {
                     tui,
                     destination,
                     prepared,
-                    /*switched_backend*/ true,
+                    super::session_lifecycle::ResumeOrigin::BackendSwitch,
                 )
                 .await?;
             tui.frame_requester().schedule_frame();

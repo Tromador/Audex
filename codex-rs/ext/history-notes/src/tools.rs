@@ -33,6 +33,7 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::openai_models::HistoryToolMessages;
 use codex_protocol::openai_models::NotesToolMessages;
 use codex_protocol::openai_models::ToolMessage;
+use codex_tools::CodeModeToolResult;
 use codex_tools::JsonToolOutput;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
@@ -48,7 +49,7 @@ use serde_json::json;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-pub(crate) type Executor = Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>;
+pub(crate) type Executor = Arc<dyn ToolExecutor>;
 
 // Keep the catalog key, tool name, request type and HTTP route in one registration.
 macro_rules! register_tools {
@@ -153,7 +154,7 @@ struct HistoryNotesTool<R, B> {
     spec: ToolSpec,
 }
 
-impl<'call, R: Request, B: Handle<R>> ToolExecutor<ToolCall<'call>> for HistoryNotesTool<R, B> {
+impl<R: Request, B: Handle<R>> ToolExecutor for HistoryNotesTool<R, B> {
     fn tool_name(&self) -> ToolName {
         ToolName::namespaced(R::NAMESPACE.name, R::NAME)
     }
@@ -170,10 +171,7 @@ impl<'call, R: Request, B: Handle<R>> ToolExecutor<ToolCall<'call>> for HistoryN
         R::PARALLEL
     }
 
-    fn handle<'a>(&'a self, call: ToolCall<'call>) -> ToolExecutorFuture<'a>
-    where
-        'call: 'a,
-    {
+    fn handle<'a>(&'a self, call: ToolCall<'a>) -> ToolExecutorFuture<'a> {
         Box::pin(async move {
             let input = parse_arguments(call.function_arguments()?)?;
             let response = self
@@ -300,8 +298,10 @@ impl ToolOutput for HistoryNotesToolOutput {
         }
     }
 
-    fn code_mode_result(&self, _payload: &ToolPayload) -> Value {
-        Value::String("History tools are unavailable in code mode.".to_string())
+    fn code_mode_result(&self, _payload: &ToolPayload) -> CodeModeToolResult {
+        CodeModeToolResult::from(Value::String(
+            "History tools are unavailable in code mode.".to_string(),
+        ))
     }
 }
 

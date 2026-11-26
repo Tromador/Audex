@@ -983,6 +983,7 @@ async fn child_session_inherits_resumed_parent_auth(host_child: bool) {
                 control.into(),
                 parent.thread_id,
                 crate::agent::host::PreparedChildInheritance {
+                    spawn_service_tier: None,
                     instructions: parent.thread.session.inherited_instructions().await,
                     exec_policy: None,
                     originator: parent.thread.session.originator().await,
@@ -998,6 +999,7 @@ async fn child_session_inherits_resumed_parent_auth(host_child: bool) {
                 control,
                 Some(parent.thread_id),
                 /*inherited_exec_policy*/ None,
+                /*spawn_service_tier*/ None,
             )
             .await
     }
@@ -2079,6 +2081,7 @@ async fn spawn_internal_session_preserves_parent_lineage_without_forking_history
             exec_policy: Some(codex_execpolicy::RequirementsExecPolicy::new(
                 codex_execpolicy::Policy::empty(),
             )),
+            plugins: Default::default(),
             mcp_policy: None,
             network_policy: None,
             selected_capability_roots: Vec::new(),
@@ -2367,7 +2370,7 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
                     identity: codex_core_plugins::PluginIdentity::Local {
                         plugin_id: plugin_id.clone(),
                     },
-                    enabled: true,
+                    enabled: codex_extension_api::PluginEnablement::Enabled,
                     mcp: Box::pin(async move {
                         mcp_loaded.fetch_add(1, Ordering::Relaxed);
                         codex_extension_api::SelectedPluginContribution {
@@ -3744,6 +3747,7 @@ async fn new_uses_active_provider_for_model_refresh(with_cache: bool) {
                     .control(started.thread.session.session_id()),
                 Some(started.thread_id),
                 /*inherited_exec_policy*/ None,
+                /*spawn_service_tier*/ None,
             )
             .await
             .expect("spawn child with the parent's provider headers");
@@ -4273,7 +4277,7 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
     assert!(rollout_items.iter().any(|item| {
         matches!(
             item,
-            RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
+            RolloutItem::EventMsg { event: EventMsg::TurnAborted(TurnAbortedEvent {
                 root_turn_id: None,
                 turn_id: Some(turn_id),
                 started_at: None,
@@ -4281,7 +4285,7 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
                 error: None,
             completed_at: None,
             duration_ms: None,
-            })) if turn_id == "turn-explicit"
+            }), .. } if turn_id == "turn-explicit"
         )
     }));
 }
@@ -4416,10 +4420,13 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
             .filter(|item| {
                 matches!(
                     item,
-                    RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
-                        reason: TurnAbortReason::Interrupted,
+                    RolloutItem::EventMsg {
+                        event: EventMsg::TurnAborted(TurnAbortedEvent {
+                            reason: TurnAbortReason::Interrupted,
+                            ..
+                        }),
                         ..
-                    }))
+                    }
                 )
             })
             .count(),

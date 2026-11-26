@@ -57,13 +57,22 @@ use rmcp::transport::streamable_http_client::StreamableHttpPostResponse;
 use sse_stream::Sse;
 use sse_stream::SseStream;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::bounded_stdio_transport::MAX_MCP_STDIO_LINE_BYTES;
 use crate::event_notification_transport::MAX_EVENT_NOTIFICATION_BYTES;
 use crate::http_client_redirect::SameOriginRedirectHttpClient;
+use crate::oauth::OAuthRuntime;
 
 use crate::www_authenticate::insufficient_scope_challenge;
+
+#[path = "recovery_handshake_cleanup.rs"]
+mod recovery_handshake_cleanup;
+
+pub(crate) use recovery_handshake_cleanup::RecoveryHandshakeCleanup;
+pub(crate) use recovery_handshake_cleanup::RecoveryHandshakeGuard;
+use recovery_handshake_cleanup::SdkDeleteClaim;
 
 const EVENT_STREAM_MIME_TYPE: &str = "text/event-stream";
 const JSON_MIME_TYPE: &str = "application/json";
@@ -71,11 +80,16 @@ const HEADER_SESSION_ID: &str = "Mcp-Session-Id";
 const NON_JSON_RESPONSE_BODY_PREVIEW_BYTES: usize = 8_192;
 const LEGACY_HTTP_PREVALIDATION_ERROR_CODE: ErrorCode = ErrorCode(-32000);
 const EVENT_STREAM_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+// A coordinated OAuth refresh can hold the manager through a 60s credential-lock
+// wait and a 45s provider request. Leave time for persistence before DELETE.
+const RECOVERY_CLEANUP_AUTH_TIMEOUT: Duration = Duration::from_secs(120);
+const RECOVERY_HANDSHAKE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamableHttpRedirectMode {
     Legacy,
     AgentPluginV1,
+    Disabled,
 }
 
 #[derive(Clone)]
@@ -88,6 +102,8 @@ pub(crate) struct StreamableHttpClientAdapter {
     has_configured_headers: bool,
     redirect_mode: StreamableHttpRedirectMode,
     initialize_deadline: Arc<Mutex<Option<Instant>>>,
+    initialize_cancellation: Option<CancellationToken>,
+    handshake_cleanup: Option<RecoveryHandshakeCleanup>,
     // The SDK sends handshakes on its worker without request metadata.
     handshake_trace: Option<W3cTraceContext>,
 }
@@ -140,8 +156,119 @@ impl StreamableHttpClientAdapter {
             has_configured_headers,
             redirect_mode,
             initialize_deadline,
+            initialize_cancellation: None,
+            handshake_cleanup: None,
             handshake_trace: crate::trace_context::current_w3c_trace_context(),
         }
+    }
+
+    pub(crate) fn enable_recovery_cancellation(
+        &mut self,
+        cleanup: RecoveryHandshakeCleanup,
+    ) -> CancellationToken {
+        self.handshake_cleanup = Some(cleanup);
+        self.initialize_cancellation
+            .insert(CancellationToken::new())
+            .clone()
+    }
+
+    pub(crate) fn set_recovery_cleanup_oauth(&self, oauth: &OAuthRuntime) {
+        if let Some(cleanup) = &self.handshake_cleanup {
+            cleanup.set_oauth(oauth.clone());
+        }
+    }
+
+    pub(crate) fn recovery_cleanup(&self) -> Option<&RecoveryHandshakeCleanup> {
+        self.handshake_cleanup.as_ref()
+    }
+
+    async fn cleanup_session(
+        &self,
+        uri: Arc<str>,
+        session: Arc<str>,
+        auth: Option<String>,
+        headers: HashMap<HeaderName, HeaderValue>,
+        cleanup: RecoveryHandshakeCleanup,
+    ) -> std::result::Result<(), StreamableHttpError<StreamableHttpClientAdapterError>> {
+        let auth =
+            match tokio::time::timeout(RECOVERY_CLEANUP_AUTH_TIMEOUT, cleanup.resolve_token(auth))
+                .await
+            {
+                Ok(auth) => auth,
+                Err(_) => {
+                    tracing::warn!("timed out waiting for MCP cleanup credentials");
+                    return Err(StreamableHttpError::UnexpectedServerResponse(
+                        "timed out waiting for MCP cleanup credentials".into(),
+                    ));
+                }
+            };
+        let result = tokio::time::timeout(
+            RECOVERY_HANDSHAKE_CLEANUP_TIMEOUT,
+            self.delete_session_inner(uri, session, auth, headers),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(StreamableHttpError::UnexpectedServerResponse(
+                "timed out deleting cancelled MCP initialization session".into(),
+            ))
+        });
+        if result.is_err() {
+            tracing::warn!("failed to clean up cancelled MCP initialization session");
+        }
+        result
+    }
+
+    async fn delete_session_inner(
+        &self,
+        uri: Arc<str>,
+        session: Arc<str>,
+        auth_token: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+    ) -> std::result::Result<(), StreamableHttpError<StreamableHttpClientAdapterError>> {
+        let mut headers = self.default_headers.clone();
+        headers.extend(custom_headers);
+        self.add_auth_headers(&mut headers).await?;
+        if let Some(auth_token) = auth_token {
+            insert_header(
+                &mut headers,
+                AUTHORIZATION,
+                format!("Bearer {auth_token}"),
+                StreamableHttpClientAdapterError::Header,
+            )?;
+        }
+        insert_header(
+            &mut headers,
+            HeaderName::from_static("mcp-session-id"),
+            session.to_string(),
+            StreamableHttpClientAdapterError::Header,
+        )?;
+        let redirect_policy = self.redirect_policy(&headers);
+
+        let response = self
+            .http_client
+            .http_request(HttpRequestParams {
+                method: "DELETE".to_string(),
+                url: uri.to_string(),
+                headers: protocol_headers(&headers),
+                body: None,
+                timeout_ms: None,
+                redirect_policy,
+                request_id: "buffered-request".to_string(),
+                stream_response: false,
+            })
+            .await
+            .map_err(StreamableHttpClientAdapterError::from)
+            .map_err(StreamableHttpError::Client)?;
+
+        if response.status == StatusCode::METHOD_NOT_ALLOWED.as_u16() {
+            return Ok(());
+        }
+        if !status_is_success(response.status) {
+            return Err(StreamableHttpError::UnexpectedServerResponse(
+                format!("DELETE returned HTTP {}", response.status).into(),
+            ));
+        }
+        Ok(())
     }
 
     fn redirect_policy(&self, headers: &HeaderMap) -> HttpRedirectPolicy {
@@ -149,17 +276,18 @@ impl StreamableHttpClientAdapter {
     }
 }
 
-impl StreamableHttpClient for StreamableHttpClientAdapter {
-    type Error = StreamableHttpClientAdapterError;
-
-    async fn post_message(
+impl StreamableHttpClientAdapter {
+    async fn post_message_inner(
         &self,
         uri: Arc<str>,
         message: ClientJsonRpcMessage,
         session_id: Option<Arc<str>>,
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
-    ) -> std::result::Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+    ) -> std::result::Result<
+        StreamableHttpPostResponse,
+        StreamableHttpError<StreamableHttpClientAdapterError>,
+    > {
         if let JsonRpcMessage::Notification(notification) = &message
             && let ClientNotification::CancelledNotification(cancelled) = &notification.notification
             && let Some(request_id) = cancelled.params.request_id.as_ref()
@@ -174,6 +302,18 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
         }
 
         let (mcp_method, mcp_request_id) = client_jsonrpc_message_fields(&message);
+        let recovery_allocation = self
+            .handshake_cleanup
+            .as_ref()
+            .filter(|_| mcp_method.as_deref() == Some("initialize"))
+            .map(|cleanup| {
+                (
+                    cleanup.clone(),
+                    Arc::clone(&uri),
+                    auth_token.clone(),
+                    custom_headers.clone(),
+                )
+            });
         let has_session_id = session_id.is_some();
         let mut headers = self.default_headers.clone();
         headers.extend(custom_headers);
@@ -190,7 +330,7 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
             JSON_MIME_TYPE.to_string(),
             StreamableHttpClientAdapterError::Header,
         )?;
-        if let Some(auth_token) = auth_token {
+        if let Some(auth_token) = auth_token.as_ref() {
             insert_header(
                 &mut headers,
                 AUTHORIZATION,
@@ -227,23 +367,20 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
             mcp_method.as_deref(),
             Some("initialize" | "notifications/initialized")
         ) || is_discovery_request;
-        let timeout_ms = if is_handshake_request {
-            self.initialize_deadline
+        let timeout_ms = if is_handshake_request && self.initialize_cancellation.is_none() {
+            let deadline = *self
+                .initialize_deadline
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .map(|deadline| {
-                    u64::try_from(
-                        deadline
-                            .saturating_duration_since(Instant::now())
-                            .as_millis(),
-                    )
-                    .unwrap_or(u64::MAX)
-                    .max(1)
-                })
+                .unwrap_or_else(PoisonError::into_inner);
+            deadline.map(|deadline| {
+                let millis = deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis();
+                u64::try_from(millis).unwrap_or(u64::MAX).max(1)
+            })
         } else {
             None
         };
-
         let body = serde_json::to_value(&message).map_err(StreamableHttpError::Deserialize)?;
         let handshake_trace = if is_discovery_request || mcp_method.as_deref() == Some("initialize")
         {
@@ -258,6 +395,25 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
         );
         let body = serde_json::to_vec(&body).map_err(StreamableHttpError::Deserialize)?;
         let has_authorization_header = headers.contains_key(AUTHORIZATION);
+        let timeout_ms = if is_handshake_request && self.initialize_cancellation.is_some() {
+            let remaining = self
+                .initialize_deadline
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            match remaining {
+                Some(remaining) if remaining.is_zero() => {
+                    return Err(StreamableHttpError::TransportChannelClosed);
+                }
+                Some(remaining) => Some(
+                    u64::try_from(remaining.as_nanos().div_ceil(/*rhs*/ 1_000_000))
+                        .unwrap_or(u64::MAX),
+                ),
+                None => None,
+            }
+        } else {
+            timeout_ms
+        };
 
         let request = self
             .http_client
@@ -302,12 +458,26 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
             }
         };
 
+        if status_is_success(response.status)
+            && let Some((cleanup, uri, auth, headers)) = recovery_allocation
+            && let Some(session) = response_header(&response.headers, HEADER_SESSION_ID)
+        {
+            cleanup.register(self.clone(), uri, Arc::from(session), auth, headers);
+        }
+
         if response.status == StatusCode::NOT_FOUND.as_u16() && session_id.is_some() {
             return Err(StreamableHttpError::Client(
                 StreamableHttpClientAdapterError::SessionExpired404,
             ));
         }
         if response.status == StatusCode::UNAUTHORIZED.as_u16() {
+            if let (Some(cleanup), Some(session), Some(token)) = (
+                &self.handshake_cleanup,
+                session_id.as_ref(),
+                auth_token.as_deref(),
+            ) {
+                cleanup.reject(session, token);
+            }
             let challenges = response
                 .headers
                 .iter()
@@ -336,6 +506,21 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
             Some(StatusCode::ACCEPTED | StatusCode::NO_CONTENT)
         ) {
             return Ok(StreamableHttpPostResponse::Accepted);
+        }
+
+        // A reply answers the peer's request. A body returned to that POST
+        // must never resolve one of our own pending requests with the same ID.
+        if matches!(
+            message,
+            JsonRpcMessage::Response(_) | JsonRpcMessage::Error(_)
+        ) {
+            return Err(StreamableHttpError::UnexpectedServerResponse(
+                format!(
+                    "expected acknowledgement for MCP reply, got HTTP {}",
+                    response.status
+                )
+                .into(),
+            ));
         }
 
         let content_type = response_header(&response.headers, CONTENT_TYPE);
@@ -521,6 +706,67 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
             }
         }
     }
+}
+
+impl StreamableHttpClient for StreamableHttpClientAdapter {
+    type Error = StreamableHttpClientAdapterError;
+
+    async fn post_message(
+        &self,
+        uri: Arc<str>,
+        message: ClientJsonRpcMessage,
+        session_id: Option<Arc<str>>,
+        auth_token: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+    ) -> std::result::Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+        let Some(initialize_cancellation) = &self.initialize_cancellation else {
+            return self
+                .post_message_inner(uri, message, session_id, auth_token, custom_headers)
+                .await;
+        };
+        let method = match &message {
+            JsonRpcMessage::Request(request) => Some(request.request.method()),
+            JsonRpcMessage::Notification(notification) => match &notification.notification {
+                ClientNotification::InitializedNotification(notification) => {
+                    Some(notification.method.as_str())
+                }
+                ClientNotification::CustomNotification(notification) => {
+                    Some(notification.method.as_str())
+                }
+                _ => None,
+            },
+            JsonRpcMessage::Response(_) | JsonRpcMessage::Error(_) => None,
+        };
+        let handshake = matches!(method, Some("initialize" | "notifications/initialized"))
+            || method == Some(DiscoverRequestMethod::VALUE);
+        if let Some(cleanup) = &self.handshake_cleanup
+            && let Some(session) = &session_id
+        {
+            cleanup.update_auth_and_headers(session, &auth_token, &custom_headers);
+        }
+        let post = self.post_message_inner(uri, message, session_id, auth_token, custom_headers);
+        let result = if handshake {
+            tokio::select! {
+                biased;
+                _ = initialize_cancellation.cancelled() => {
+                    Err(StreamableHttpError::TransportChannelClosed)
+                }
+                result = post => result,
+            }
+        } else {
+            post.await
+        };
+        match result {
+            Ok(StreamableHttpPostResponse::Sse(events, session)) if handshake => {
+                let cancelled = initialize_cancellation.clone().cancelled_owned();
+                Ok(StreamableHttpPostResponse::Sse(
+                    events.take_until(cancelled).boxed(),
+                    session,
+                ))
+            }
+            result => result,
+        }
+    }
 
     async fn delete_session(
         &self,
@@ -529,50 +775,25 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> std::result::Result<(), StreamableHttpError<Self::Error>> {
-        let mut headers = self.default_headers.clone();
-        headers.extend(custom_headers);
-        self.add_auth_headers(&mut headers).await?;
-        if let Some(auth_token) = auth_token {
-            insert_header(
-                &mut headers,
-                AUTHORIZATION,
-                format!("Bearer {auth_token}"),
-                StreamableHttpClientAdapterError::Header,
-            )?;
+        if let Some(cleanup) = &self.handshake_cleanup {
+            cleanup.update_auth_and_headers(&session, &auth_token, &custom_headers);
+            match cleanup.claim_sdk_delete(&session) {
+                SdkDeleteClaim::AlreadyClaimed(done) => {
+                    done.cancelled().await;
+                    return Ok(());
+                }
+                SdkDeleteClaim::Owned(delete) => {
+                    return delete.await.unwrap_or_else(|error| {
+                        Err(StreamableHttpError::UnexpectedServerResponse(
+                            format!("MCP initialization cleanup task failed: {error}").into(),
+                        ))
+                    });
+                }
+                SdkDeleteClaim::Untracked => {}
+            }
         }
-        insert_header(
-            &mut headers,
-            HeaderName::from_static("mcp-session-id"),
-            session.to_string(),
-            StreamableHttpClientAdapterError::Header,
-        )?;
-        let redirect_policy = self.redirect_policy(&headers);
-
-        let response = self
-            .http_client
-            .http_request(HttpRequestParams {
-                method: "DELETE".to_string(),
-                url: uri.to_string(),
-                headers: protocol_headers(&headers),
-                body: None,
-                timeout_ms: None,
-                redirect_policy,
-                request_id: "buffered-request".to_string(),
-                stream_response: false,
-            })
+        self.delete_session_inner(uri, session, auth_token, custom_headers)
             .await
-            .map_err(StreamableHttpClientAdapterError::from)
-            .map_err(StreamableHttpError::Client)?;
-
-        if response.status == StatusCode::METHOD_NOT_ALLOWED.as_u16() {
-            return Ok(());
-        }
-        if !status_is_success(response.status) {
-            return Err(StreamableHttpError::UnexpectedServerResponse(
-                format!("DELETE returned HTTP {}", response.status).into(),
-            ));
-        }
-        Ok(())
     }
 
     async fn get_stream(
@@ -885,7 +1106,8 @@ fn mcp_redirect_policy(
     headers: &HeaderMap,
     has_configured_headers: bool,
 ) -> HttpRedirectPolicy {
-    if headers.contains_key("x-openai-agent-assertion")
+    if mode == StreamableHttpRedirectMode::Disabled
+        || headers.contains_key("x-openai-agent-assertion")
         || headers
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok())

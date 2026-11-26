@@ -380,6 +380,7 @@ pub(crate) struct AppServerBootstrap {
     pub(crate) default_model: Option<String>,
     pub(crate) feedback_audience: FeedbackAudience,
     pub(crate) has_chatgpt_account: bool,
+    pub(crate) catalog_provider: Option<String>,
     pub(crate) available_models: Vec<ModelPreset>,
     pub(crate) collaboration_modes: Vec<codex_protocol::config_types::CollaborationModeMask>,
     pub(crate) allowed_approval_policies: Option<Vec<AskForApproval>>,
@@ -425,7 +426,7 @@ pub(crate) struct AppServerSession {
     cloud_turn_settings: user_message_submission::PendingCloudTurnSettings,
     default_model: Option<String>,
     available_models: Vec<ModelPreset>,
-    prefetched_model_list: Option<RemoteHandle<Result<Vec<ModelPreset>>>>,
+    prefetched_model_list: Option<RemoteHandle<Result<models::StartupModels>>>,
     daybreak_api_key_compat: Arc<tokio::sync::Semaphore>,
     managed_new_thread_defaults: Option<NewThreadModelDefaults>,
     external_agent_config_import_id: Mutex<Option<String>>,
@@ -772,6 +773,7 @@ impl AppServerSession {
     pub(crate) async fn start_dynamic_tool_mcp(
         &mut self,
         config: Config,
+        workspace_enabled: bool,
         app_event_tx: AppEventSender,
         status_updates: tokio::sync::broadcast::Sender<ThreadStatusChangedNotification>,
     ) -> std::io::Result<()> {
@@ -841,6 +843,10 @@ impl AppServerSession {
             });
         thread_start_params.daybreak_enabled =
             daybreak_launch_override.then_some(config.daybreak_enabled);
+        let sidebar_backend = (workspace_enabled
+            && !self.uses_remote_workspace()
+            && self.supports_document_previews())
+        .then_some(self.backend_id());
         let server = Arc::new(
             DynamicToolMcpServer::start(
                 self.request_handle(),
@@ -849,6 +855,7 @@ impl AppServerSession {
                 app_event_tx,
                 status_updates,
                 services,
+                sidebar_backend,
             )
             .await?,
         );
@@ -892,6 +899,18 @@ impl AppServerSession {
 
     pub(crate) fn uses_embedded_app_server(&self) -> bool {
         matches!(&self.request_handle, AppServerRequestHandle::InProcess(_))
+    }
+
+    pub(crate) async fn model_preview_permissions(
+        &self,
+        source: ThreadId,
+    ) -> Result<Option<codex_app_server_client::ThreadPermissions>> {
+        match &self.connection_owner {
+            Some(AppServerClient::InProcess(client)) => {
+                Ok(Some(client.thread_permissions(source).await?))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Carry capabilities that may exist only in memory when the optional cache is unwritable.
@@ -946,18 +965,19 @@ impl AppServerSession {
         self.prefetched_model_list = Some(models);
     }
 
-    fn request_model_list(&mut self) -> impl Future<Output = Result<Vec<ModelPreset>>> + use<> {
+    fn request_model_list(
+        &mut self,
+    ) -> impl Future<Output = Result<models::StartupModels>> + use<> {
         let mode = self.thread_params_mode;
         let handle = self.request_handle();
         let request_id = self.next_request_id();
+        let server_version = self.server_version().map(str::to_owned);
         async move {
-            if mode == ThreadParamsMode::Cloud {
-                // Cloud activation supplies the model. Fetch the catalog on picker demand.
-                return Ok(Vec::new());
-            }
-            models::list(mode, handle, request_id).await.map_err(|err| {
-                bootstrap_request_error("model/list failed during TUI bootstrap", err)
-            })
+            models::startup_list(mode, handle, request_id, server_version.as_deref())
+                .await
+                .map_err(|err| {
+                    bootstrap_request_error("model/list failed during TUI bootstrap", err)
+                })
         }
     }
 
@@ -1006,7 +1026,7 @@ impl AppServerSession {
             None => Either::Right(self.request_model_list()),
         };
         let requirements_request_id = self.next_request_id();
-        let (mut available_models, requirements, collaboration_modes) = tokio::try_join!(
+        let (startup_models, requirements, collaboration_modes) = tokio::try_join!(
             models,
             async {
                 match self
@@ -1037,6 +1057,14 @@ impl AppServerSession {
             },
             async { Ok(crate::collaboration_modes::list(self.request_handle()).await) },
         )?;
+        // A local daemon uses Embedded thread settings but has its own server configuration.
+        let catalog_provider =
+            if matches!(self.request_handle, AppServerRequestHandle::InProcess(_)) {
+                Some(config.model_provider_id.clone())
+            } else {
+                startup_models.provider
+            };
+        let mut available_models = startup_models.models;
         if let Some(requirements) = &requirements {
             crate::service_tier_resolution::constrain_server_service_tiers(
                 &mut available_models,
@@ -1100,6 +1128,7 @@ impl AppServerSession {
             plan_type: account.plan,
             requires_openai_auth: account.requires_openai_auth,
             default_model,
+            catalog_provider,
             available_models,
             collaboration_modes,
             allowed_approval_policies,
@@ -1133,12 +1162,19 @@ impl AppServerSession {
 
     pub(crate) async fn next_event(&mut self) -> Option<AppServerSessionEvent> {
         let event = self.connection_owner.as_mut()?.next_event().await?;
-        if let codex_app_server_client::AppServerEvent::ServerNotification(notification) = &event
-            && let codex_app_server_protocol::ServerNotification::ThreadReadStateChanged(change) =
-                notification.as_ref()
-            && let Ok(id) = ThreadId::from_string(&change.thread_id)
-        {
-            self.remember_read_state(id, Some(change.read_state.clone()));
+        if let codex_app_server_client::AppServerEvent::ServerNotification(notification) = &event {
+            match notification.as_ref() {
+                codex_app_server_protocol::ServerNotification::AccountUpdated(_) => {
+                    self.default_model = None;
+                    self.available_models.clear();
+                }
+                codex_app_server_protocol::ServerNotification::ThreadReadStateChanged(change) => {
+                    if let Ok(id) = ThreadId::from_string(&change.thread_id) {
+                        self.remember_read_state(id, Some(change.read_state.clone()));
+                    }
+                }
+                _ => {}
+            }
         }
         Some(AppServerSessionEvent {
             backend_id: self.backend_id,

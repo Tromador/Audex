@@ -20,6 +20,7 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_custom_tool_call;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
@@ -159,7 +160,7 @@ async fn persistent_async_message_guidance_follows_tool_availability(
             messages.persistent_instructions = None;
             messages.tools = Some(ToolMessages {
                 send_user_message_async: Some(ToolMessage {
-                    description: Some("Catalog async message description.".to_string()),
+                    description: Some("Catalog async message description.".into()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -208,21 +209,42 @@ async fn persistent_async_message_guidance_follows_tool_availability(
     Ok(())
 }
 
-#[test_case(SessionSource::Exec, None, &[], false; "root_without_opt_in")]
-#[test_case(SessionSource::Exec, None, &[Feature::SendAsyncMessage], false; "root_with_retired_feature")]
-#[test_case(SessionSource::Exec, Some("send_user_message_async"), &[], false; "root_with_legacy_question_tool")]
-#[test_case(SessionSource::Exec, Some("request_user_input_async"), &[], false; "root_with_question_tool")]
-#[test_case(SessionSource::Exec, Some("send_message_to_user_async"), &[], true; "root_with_catalog_opt_in")]
-#[test_case(SessionSource::Exec, None, &[Feature::SendMessageToUserAsync], true; "root_with_feature_opt_in")]
-#[test_case(SessionSource::Exec, Some("send_message_to_user_async"), &[Feature::SendMessageToUserAsync], true; "root_with_both_opt_ins")]
-#[test_case(SessionSource::SubAgent(SubAgentSource::Other("test".to_string())), Some("send_message_to_user_async"), &[], false; "subagent_with_catalog_opt_in")]
-#[test_case(SessionSource::SubAgent(SubAgentSource::Other("test".to_string())), None, &[Feature::SendMessageToUserAsync], false; "subagent_with_feature_opt_in")]
-#[test_case(SessionSource::SubAgent(SubAgentSource::Other("test".to_string())), Some("send_message_to_user_async"), &[Feature::SendMessageToUserAsync], false; "subagent_with_both_opt_ins")]
+const ROOT_MESSAGES: &str = "[features]\nsend_message_to_user_async = true";
+const EXPLICIT_ROOT_MESSAGES: &str =
+    "[features.send_message_to_user_async]\nroot_agent = true\nsubagents = false";
+const SUBAGENT_MESSAGES: &str =
+    "[features.send_message_to_user_async]\nroot_agent = false\nsubagents = true";
+
+#[test_case(SessionSource::Exec, None, "", false; "root_without_opt_in")]
+#[test_case(SessionSource::Exec, None, "[features]\nsend_async_message = true", false; "root_with_retired_feature")]
+#[test_case(SessionSource::Exec, Some("send_user_message_async"), "", false; "root_with_legacy_question_tool")]
+#[test_case(SessionSource::Exec, Some("request_user_input_async"), "", false; "root_with_question_tool")]
+#[test_case(SessionSource::Exec, Some("send_message_to_user_async"), SUBAGENT_MESSAGES, true; "root_with_catalog_opt_in")]
+#[test_case(SessionSource::Exec, None, ROOT_MESSAGES, true; "root_with_feature_opt_in")]
+#[test_case(SessionSource::Exec, None, EXPLICIT_ROOT_MESSAGES, true; "root_with_named_opt_in")]
+#[test_case(SessionSource::Exec, Some("send_message_to_user_async"), ROOT_MESSAGES, true; "root_with_both_opt_ins")]
+#[test_case(SessionSource::Exec, None, SUBAGENT_MESSAGES, false; "child_opt_in_does_not_enable_root")]
+#[test_case(SessionSource::SubAgent(SubAgentSource::Other("test".to_string())), Some("send_message_to_user_async"), "", false; "subagent_with_catalog_opt_in")]
+#[test_case(SessionSource::SubAgent(SubAgentSource::Other("test".to_string())), None, ROOT_MESSAGES, false; "subagent_with_feature_opt_in")]
+#[test_case(SessionSource::SubAgent(SubAgentSource::Other("test".to_string())), Some("send_message_to_user_async"), ROOT_MESSAGES, false; "subagent_with_both_opt_ins")]
+#[test_case(SessionSource::SubAgent(SubAgentSource::Compact), None, SUBAGENT_MESSAGES, false; "compaction_helper_cannot_message_user")]
+#[test_case(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+    parent_thread_id: codex_protocol::ThreadId::new(), depth: 1, agent_path: None,
+    agent_nickname: None, agent_role: None,
+}), Some("send_message_to_user_async"), ROOT_MESSAGES, false; "spawned_child_requires_opt_in")]
+#[test_case(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+    parent_thread_id: codex_protocol::ThreadId::new(), depth: 1, agent_path: None,
+    agent_nickname: None, agent_role: None,
+}), Some("send_message_to_user_async"), EXPLICIT_ROOT_MESSAGES, false; "explicitly_disabled_child_with_catalog_opt_in")]
+#[test_case(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+    parent_thread_id: codex_protocol::ThreadId::new(), depth: 1, agent_path: None,
+    agent_nickname: None, agent_role: None,
+}), None, SUBAGENT_MESSAGES, true; "spawned_child_with_root_disabled")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn freeform_async_message_requires_root_and_catalog_or_feature_opt_in(
+async fn freeform_async_message_respects_independent_agent_opt_ins(
     session_source: SessionSource,
     catalog_tool: Option<&'static str>,
-    enabled_features: &'static [Feature],
+    feature_config: &'static str,
     expected: bool,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -239,13 +261,9 @@ async fn freeform_async_message_requires_root_and_catalog_or_feature_opt_in(
             model.experimental_supported_tools =
                 catalog_tool.map(str::to_string).into_iter().collect();
         })
-        .with_config(move |config| {
-            for &feature in enabled_features {
-                config
-                    .features
-                    .enable(feature)
-                    .expect("enable async messaging test feature");
-            }
+        .with_pre_build_hook(move |home| {
+            std::fs::write(home.join("config.toml"), feature_config)
+                .expect("write async messaging config");
         })
         .build_with_auto_env(&server)
         .await?;
@@ -274,6 +292,110 @@ async fn freeform_async_message_requires_root_and_catalog_or_feature_opt_in(
             .count(),
         usize::from(expected),
     );
+    Ok(())
+}
+
+#[test_case::test_matrix([ToolMode::Direct, ToolMode::CodeMode, ToolMode::CodeModeOnly], [true, false])]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn freeform_async_message_follows_tool_mode(mode: ToolMode, direct_only: bool) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    const TOOL: &str = "send_message_to_user_async";
+    const ACCEPTED: &str = r#"{"accepted":true}"#;
+    let server = start_mock_server().await;
+    let test = test_codex()
+        .with_model_info_override("gpt-5.2", move |model| {
+            model.tool_mode = Some(mode);
+            model.experimental_supported_tools = vec!["test_sync_tool".to_string()];
+        })
+        .with_pre_build_hook(move |home| {
+            let config = format!("{EXPLICIT_ROOT_MESSAGES}\ndirect_only = {direct_only}");
+            std::fs::write(home.join("config.toml"), config).expect("write config");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    // Attempt the direct send even when it is absent from the model's tool list.
+    let args = r#"{"message":"direct"}"#;
+    let mut calls = vec![
+        ev_function_call_with_namespace("direct", "functions", TOOL, args),
+        // Other tools remain callable directly even when CodeModeOnly hides them.
+        ev_function_call_with_namespace("other", "functions", "test_sync_tool", "{}"),
+    ];
+    if mode != ToolMode::Direct {
+        let js =
+            "text(await tools.send_message_to_user_async?.({message: 'nested'}) ?? 'unavailable')";
+        calls.push(ev_custom_tool_call("nested", "exec", js));
+    }
+    calls.push(ev_completed("resp-1"));
+    let done = sse(vec![ev_completed("resp-2")]);
+    let responses = mount_sse_sequence(&server, vec![sse(calls), done]).await;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Report progress.".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let mut started = Vec::new();
+    let mut completed = Vec::new();
+    wait_for_event(&test.codex, |event| {
+        match event {
+            EventMsg::ItemStarted(event) => {
+                if let TurnItem::AgentMessage(message) = &event.item {
+                    started.push(message.clone());
+                }
+            }
+            EventMsg::ItemCompleted(event) => {
+                if let TurnItem::AgentMessage(message) = &event.item {
+                    completed.push(message.clone());
+                }
+            }
+            _ => {}
+        }
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = responses.requests();
+    let body = requests[0].body_json();
+    let tools = body["tools"].as_array().expect("request tools");
+    let direct = direct_only || mode != ToolMode::CodeModeOnly;
+    assert_eq!(tools.iter().any(|tool| tool["name"] == TOOL), direct);
+    let expected = if direct {
+        ACCEPTED
+    } else {
+        "send_message_to_user_async requires code mode"
+    };
+    assert_eq!(
+        requests[1].function_call_output("direct")["output"],
+        expected
+    );
+    assert_eq!(requests[1].function_call_output("other")["output"], "ok");
+    if mode != ToolMode::Direct {
+        let nested = requests[1].custom_tool_call_output("nested");
+        let expected = if direct_only { "unavailable" } else { ACCEPTED };
+        assert_eq!(nested["output"][1]["text"], expected, "{nested}");
+    }
+    started.sort_by(|left, right| left.id.cmp(&right.id));
+    completed.sort_by(|left, right| left.id.cmp(&right.id));
+    assert_eq!(
+        serde_json::to_value(&started)?,
+        serde_json::to_value(&completed)?,
+    );
+    let expected_messages = [
+        direct.then_some("direct"),
+        (mode != ToolMode::Direct && !direct_only).then_some("nested"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let mut actual_messages = completed
+        .iter()
+        .map(|message| match message.content.as_slice() {
+            [AgentMessageContent::Text { text }] => text.as_str(),
+            content => panic!("unexpected message content: {content:?}"),
+        })
+        .collect::<Vec<_>>();
+    actual_messages.sort_unstable();
+    assert_eq!(actual_messages, expected_messages);
     Ok(())
 }
 
@@ -333,7 +455,7 @@ async fn freeform_async_message_emits_an_item_without_ending_the_turn(
                 .expect("model instruction metadata")
                 .tools = Some(ToolMessages {
                 send_user_message_async: Some(ToolMessage {
-                    description: Some("Questions only.".to_string()),
+                    description: Some("Questions only.".into()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -452,12 +574,12 @@ const CATALOG_ASYNC_PARAMETERS: &str = r#"{
 #[test_case(None, "request_user_input_async", None; "current_catalog_name")]
 #[test_case(Some(ToolMessages::default()), "send_user_message_async", None; "missing_tool")]
 #[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage::default()), ..Default::default() }), "send_user_message_async", None; "missing_description")]
-#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { description: Some("Catalog async message description.".to_string()), ..Default::default() }), ..Default::default() }), "send_user_message_async", None; "catalog_description")]
-#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { description: Some(String::new()), ..Default::default() }), ..Default::default() }), "send_user_message_async", None; "empty_description")]
-#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { parameters: Some(CATALOG_ASYNC_PARAMETERS.to_string()), ..Default::default() }), ..Default::default() }), "send_user_message_async", Some(CATALOG_ASYNC_PARAMETERS); "catalog_parameters")]
-#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { description: Some("Catalog async message description.".to_string()), parameters: Some(CATALOG_ASYNC_PARAMETERS.to_string()) }), ..Default::default() }), "request_user_input_async", Some(CATALOG_ASYNC_PARAMETERS); "catalog_description_and_parameters")]
-#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { parameters: Some(String::new()), ..Default::default() }), ..Default::default() }), "send_user_message_async", None; "empty_parameters_fallback")]
-#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { description: Some("Catalog async message description.".to_string()), parameters: Some(r#"{"type":"object","properties":{"questions":{"type":"unsupported"}}}"#.to_string()) }), ..Default::default() }), "send_user_message_async", None; "invalid_parameters_preserve_description")]
+#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { description: Some("Catalog async message description.".into()), ..Default::default() }), ..Default::default() }), "send_user_message_async", None; "catalog_description")]
+#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { description: Some("".into()), ..Default::default() }), ..Default::default() }), "send_user_message_async", None; "empty_description")]
+#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { parameters: Some(CATALOG_ASYNC_PARAMETERS.into()), ..Default::default() }), ..Default::default() }), "send_user_message_async", Some(CATALOG_ASYNC_PARAMETERS); "catalog_parameters")]
+#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { description: Some("Catalog async message description.".into()), parameters: Some(CATALOG_ASYNC_PARAMETERS.into()) }), ..Default::default() }), "request_user_input_async", Some(CATALOG_ASYNC_PARAMETERS); "catalog_description_and_parameters")]
+#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { parameters: Some("".into()), ..Default::default() }), ..Default::default() }), "send_user_message_async", None; "empty_parameters_fallback")]
+#[test_case(Some(ToolMessages { send_user_message_async: Some(ToolMessage { description: Some("Catalog async message description.".into()), parameters: Some(r#"{"type":"object","properties":{"questions":{"type":"unsupported"}}}"#.into()) }), ..Default::default() }), "send_user_message_async", None; "invalid_parameters_preserve_description")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_user_input_async_emits_item_and_does_not_end_the_turn(
     tool_messages: Option<ToolMessages>,

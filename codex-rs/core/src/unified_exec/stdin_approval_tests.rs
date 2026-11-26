@@ -4,6 +4,7 @@ use super::*;
 use crate::session::tests::make_session_and_context;
 use codex_network_proxy::NetworkMode;
 use codex_network_proxy::NetworkProxyConfig;
+use codex_network_proxy::environment_policy_from_config;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -19,6 +20,9 @@ use std::sync::Arc;
 fn terminal_permissions(profile: &PermissionProfile) -> TerminalPermissions {
     TerminalPermissions {
         policy: TerminalPolicy {
+            has_denied_reads: profile
+                .file_system_sandbox_policy()
+                .has_denied_read_restrictions(),
             sandbox: FileSystemSandboxContext::from_permission_profile(
                 effective_permission_profile(profile, /*additional_permissions*/ None),
                 PathUri::from_host_native_path(std::env::temp_dir()).expect("local temporary cwd"),
@@ -145,7 +149,7 @@ async fn captured_network_changes_require_review() -> anyhow::Result<()> {
     );
     insta::assert_snapshot!("network_mode", permissions.approval_reason(expected)?);
 
-    environment.config_mut().network_policy = Some(EnvironmentNetworkPolicy::from_config(
+    environment.config_mut().network_policy = Some(environment_policy_from_config(
         &proxy, /*managed_allowed_domains_only*/ false,
     ));
     let current = TerminalPolicy::capture(

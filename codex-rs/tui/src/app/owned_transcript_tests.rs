@@ -86,6 +86,7 @@ async fn external_writer_escape_returns_to_command_center_without_editing() -> R
         (false, false, true),
     ] {
         let mut app = crate::app::test_support::make_test_app().await;
+        crate::app::test_support::use_modal_agents_overview(&mut app);
         attach_thread(&mut app, ThreadId::new());
         app.transcript_cells = vec![user_cell("First prompt"), user_cell("Second prompt")];
         app.app_server_target = AppServerTarget::Remote {
@@ -185,6 +186,7 @@ async fn list_spacing_completion_preserves_the_scrolled_reader() -> Result<()> {
             "- First item wraps onto a second row\n- b\n- c".into(),
             &app.config.cwd,
         ),
+        /*emitted_cells*/ 1,
         ConsolidationScrollbackReflow::Required,
         /*deferred_history_cell*/ None,
     )?;
@@ -670,11 +672,16 @@ async fn owned_details_keep_the_composer_cursor_and_screen() -> Result<()> {
     let frames = tui.frame_requester();
     let mut painted = Default::default();
     tui.draw(outer.height, |frame| {
-        for cell in &mut frame.buffer.content {
-            cell.set_char('·');
+        // Paint the side margins before the conversation and the rows below it afterward.
+        let viewport = frame.area();
+        for pos in viewport.positions().filter(|pos| pos.y < area.bottom()) {
+            frame.buffer[pos].set_char('·');
         }
-        let prepared = app.prepare_conversation(frame.area(), Some(area), &frames);
+        let prepared = app.prepare_conversation(viewport, Some(area), &frames);
         painted = app.paint_conversation(frame, &prepared);
+        for pos in viewport.positions().filter(|pos| pos.y >= area.bottom()) {
+            frame.buffer[pos].set_char('·');
+        }
         frame
             .image_placements
             .push(crate::transcript_image::ImagePlacement {
@@ -804,6 +811,18 @@ async fn owned_details_keep_the_composer_cursor_and_screen() -> Result<()> {
         ),
         (false, true, "preserved draft".to_string()),
     );
+    // A replacement conversation starts at full width and drops the previous pane's image.
+    let init = app.chatwidget_init_for_forked_or_resumed_thread(
+        &mut tui,
+        app.config.clone(),
+        /*initial_user_message*/ None,
+    );
+    app.replace_chat_widget(ChatWidget::new_with_app_event(init));
+    assert_eq!(
+        app.render_owned_transcript(&mut tui, outer)?.width,
+        outer.width
+    );
+    assert!(presented(&tui).is_empty());
     tui.set_owned_screen(/*owned*/ false)?;
     Ok(())
 }
@@ -834,6 +853,51 @@ async fn owned_transcript_keeps_text_out_of_the_pet_columns() -> Result<()> {
             assert_eq!(buffer[(x, y)].symbol(), " ");
         }
     }
+    let text = buffer_text(buffer);
+    tui.terminal.virtual_image_base = Some(0x80_0000);
+    app.render_owned_transcript(&mut tui, size)?;
+    let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal);
+    assert_eq!(buffer_text(buffer), text);
+    let reserved = buffer
+        .content
+        .chunks(usize::from(size.width))
+        .map(|row| {
+            row[usize::from(width)..]
+                .iter()
+                .map(|cell| {
+                    if cell.diff_option == ratatui::buffer::CellDiffOption::Skip {
+                        '█'
+                    } else {
+                        ' '
+                    }
+                })
+                .collect::<String>()
+        })
+        .filter(|row| row.contains('█'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!("virtual_pet_columns", reserved);
+    // The fork progress frame paints text without a subsequent pet image pass.
+    app.chat_widget.fork_in_progress = true;
+    app.render_chat_widget_frame(&mut tui, Size::new(/*width*/ 28, size.height))?;
+    let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal);
+    let visible: String = buffer
+        .content
+        .iter()
+        .filter(|cell| cell.diff_option != ratatui::buffer::CellDiffOption::Skip)
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+    assert!(visible.contains("Forking conversation…"));
+    app.chat_widget.fork_in_progress = false;
+    app.chat_widget.disable_ambient_pet_for_session();
+    app.render_owned_transcript(&mut tui, size)?;
+    let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal);
+    assert!(
+        buffer
+            .content
+            .iter()
+            .all(|cell| cell.diff_option != ratatui::buffer::CellDiffOption::Skip)
+    );
     tui.set_owned_screen(/*owned*/ false)?;
     Ok(())
 }
@@ -1259,13 +1323,15 @@ async fn inline_select_mode_routes_find_and_returns_to_the_preserved_draft() -> 
 async fn inline_transcript_search_draws_and_escape_precedes_backtrack() -> Result<()> {
     let mut app = crate::app::test_support::make_test_app().await;
     attach_thread(&mut app, ThreadId::new());
-    app.transcript_cells = vec![user_cell("needle in history")];
+    app.transcript_cells = vec![user_cell("older NEEDLE"), user_cell("newer needle")];
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.open_transcript_overlay(&mut tui);
     for event in [
         TuiEvent::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
         TuiEvent::Paste("needle".to_string()),
+        TuiEvent::Draw,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
         TuiEvent::Draw,
     ] {
         app.handle_backtrack_overlay_event(&mut tui, &mut app_server, event)
@@ -1287,6 +1353,38 @@ async fn inline_transcript_search_draws_and_escape_precedes_backtrack() -> Resul
     assert!(
         matches!(&app.overlay, Some(Overlay::Transcript(overlay)) if overlay.has_active_interaction() && !overlay.is_search_editing())
     );
+    // Completing a later split answer must preserve the older, non-default hit.
+    app.insert_history_cell(
+        &mut tui,
+        Box::new(history_cell::AgentMessageCell::new(
+            vec!["Introduction".into()],
+            /*is_first_line*/ true,
+        )),
+    );
+    app.insert_history_cell(
+        &mut tui,
+        Box::new(history_cell::new_warning_event("Diagnostic".into())),
+    );
+    app.handle_consolidate_agent_message(
+        &mut tui,
+        history_cell::AgentMarkdownCell::new("Introduction and conclusion".into(), &app.config.cwd),
+        /*emitted_cells*/ 2,
+        ConsolidationScrollbackReflow::IfResizeReflowRan,
+        Some(Box::new(history_cell::AgentMessageCell::new(
+            vec!["and conclusion".into()],
+            /*is_first_line*/ false,
+        ))),
+    )?;
+    app.handle_backtrack_overlay_event(&mut tui, &mut app_server, TuiEvent::Draw)
+        .await?;
+    let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal);
+    let highlighted = buffer
+        .content()
+        .iter()
+        .filter(|cell| cell.modifier.contains(ratatui::style::Modifier::REVERSED))
+        .map(ratatui::buffer::Cell::symbol)
+        .collect::<String>();
+    assert_eq!(highlighted, "NEEDLE");
     assert!(!app.backtrack.overlay_preview_active);
     app.handle_backtrack_overlay_event(
         &mut tui,
@@ -1749,6 +1847,7 @@ mod browsing;
 #[tokio::test]
 async fn find_refreshes_live_details_before_searching_the_first_query() -> Result<()> {
     let mut app = crate::app::test_support::make_test_app().await;
+    app.local_settings.tui.collapse_turn_details = false;
     crate::chatwidget::tests::helpers::set_active_cell(
         &mut app.chat_widget,
         Box::new(crate::exec_cell::new_active_exec_command(
@@ -2348,7 +2447,6 @@ async fn clickable_transcript_foreground_follows_mouse_motion() -> Result<()> {
     let mut tui = crate::tui::test_support::make_test_tui()?;
     tui.set_owned_screen(/*owned*/ true)?;
     let size = tui.terminal.size()?;
-    app.local_settings.tui.collapse_turn_details = true;
     app.transcript_cells = vec![
         user_cell("See https://prompt.example/ for context."),
         Arc::new(history_cell::AgentMarkdownCell::new(

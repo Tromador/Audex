@@ -235,10 +235,7 @@ impl ToolExecutor<ToolInvocation> for McpHandler {
         )
     }
 
-    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
-    where
-        ToolInvocation: 'a,
-    {
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
         Box::pin(self.handle_call(invocation))
     }
 }
@@ -433,7 +430,7 @@ impl CoreToolRuntime for McpHandler {
             return;
         }
 
-        let result = result.code_mode_result(&invocation.payload);
+        let result = result.code_mode_result(&invocation.payload).into_json();
         let Some(content) = result.get("content").and_then(Value::as_array) else {
             return;
         };

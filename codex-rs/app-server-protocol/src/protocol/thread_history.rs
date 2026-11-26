@@ -540,7 +540,9 @@ impl ThreadHistoryBuilder {
         self.current_rollout_index = self.next_rollout_index;
         self.next_rollout_index += 1;
         match item {
-            RolloutItem::EventMsg(event) => self.handle_event(event),
+            RolloutItem::EventMsg { event, .. } => {
+                self.handle_event(event);
+            }
             RolloutItem::Compacted(payload) => self.handle_compacted(payload),
             RolloutItem::ResponseItem(item) => self.handle_response_item(&item.item),
             RolloutItem::InterAgentCommunication(_)
@@ -664,6 +666,7 @@ impl ThreadHistoryBuilder {
                 .moderation
                 .as_ref()
                 .map(|decision| AgentMessageModeration {
+                    prompt_wellbeing_results: decision.prompt_wellbeing_results.clone(),
                     moderated: decision.moderated,
                     display: decision.display.clone(),
                 }),
@@ -4922,7 +4925,6 @@ mod tests {
                     misalignment: None,
                     message: "Selected model is at capacity. Please try a different model.".into(),
                     codex_error_info: Some(CodexErrorInfo::PolicyCapacityUnavailable),
-                    rejected_audio_file_ids: Vec::new(),
                 }),
                 completed_at: Some(20),
                 duration_ms: Some(10_000),
@@ -5334,7 +5336,6 @@ mod tests {
                 misalignment: None,
                 message: "rollback failed".into(),
                 codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
-                rejected_audio_file_ids: Vec::new(),
             }),
         ];
 
@@ -5382,7 +5383,6 @@ mod tests {
                 misalignment: None,
                 message: "request-level failure".into(),
                 codex_error_info: Some(CodexErrorInfo::BadRequest),
-                rejected_audio_file_ids: Vec::new(),
             }),
         ];
 
@@ -5441,7 +5441,6 @@ mod tests {
                 codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
                     http_status_code: Some(502),
                 }),
-                rejected_audio_file_ids: Vec::new(),
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 root_turn_id: None,
@@ -5507,7 +5506,6 @@ mod tests {
                     misalignment: None,
                     message: "Selected model is at capacity. Please try a different model.".into(),
                     codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
-                    rejected_audio_file_ids: Vec::new(),
                 }),
                 completed_at: Some(20),
                 duration_ms: Some(10_000),

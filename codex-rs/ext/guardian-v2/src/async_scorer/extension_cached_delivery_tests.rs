@@ -199,13 +199,14 @@ async fn confirmed_root_delivery_invalidates_root_and_worker_cached_approvals() 
             text_elements: Vec::new(),
         }]))
         .await?;
+    // The root has to spawn the worker before it can request message delivery.
+    let worker_id = tokio::time::timeout(ASYNC_TEST_TIMEOUT, created.recv())
+        .await
+        .map_err(|_| anyhow::anyhow!("worker thread was not created"))??;
+    let worker = test.thread_manager.get_thread(worker_id).await?;
     tokio::time::timeout(ASYNC_TEST_TIMEOUT, pending_delivery.notified())
         .await
         .map_err(|_| anyhow::anyhow!("messaging delivery did not reach the MCP server"))?;
-    let worker = test
-        .thread_manager
-        .get_thread(created.recv().await?)
-        .await?;
     let mut config = test.config.clone();
     config.features.enable(Feature::GuardianV2)?;
     let session_store = ExtensionData::new("worker-cache-session");
@@ -222,8 +223,12 @@ async fn confirmed_root_delivery_invalidates_root_and_worker_cached_approvals() 
             thread_store: worker.thread_extension_data(),
         })
         .await;
-    let root_before = ScoreAuthorization::current(&test.codex, &Default::default()).await;
-    let worker_before = ScoreAuthorization::current(&worker, &Default::default()).await;
+    let root_before = ScoreAuthorization::current(&test.codex, &Default::default())
+        .await
+        .expect("read Guardian authorization");
+    let worker_before = ScoreAuthorization::current(&worker, &Default::default())
+        .await
+        .expect("read Guardian authorization");
     assert_eq!(
         worker_before.root_review_context_revision,
         Some(root_before.review_context_revision)
@@ -256,8 +261,12 @@ async fn confirmed_root_delivery_invalidates_root_and_worker_cached_approvals() 
     release_delivery.send(())?;
     let (root_after, worker_after) = tokio::time::timeout(ASYNC_TEST_TIMEOUT, async {
         loop {
-            let root = ScoreAuthorization::current(&test.codex, &Default::default()).await;
-            let worker = ScoreAuthorization::current(&worker, &Default::default()).await;
+            let root = ScoreAuthorization::current(&test.codex, &Default::default())
+                .await
+                .expect("read Guardian authorization");
+            let worker = ScoreAuthorization::current(&worker, &Default::default())
+                .await
+                .expect("read Guardian authorization");
             if root.review_context_revision != root_before.review_context_revision
                 && worker.root_review_context_revision != worker_before.root_review_context_revision
             {
@@ -310,6 +319,7 @@ async fn confirmed_root_delivery_invalidates_root_and_worker_cached_approvals() 
     let snapshot = worker
         .guardian_root_snapshot()
         .await
+        .expect("read root snapshot")
         .expect("root snapshot");
     assert!(!snapshot.authorization_version.retained_context_complete);
     assert!(
@@ -323,7 +333,9 @@ async fn confirmed_root_delivery_invalidates_root_and_worker_cached_approvals() 
     let progress = ConversationBackend::for_turn(store, store)
         .map(|cache| Arc::clone(&cache.progress))
         .unwrap();
-    let authorization = ScoreAuthorization::current(&worker, &Default::default()).await;
+    let authorization = ScoreAuthorization::current(&worker, &Default::default())
+        .await
+        .expect("read Guardian authorization");
     assert!(authorization.local.retained_context_complete);
     seed_cached_score(&progress, store, /*index*/ 1_000, authorization);
     assert_eq!(

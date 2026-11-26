@@ -104,10 +104,7 @@ impl App {
             }
         }
         if self.current_displayed_thread_id() != Some(review.thread_id)
-            || self
-                .active_thread_rx
-                .as_ref()
-                .is_some_and(|rx| !rx.is_empty())
+            || self.active_thread_rx().is_some_and(|rx| !rx.is_empty())
             || !self.chat_widget.is_current_misalignment_review(&review)
         {
             return;
@@ -120,7 +117,7 @@ impl App {
             && !self.side_threads.contains_key(&review.thread_id);
         let eligible_account = self.chat_widget.daybreak_account_eligible();
         let cyber_access_program = match crate::daybreak::program_for_turn(
-            &self.chat_widget.model_catalog().models,
+            self.chat_widget.model_catalog().models(),
             self.chat_widget.current_model(),
             eligible_account,
             enabled,

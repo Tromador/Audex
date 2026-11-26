@@ -7,11 +7,33 @@ pub use crate::guardian::PreparedGuardianContext;
 pub use crate::guardian::prepare_review_prewarm;
 pub use crate::mcp_tool_call::conversation_history::conversation_history_tools;
 
+/// Opts a root into session-owned evidence saves that survive turn cancellation.
+/// Install at thread startup. Reviewers do not wait for these writes.
+pub struct PreserveReviewWrites;
+
 /// Retrieval guidance for the tools installed in a private verdict session.
 #[derive(Clone)]
 pub enum ReviewRetrieval {
     ConversationHistory,
     Extension(std::sync::Arc<str>),
+}
+
+/// How the host requests review of a single recorded tool call.
+pub enum RecordedReviewMode {
+    Transcript {
+        root_evidence: Option<codex_app_server_protocol::GuardianRootEvidence>,
+    },
+    /// Route pending history under the recorded review deadline.
+    Attached(codex_extension_api::ExtensionFuture<'static, Result<(), ReviewPreparationError>>),
+}
+
+impl RecordedReviewMode {
+    pub(crate) fn root_evidence(&self) -> Option<&codex_app_server_protocol::GuardianRootEvidence> {
+        match self {
+            Self::Transcript { root_evidence } => root_evidence.as_ref(),
+            Self::Attached(_) => None,
+        }
+    }
 }
 
 /// The result of checking a recorded call without executing it.
@@ -36,17 +58,15 @@ pub fn reviewer_headers(config: &crate::config::Config) -> crate::CodexResponses
     }
 }
 
-/// A thread's synchronous reviewer. Bind the evidence catch-up to the action before it waits.
-pub trait AttachedReviewer: Send + Sync {
-    fn bind(self: std::sync::Arc<Self>) -> BoundReviewer;
+/// Kept out of the authoritative reviewer slot so routing and prewarming stay unchanged.
+pub struct ShadowReviewer {
+    pub reviewer: std::sync::Arc<dyn AttachedReviewer>,
+    /// Stops this actor when it shuts down or the root leaves Auto Review.
+    pub cancellation: tokio_util::sync::CancellationToken,
 }
 
-/// Evidence preparation bound to one action, shared by its review attempts.
-#[derive(Clone)]
-pub struct BoundReviewer {
-    pub preparation: std::sync::Arc<dyn ReviewerPreparation>,
-    pub retrieval: ReviewRetrieval,
-}
+/// Marks the private inference thread, which must never forward items to its parent.
+pub struct ShadowReviewSession;
 
 /// Safe to report with a review ID before a verdict has started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -63,8 +83,16 @@ pub enum ReviewPreparationError {
     Cancelled,
 }
 
-/// Reserve the actor's reviewer after routing and delivery have covered the bound action.
-pub trait ReviewerPreparation: Send + Sync {
+/// A thread's synchronous reviewer. Reserve the conversation and admit the
+/// available evidence for each attempt, including retries.
+pub trait AttachedReviewer: Send + Sync {
+    fn retrieval(&self) -> ReviewRetrieval;
+
+    /// Resolve the worker's currently loaded root. The root actor uses its own reset signal.
+    fn root_thread(
+        &self,
+    ) -> codex_extension_api::ExtensionFuture<'_, Option<std::sync::Arc<crate::CodexThread>>>;
+
     fn prepare<'a>(
         &'a self,
         setup: &'a PreparedGuardianContext,
@@ -75,7 +103,7 @@ pub trait ReviewerPreparation: Send + Sync {
     >;
 }
 
-/// Holds the model session until the host finishes validating the original authority.
+/// Holds the model session until the host accepts or discards its verdict.
 /// Dropping an interrupted reservation discards its partially admitted conversation.
 pub trait PreparedAssessment: Send + Sync {
     fn runtime(&self) -> &GuardianReviewSession;

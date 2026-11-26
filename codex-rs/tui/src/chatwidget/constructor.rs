@@ -124,6 +124,7 @@ impl ChatWidget {
                 effects: local_settings.tui.effects,
                 skills: None,
             }),
+            bidi_layout: false,
             transcript: TranscriptState::new(active_cell),
             raw_output_mode: local_settings.tui.raw_output_mode,
             config,
@@ -331,7 +332,6 @@ impl ChatWidget {
             widget.local_settings.codex_home.as_path(),
             widget.local_settings.history.persistence,
         );
-        widget.prefetch_rate_limits();
         if let Some(keymap) = runtime_keymap {
             widget.bottom_pane.set_keymap_bindings(&keymap);
         }

@@ -101,7 +101,6 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::MultiAgentVersion;
-use codex_protocol::protocol::RealtimeVoice;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol_test_support::ContentItemTestExt;
 use codex_utils_path_uri::LegacyAppPathString;
@@ -1476,7 +1475,7 @@ fn config_toml_deserializes_model_availability_nux() {
             question_esc_back: true,
             raw_output_mode: false,
             fullscreen_transcript: true,
-            collapse_turn_details: false,
+            collapse_turn_details: true,
             sidebar_width_percent: None,
             mouse_scroll_speed: None,
             copy_on_select: Default::default(),
@@ -4823,7 +4822,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             question_esc_back: true,
             raw_output_mode: false,
             fullscreen_transcript: true,
-            collapse_turn_details: false,
+            collapse_turn_details: true,
             sidebar_width_percent: None,
             mouse_scroll_speed: None,
             copy_on_select: Default::default(),
@@ -6247,8 +6246,8 @@ async fn mcp_launch_cwds_follow_the_runtime_feature() -> anyhow::Result<()> {
     });
     let plugins_manager =
         plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
-    assert!(!config.features.enabled(Feature::McpSharedReplCwd));
-    for enabled in [false, true, false] {
+    assert!(config.features.enabled(Feature::McpSharedReplCwd));
+    for enabled in [true, false, true] {
         let mut incoming = config.clone();
         incoming
             .features
@@ -9215,6 +9214,55 @@ max_section_entry_tokens = 1
 }
 
 #[tokio::test]
+async fn transcript_audio_elastic_budget_loads_for_both_reviewers() {
+    use codex_guardian_context::ElasticSection;
+    use codex_guardian_context::ElasticSectionLimits;
+
+    const AUDIO_RESERVATION_TOKENS: usize = 2_000;
+    const AUDIO_ENTRY_TOKENS: usize = 500;
+    const AUDIO_MAXIMUM_TOKENS: usize = 4_000;
+    let mut policy = core_test_support::guardian::elastic_budget_config();
+    let messages = policy.sections[&ElasticSection::TranscriptMessages];
+    policy.sections.insert(
+        ElasticSection::TranscriptMessages,
+        ElasticSectionLimits::new(
+            messages.min_total_section_tokens() - AUDIO_RESERVATION_TOKENS,
+            messages.max_section_entry_tokens(),
+        )
+        .unwrap(),
+    );
+    policy.sections.insert(
+        ElasticSection::TranscriptAudio,
+        ElasticSectionLimits::new(AUDIO_RESERVATION_TOKENS, AUDIO_ENTRY_TOKENS)
+            .unwrap()
+            .with_max_total_section_tokens(AUDIO_MAXIMUM_TOKENS)
+            .unwrap(),
+    );
+    let sections = toml::Value::try_from(&policy.sections).unwrap();
+    let home = TempDir::new().unwrap();
+    let config = Config::load_from_base_config_with_overrides(
+        toml::from_str(&format!(
+            "[features.guardianv2]\nsync_elastic_budgeting = true\nasync_elastic_budgeting = true\nsync_elastic_sections = {sections}\nasync_elastic_sections = {sections}"
+        ))
+        .unwrap(),
+        ConfigOverrides {
+            cwd: Some(home.path().to_path_buf()),
+            ..Default::default()
+        },
+        home.abs(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (
+            config.guardian_sync_elastic_budget,
+            config.guardian_async_elastic_budget
+        ),
+        (Some(policy.clone()), Some(policy)),
+    );
+}
+
+#[tokio::test]
 async fn async_elastic_opt_in_preserves_fixed_capture() {
     let mut config = super::test_config().await;
     config.guardian_async_elastic_budget =
@@ -11054,6 +11102,7 @@ async fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() 
     let fixture = create_test_fixture()?;
 
     let requirements_toml = codex_config::ConfigRequirementsToml {
+        gateway: None,
         config_server: None,
         model_provider: None,
         model_providers: None,
@@ -14048,30 +14097,21 @@ experimental_realtime_ws_model = "realtime-test-model"
 }
 
 #[tokio::test]
-async fn realtime_config_partial_table_uses_realtime_defaults() -> std::io::Result<()> {
-    let cfg: ConfigToml = toml::from_str(
-        r#"
-[realtime]
-voice = "marin"
-"#,
-    )
-    .expect("TOML deserialization should succeed");
-
+async fn realtime_config_with_legacy_voice_uses_realtime_defaults() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
-    let config = Config::load_from_base_config_with_overrides(
-        cfg,
-        ConfigOverrides::default(),
-        codex_home.abs(),
-    )
-    .await?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "[realtime]\nvoice = \"marin\"",
+    )?;
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+        .strict_config(/*strict_config*/ true)
+        .build()
+        .await?;
 
-    assert_eq!(
-        config.realtime,
-        RealtimeConfig {
-            voice: Some(RealtimeVoice::Marin),
-            ..RealtimeConfig::default()
-        }
-    );
+    assert_eq!(config.realtime, RealtimeConfig::default());
     Ok(())
 }
 
@@ -14083,7 +14123,6 @@ async fn realtime_loads_from_config_toml() -> std::io::Result<()> {
 version = "v2"
 type = "transcription"
 transport = "webrtc"
-voice = "cedar"
 "#,
     )
     .expect("TOML deserialization should succeed");
@@ -14094,7 +14133,7 @@ voice = "cedar"
             version: Some(RealtimeWsVersion::V2),
             session_type: Some(RealtimeWsMode::Transcription),
             transport: Some(RealtimeTransport::WebRtc),
-            voice: Some(RealtimeVoice::Cedar),
+            ..RealtimeToml::default()
         })
     );
 
@@ -14112,7 +14151,6 @@ voice = "cedar"
             version: RealtimeWsVersion::V2,
             session_type: RealtimeWsMode::Transcription,
             transport: RealtimeTransport::WebRtc,
-            voice: Some(RealtimeVoice::Cedar),
         }
     );
     Ok(())

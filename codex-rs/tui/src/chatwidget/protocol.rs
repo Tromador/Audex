@@ -99,7 +99,7 @@ impl ChatWidget {
                 self.on_thread_goal_cleared(notification.thread_id.as_str());
             }
             ServerNotification::ThreadSettingsUpdated(notification) => {
-                self.on_thread_settings_updated(notification);
+                self.apply_thread_settings(notification, replay_kind);
             }
             ServerNotification::TurnStarted(notification) => {
                 self.turn_lifecycle.has_turn_history = true;
@@ -376,11 +376,6 @@ impl ChatWidget {
                     self.on_shutdown_complete();
                 }
             }
-            ServerNotification::ThreadRealtimeSdp(notification) => {
-                if !from_replay {
-                    self.on_realtime_conversation_sdp(notification.sdp);
-                }
-            }
             ServerNotification::ThreadRealtimeStarted(_) => {
                 if !from_replay {
                     self.on_realtime_conversation_started();
@@ -440,6 +435,7 @@ impl ChatWidget {
             | ServerNotification::ThreadSearchPartial(_)
             | ServerNotification::FuzzyFileSearchSessionUpdated(_)
             | ServerNotification::FuzzyFileSearchSessionCompleted(_)
+            | ServerNotification::ThreadRealtimeSdp(_)
             | ServerNotification::ThreadRealtimeItemAdded(_)
             | ServerNotification::ThreadRealtimeItemStarted(_)
             | ServerNotification::ThreadRealtimeItemTranscriptDelta(_)

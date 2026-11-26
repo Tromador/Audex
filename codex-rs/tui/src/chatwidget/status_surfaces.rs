@@ -329,7 +329,7 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn iterm_session_detail(&self, status: ProgramStatus) -> Option<&str> {
+    pub(super) fn session_status_detail(&self, status: ProgramStatus) -> Option<&str> {
         (status == ProgramStatus::Working && self.bottom_pane.is_task_running())
             .then_some(self.status_state.current_status.header.as_str())
             .filter(|detail| *detail != "Working")
@@ -1013,7 +1013,7 @@ impl ChatWidget {
     pub(super) fn processing_tier_display_name(&self) -> Option<&str> {
         let id = self.current_service_tier()?;
         self.model_catalog
-            .models
+            .models()
             .iter()
             .find(|preset| preset.model == self.selected_model())
             .and_then(|preset| preset.service_tiers.iter().find(|tier| tier.id == id))

@@ -9,15 +9,16 @@ use crate::WindowsSandboxProxySettingsMode;
 #[cfg(target_os = "linux")]
 use crate::bwrap::WSL1_BWRAP_WARNING;
 use crate::policy_transforms::effective_permission_profile;
-use crate::policy_transforms::should_require_platform_sandbox;
-use codex_network_proxy::ManagedNetworkSandboxContext;
+use crate::policy_transforms::should_require_platform_sandbox_for_convention;
 use codex_network_proxy::NetworkProxy;
+use codex_network_proxy::PreparedNetworkRoute;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::sandbox::SandboxOverride;
 pub use codex_protocol::sandbox::SandboxType;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -86,7 +87,7 @@ pub struct SandboxCommand {
     pub args: Vec<String>,
     pub cwd: PathUri,
     pub env: HashMap<String, String>,
-    pub managed_network: Option<ManagedNetworkSandboxContext>,
+    pub managed_network: Option<PreparedNetworkRoute>,
     pub additional_permissions: Option<AdditionalPermissionProfile>,
 }
 
@@ -320,6 +321,7 @@ pub(super) trait SandboxBackend {
 
 #[derive(Clone, Default)]
 pub struct SandboxManager {
+    executor_path_convention: Option<PathConvention>,
     #[cfg(windows)]
     windows_token_session: Option<WindowsSandboxProxySettingsMode>,
     linux_sandbox_pid_namespace: LinuxSandboxPidNamespace,
@@ -332,6 +334,12 @@ pub struct SandboxManager {
 impl SandboxManager {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Evaluate the need for sandboxing using the selected executor's path convention.
+    pub fn with_executor_path_convention(mut self, convention: PathConvention) -> Self {
+        self.executor_path_convention = Some(convention);
+        self
     }
 
     /// Creates a manager that applies the narrower runtime profile required by filesystem helpers.
@@ -423,10 +431,12 @@ impl SandboxManager {
             SandboxablePreference::Auto => {
                 let (file_system_policy, network_policy) =
                     permission_profile.to_runtime_permissions();
-                should_require_platform_sandbox(
+                should_require_platform_sandbox_for_convention(
                     &file_system_policy,
                     network_policy,
                     has_managed_network_requirements,
+                    self.executor_path_convention
+                        .unwrap_or(PathConvention::native()),
                 )
             }
         }
@@ -457,11 +467,6 @@ impl SandboxManager {
                 if cfg!(target_os = "linux") {
                     runtime_readable_paths.extend(linux_sandbox.cloned());
                 }
-                if request.command.managed_network.is_some() {
-                    runtime_readable_paths.extend(codex_network_proxy::managed_mitm_ca_from_env(
-                        &request.command.env,
-                    ));
-                }
             }
         }
         let mut command = request.command;
@@ -479,6 +484,24 @@ impl SandboxManager {
                 "filesystem helpers cannot use managed networking",
             )));
         }
+        // Bind the proxy before resolving HOME and TMPDIR from the child environment.
+        let managed_network = command.managed_network.take();
+        let managed_network = match (managed_network, network) {
+            // A caller-prepared route already includes shell-specific credential handling.
+            (None, Some(proxy)) => {
+                let prepared = proxy
+                    .prepare_for_optional_environment(
+                        std::mem::take(&mut command.env),
+                        environment_id,
+                    )
+                    .map_err(|err| {
+                        SandboxTransformError::EnvironmentNetworkProxy(err.to_string())
+                    })?;
+                command.env = prepared.env;
+                Some(prepared.sandbox_context)
+            }
+            (route, _) => route,
+        };
         let permissions = effective_permission_profile(
             request.permissions,
             command.additional_permissions.as_ref(),
@@ -540,26 +563,11 @@ impl SandboxManager {
         .filter(|path| path.to_str().is_none())
         .map(OsStr::to_owned);
         let inner_arg_count = 1 + command.args.len();
-        let managed_network = match (command.managed_network, network) {
-            // A caller-prepared route already includes shell-specific credential handling.
-            (None, Some(proxy)) => {
-                let prepared = proxy
-                    .prepare_for_optional_environment(command.env, environment_id)
-                    .map_err(|err| {
-                        SandboxTransformError::EnvironmentNetworkProxy(err.to_string())
-                    })?;
-                command.env = prepared.env;
-                Some(prepared.sandbox_context)
-            }
-            (route, _) => route,
-        };
         let wrapped = |request, windows_session| WrappedSandboxCommand {
             request,
             windows_session,
             inner_arg_count,
         };
-        let managed_network = managed_network
-            .filter(|_| enforce_managed_network || backend == SandboxType::MacosSeatbelt);
         let mut argv = Vec::with_capacity(1 + command.args.len());
         argv.push(command.program.to_string_lossy().into_owned());
         argv.extend(command.args);
@@ -580,15 +588,15 @@ impl SandboxManager {
         if backend == SandboxType::None {
             return Ok(wrapped(exec, None));
         }
-        let managed_mitm_ca_trust_bundle_path = match request.executables {
-            SandboxExecutables::Executor { .. } => None,
-            SandboxExecutables::Launcher(_) => network
-                .and_then(NetworkProxy::managed_mitm_ca_trust_bundle_path)
-                .filter(|path| {
-                    path.to_str()
-                        .is_some_and(codex_network_proxy::is_managed_mitm_ca_trust_bundle_path)
-                }),
+        let (managed_network, managed_mitm_ca_trust_bundle_path) = match managed_network {
+            Some(route) => {
+                let (portable, bundle) = route.into_sandbox_inputs(&exec.env);
+                (Some(portable), bundle)
+            }
+            None => (None, None),
         };
+        let managed_network = managed_network
+            .filter(|_| enforce_managed_network || backend == SandboxType::MacosSeatbelt);
         #[cfg(windows)]
         let mut session = None;
         #[cfg(not(windows))]

@@ -1,14 +1,18 @@
 //! Read-only Markdown previews use the focused thread's workspace and app-server.
 
+pub(super) mod footer;
+pub(super) mod model_read;
 mod open_error;
+mod path_actions;
 mod watch;
 
+use self::path_actions::PathActions;
 use super::sidebar::PaneFocus;
 use super::sidebar::SidebarContent;
 use super::*;
 use crate::custom_terminal::Frame;
-use crate::key_hint::KeyBinding;
-use crate::keymap::KeymapContext;
+use crate::footer_hint::Hint;
+use crate::footer_hint::HintFocus;
 use crate::keymap::RuntimeKeymap;
 use crate::markdown_render::FileLink;
 use crate::markdown_render::SourceLocation;
@@ -24,12 +28,36 @@ use crate::transcript_view::DocumentPosition;
 use crate::transcript_view::TranscriptView;
 use crate::transcript_view::ViewAction;
 use codex_app_server_client::AppServerPath;
+use codex_app_server_client::ThreadPermissions;
 use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use color_eyre::eyre::eyre;
 use ratatui::layout::Position;
 use ratatui::widgets::Widget;
+use tokio::sync::oneshot;
 use unicode_segmentation::UnicodeSegmentation;
+
+async fn decode_document(
+    bytes: Vec<u8>,
+    path: &PathUri,
+    location: Option<SourceLocation>,
+) -> Result<DocumentContent> {
+    if !(FileLink {
+        path: path.inferred_native_path_string(),
+        location,
+    })
+    .is_image()
+    {
+        return AppServerSession::preview_text(bytes).map(DocumentContent::Text);
+    }
+    tokio::task::spawn_blocking(move || match SidebarImage::decode(&bytes) {
+        Ok(image) => Ok(DocumentContent::Image(Box::new(image))),
+        Err(image_error) => AppServerSession::preview_text(bytes)
+            .map(DocumentContent::Text)
+            .map_err(|_| image_error),
+    })
+    .await?
+}
 
 #[derive(Debug)]
 struct FileCell {
@@ -74,8 +102,32 @@ pub(super) struct DocumentRenderOptions<'a> {
     pub(super) motion: MotionMode,
     pub(super) frames: &'a tui::FrameRequester,
     pub(super) keymap: &'a RuntimeKeymap,
+    pub(super) resize_preview: bool,
     pub(super) resize_hint: Option<&'a str>,
+    pub(super) hint_focus: HintFocus,
     pub(super) image_protocol: Option<ImageProtocol>,
+}
+
+const MAX_MODEL_DOCUMENTS: usize = 8;
+
+pub(super) enum DocumentOrigin {
+    User {
+        focus: bool,
+    },
+    Model {
+        permissions: Result<Option<ThreadPermissions>>,
+    },
+}
+
+enum DocumentAccess {
+    User,
+    Model { load: Option<ModelLoad> },
+}
+
+struct ModelLoad {
+    permissions: Arc<ThreadPermissions>,
+    // Dropping the tab or replacing the backend cancels the read.
+    _cancel: oneshot::Sender<()>,
 }
 
 pub(super) struct Document {
@@ -87,9 +139,12 @@ pub(super) struct Document {
     link: Option<usize>,
     location: Option<SourceLocation>,
     state: State,
+    pub(super) path_actions: PathActions,
+    access: DocumentAccess,
 }
 
 enum State {
+    AwaitingOpen,
     Loading(Instant),
     Failed {
         error: color_eyre::Report,
@@ -106,6 +161,9 @@ enum State {
 
 impl Document {
     pub(super) fn link_at(&self, column: u16, row: u16) -> Option<ReaderLink> {
+        if self.path_actions.scroll.is_some() {
+            return None;
+        }
         match &self.state {
             State::Ready { view, .. } if !view.is_select_mode() => view.reader_link_at(column, row),
             _ => None,
@@ -117,12 +175,25 @@ impl Document {
             if view.has_active_interaction() && view.owns_interaction_key(key))
     }
 
-    pub(super) fn allows_tab_shortcut(&self, key: KeyEvent) -> bool {
+    pub(super) fn allows_tab_shortcut(&self, key: KeyEvent, keymap: &RuntimeKeymap) -> bool {
+        if self.path_actions.scroll.is_some()
+            && (key.code == KeyCode::Esc || keymap.list.cancel.is_pressed(key))
+        {
+            return false;
+        }
         match &self.state {
             State::Ready { view, target, .. } => {
                 !view.has_active_interaction()
                     && (key.code != KeyCode::Esc || (self.link.is_none() && target.is_none()))
             }
+            _ => true,
+        }
+    }
+
+    pub(super) fn path_actions_available(&self) -> bool {
+        match &self.state {
+            State::AwaitingOpen => false,
+            State::Ready { view, .. } => self.link.is_none() && !view.has_active_interaction(),
             _ => true,
         }
     }
@@ -146,8 +217,61 @@ impl Document {
         self.path.basename().unwrap_or_default()
     }
 
+    fn opens_live_on_enter(&self) -> bool {
+        self.awaits_open()
+            || (self.is_model_snapshot()
+                && self.link.is_none()
+                && !self.owns_interaction_key(KeyCode::Enter.into()))
+    }
+
+    pub(super) fn awaits_open(&self) -> bool {
+        matches!(self.state, State::AwaitingOpen)
+    }
+
+    fn is_model_snapshot(&self) -> bool {
+        matches!(self.access, DocumentAccess::Model { .. })
+            && matches!(self.state, State::Ready { .. } | State::Image(_))
+    }
+
+    pub(super) fn model_loading(&self) -> bool {
+        matches!(self.access, DocumentAccess::Model { load: Some(_) })
+    }
+
+    pub(super) async fn finish_model_load(
+        &mut self,
+        server: &AppServerSession,
+        result: Result<DocumentContent>,
+    ) {
+        let DocumentAccess::Model {
+            load: Some(initial),
+        } = &mut self.access
+        else {
+            return;
+        };
+        let initial = Arc::clone(&initial.permissions);
+        self.access = DocumentAccess::Model { load: None };
+        let result = match result {
+            Ok(content) => match server.model_preview_permissions(self.source).await {
+                Ok(Some(current))
+                    if initial.profile == current.profile
+                        && initial.workspace_roots == current.workspace_roots =>
+                {
+                    Ok(content)
+                }
+                _ => Err(eyre!(
+                    "Workspace or permissions changed while loading the preview"
+                )),
+            },
+            Err(error) => Err(error),
+        };
+        self.loaded(result);
+    }
+
     pub(super) fn connection_replaced(&mut self) {
         self.watch = None;
+        if let DocumentAccess::Model { load } = &mut self.access {
+            *load = None;
+        }
         if matches!(self.state, State::Loading(_)) {
             self.state = State::Failed {
                 error: eyre!("Connection changed. Reopen this file to try again."),
@@ -160,7 +284,7 @@ impl Document {
         let position = match &self.state {
             State::Ready { view, .. } => Some(view.document_position()),
             State::Failed { position, .. } => *position,
-            State::Loading(_) | State::Image(_) => None,
+            State::AwaitingOpen | State::Loading(_) | State::Image(_) => None,
         };
         self.state = match result {
             Ok(DocumentContent::Image(image)) => State::Image(image),
@@ -240,6 +364,7 @@ impl Document {
             && crate::markdown_render::is_markdown_file(&self.title());
         self.location = location;
         self.link = None;
+        self.path_actions.dismiss();
         let State::Ready {
             view,
             cells,
@@ -269,7 +394,7 @@ impl Document {
 
     pub(super) fn paint(
         &mut self,
-        area: Rect,
+        panel: Rect,
         frame: &mut Frame<'_>,
         options: DocumentRenderOptions<'_>,
     ) -> Option<Position> {
@@ -278,16 +403,111 @@ impl Document {
             frames,
             keymap,
             resize_hint,
+            hint_focus,
+            resize_preview,
             image_protocol,
         } = options;
         let buf = &mut *frame.buffer;
+        let [_, area] = side_pane::tab_and_body(panel);
         ratatui::widgets::Clear.render(area, buf);
-        let body = area.inner(ratatui::layout::Margin::new(1, 0));
+        let mut body = area.inner(ratatui::layout::Margin::new(1, 0));
+        if let Some(top) = self.path_actions.scroll {
+            let [path_body, footer] = crate::sidebar_chooser::file_path_areas(panel);
+            let line = if let Some(hint) = resize_hint {
+                crate::sidebar_chooser::resize_hint(hint, footer.width)
+            } else {
+                self.path_actions
+                    .revealed_footer(footer.width, frames, hint_focus)
+            };
+            line.render(footer, buf);
+            crate::sidebar_chooser::paint_file_path(
+                path_body,
+                &self.path.inferred_native_path_string(),
+                top,
+                buf,
+            );
+            return None;
+        }
+        if self.is_model_snapshot() && body.height > 1 {
+            let open = (hint_focus.is_active() && self.opens_live_on_enter())
+                .then(|| Hint::key("enter", "open live"));
+            let banner = std::iter::once(Hint::Status("Snapshot".dim().into())).chain(open);
+            HintFocus::Active
+                .render_row(banner, body.width)
+                .line
+                .render(Rect { height: 1, ..body }, buf);
+            body.y += 1;
+            body.height -= 1;
+        }
+        let path_actions_available = self.path_actions_available() && body.height > 2;
+        if !matches!(self.state, State::Ready { .. }) {
+            let close = || {
+                Hint::key(
+                    crate::key_hint::plain(KeyCode::Esc).display_label(),
+                    "close",
+                )
+            };
+            let (base, max_rows) = match &self.state {
+                State::Image(_) => (
+                    vec![close(), Hint::key("←/→", "tabs")],
+                    body.height.saturating_sub(1).min(2),
+                ),
+                State::Failed { error, .. } => {
+                    let count = open_error::lines(&self.path, error, body.width).len();
+                    let close = (count + 2 < usize::from(body.height)).then(close);
+                    (
+                        close.into_iter().collect(),
+                        body.height
+                            .saturating_sub(count.min(usize::from(u16::MAX)) as u16)
+                            .min(2),
+                    )
+                }
+                State::Loading(_) => (Vec::new(), body.height.saturating_sub(1).min(2)),
+                State::AwaitingOpen => (Vec::new(), 0),
+                State::Ready { .. } => unreachable!(),
+            };
+            if let Some(hint) = resize_hint {
+                let line = crate::sidebar_chooser::resize_hint(hint, body.width);
+                footer::paint(&mut body, vec![line], buf);
+            } else if max_rows > 0 {
+                let lines = if path_actions_available {
+                    self.path_actions.footer_lines(
+                        base,
+                        body.width,
+                        usize::from(max_rows),
+                        frames,
+                        [true; 2],
+                        hint_focus,
+                    )
+                } else {
+                    hint_focus.render_lines(base, body.width, usize::from(max_rows.min(1)))
+                };
+                footer::paint(&mut body, lines, buf);
+            }
+        }
         match &mut self.state {
+            State::AwaitingOpen => {
+                let path = self.path.inferred_native_path_string();
+                let path =
+                    crate::history_cell::sanitize_user_text(path.into()).replace(['\n', '\t'], " ");
+                let title = match self.location {
+                    Some(location) => format!("Open {path} at line {}?", location.line),
+                    None => format!("Open {path}?"),
+                };
+                let mut lines = textwrap::wrap(&title, usize::from(body.width).max(1))
+                    .into_iter()
+                    .map(|line| Line::from(line.into_owned()))
+                    .collect::<Vec<_>>();
+                let prompt = hint_focus.render_row([Hint::key("enter", "open")], body.width);
+                lines.push(prompt.line);
+                Paragraph::new(lines)
+                    .wrap(ratatui::widgets::Wrap { trim: true })
+                    .render(body, buf);
+            }
             State::Image(image) => {
                 frame
                     .image_placements
-                    .extend(image.paint(body, buf, image_protocol, resize_hint))
+                    .extend(image.paint(body, buf, image_protocol))
             }
             State::Loading(started) => {
                 let glyph = crate::motion::loading_glyph(*started, motion, frames);
@@ -301,14 +521,8 @@ impl Document {
             State::Failed { error, .. } => {
                 let mut lines = open_error::lines(&self.path, error, body.width);
                 // On short panes, keep the space for the filename and recovery message.
-                if lines.len() + 2 < usize::from(body.height) {
+                if lines.len() + 1 < usize::from(body.height) {
                     lines.insert(0, Line::default());
-                    if resize_hint.is_none() {
-                        let esc = crate::key_hint::plain(KeyCode::Esc);
-                        let footer = Rect::new(body.x, body.bottom() - 1, body.width, 1);
-                        crate::footer_hint::shortcut(&esc.display_label(), "close")
-                            .render(footer, buf);
-                    }
                 }
                 Paragraph::new(lines).render(body, buf);
             }
@@ -318,6 +532,7 @@ impl Document {
                 line_starts,
                 target,
             } => {
+                view.set_document_resize_preview(resize_preview);
                 view.set_keymap_bindings(keymap);
                 if view.tick_selection(cells) {
                     frames.schedule_frame_in(std::time::Duration::from_millis(45));
@@ -325,37 +540,10 @@ impl Document {
                 if view.advance_search(cells) {
                     frames.schedule_frame();
                 }
-                let footer = view.footer_with_navigation(body.width, motion, "Esc close");
-                let hints = crate::footer_hint::HintLine::new(
-                    [
-                        Some(crate::footer_hint::shortcut("↑/↓", "read")),
-                        Some(crate::footer_hint::shortcut(
-                            &keymap
-                                .pager
-                                .find
-                                .first()
-                                .map_or_else(|| "F3".to_owned(), KeyBinding::display_label),
-                            "find",
-                        )),
-                        Some(crate::footer_hint::shortcut("Tab", "link")),
-                        keymap
-                            .primary_hint(KeymapContext::Global, "select_transcript")
-                            .map(|hint| {
-                                crate::footer_hint::shortcut(&hint.display_label(), "select")
-                            }),
-                        Some(crate::footer_hint::shortcut(
-                            "Esc",
-                            if target.is_some() {
-                                "clear highlight"
-                            } else {
-                                "close"
-                            },
-                        )),
-                    ]
-                    .into_iter()
-                    .flatten(),
-                    body.width,
-                );
+                let footer = hint_focus
+                    .is_active()
+                    .then(|| view.footer_with_navigation(body.width, motion, "Esc close"))
+                    .flatten();
                 let text: ratatui::text::Text<'_> = if let Some(hint) = resize_hint {
                     crate::sidebar_chooser::resize_hint(hint, body.width).into()
                 } else if let Some(footer) = &footer
@@ -363,7 +551,48 @@ impl Document {
                 {
                     footer.text.clone()
                 } else {
-                    hints.line.into()
+                    let escape = if self.link.is_some() {
+                        "clear link"
+                    } else if target.is_some() {
+                        "clear highlight"
+                    } else {
+                        "close"
+                    };
+                    let esc = crate::key_hint::plain(KeyCode::Esc).display_label();
+                    let mut hints = vec![Hint::key(esc, escape)];
+                    let available = footer::key_available(keymap);
+                    if self.link.is_some() && available(KeyCode::Enter) {
+                        hints.push(Hint::key("enter", "open link"));
+                    }
+                    let link = available(KeyCode::Tab).then(|| Hint::key("Tab", "link"));
+                    hints.extend(footer::reading_hints(
+                        keymap,
+                        footer::PagerHints::WithChords,
+                        link,
+                    ));
+                    let max_rows = usize::from(body.height.saturating_sub(1).min(2));
+                    if path_actions_available {
+                        self.path_actions
+                            .footer_lines(
+                                hints,
+                                body.width,
+                                max_rows,
+                                frames,
+                                ['c', 'p'].map(|ch| available(KeyCode::Char(ch))),
+                                hint_focus,
+                            )
+                            .into()
+                    } else {
+                        let query = (!hint_focus.is_active())
+                            .then(|| view.search_footer(body.width).map(|(query, _)| query))
+                            .flatten();
+                        let rows = max_rows.saturating_sub(usize::from(query.is_some())).min(1);
+                        query
+                            .into_iter()
+                            .chain(hint_focus.render_lines(hints, body.width, rows))
+                            .collect::<Vec<_>>()
+                            .into()
+                    }
                 };
                 let now = Instant::now();
                 let height = (text.height() as u16).min(body.height.saturating_sub(1));
@@ -403,13 +632,6 @@ impl Document {
                     }
                 }
             }
-        }
-        if !matches!(self.state, State::Ready { .. })
-            && body.height > 0
-            && let Some(hint) = resize_hint
-        {
-            crate::sidebar_chooser::resize_hint(hint, body.width)
-                .render(Rect::new(body.x, body.bottom() - 1, body.width, 1), buf);
         }
         None
     }
@@ -468,9 +690,7 @@ impl App {
     ) -> bool {
         self.conversation_focus_available(tui)
             && self.sidebar_chooser_available()
-            && server.thread_params_mode() != crate::app_server_session::ThreadParamsMode::Cloud
-            && server.app_server_platform_family() != Some("windows")
-            && (server.uses_remote_workspace() || !cfg!(windows))
+            && server.supports_document_previews()
             && self.current_displayed_thread_id().is_some()
     }
 
@@ -493,8 +713,8 @@ impl App {
         let Some(parent) = self.sidebar_parent() else {
             return Ok(());
         };
-        let resolver = server.request_view();
-        let backend_id = resolver.backend_id();
+        let resolver = server.file_system();
+        let backend_id = server.backend_id();
         let tx = self.app_event_tx.clone();
         let request = uuid::Uuid::new_v4();
         let pane = self.sidebar_mut();
@@ -533,34 +753,148 @@ impl App {
         location: Option<SourceLocation>,
         focus: bool,
     ) -> Result<()> {
-        let Some(parent) = self.sidebar_parent() else {
-            return Ok(());
-        };
+        if let Some(id) = self.open_document_tab(
+            server,
+            source,
+            original_path,
+            path,
+            location,
+            DocumentOrigin::User { focus },
+        ) {
+            if focus {
+                self.activate_sidebar_tab(tui, server, SidebarTab::Document(id))
+                    .await?;
+            } else {
+                tui.frame_requester().schedule_frame();
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn open_document_tab(
+        &mut self,
+        server: &AppServerSession,
+        source: ThreadId,
+        original_path: AppServerPath,
+        path: PathUri,
+        location: Option<SourceLocation>,
+        origin: DocumentOrigin,
+    ) -> Option<uuid::Uuid> {
+        let parent = self.sidebar_parent()?;
         let backend_id = server.backend_id();
+        let tx = self.app_event_tx.clone();
+        let environment = self.environment_manager.try_local_environment();
         let existing = self.sidebar().and_then(|pane| {
-            pane.documents.iter().find_map(|(&id, doc)| {
-                (doc.backend == backend_id && doc.path == path)
-                    .then_some((id, matches!(doc.state, State::Failed { .. })))
-            })
+            pane.documents
+                .iter()
+                .find(|(_, doc)| doc.backend == backend_id && doc.path == path)
+                .map(|(&id, _)| id)
         });
-        if let Some((id, failed)) = existing {
-            if !focus {
-                return Ok(());
-            }
-            if !failed {
-                if let Some(doc) = self.sidebar_mut().documents.get_mut(&id) {
+        if let Some(id) = existing {
+            let doc = self.sidebar_mut().documents.get_mut(&id)?;
+            match (&origin, &doc.access) {
+                (DocumentOrigin::User { focus: false }, _) => return None,
+                (DocumentOrigin::User { focus: true }, DocumentAccess::User)
+                    if !matches!(doc.state, State::Failed { .. }) =>
+                {
                     doc.go_to(location);
+                    return Some(id);
                 }
-                return self
-                    .activate_sidebar_tab(tui, server, SidebarTab::Document(id))
-                    .await;
+                (DocumentOrigin::Model { permissions: Ok(_) }, DocumentAccess::User)
+                    if doc.source == source =>
+                {
+                    // The user already authorized this tab. Keep the watch and use its content.
+                    if location.is_some() {
+                        doc.go_to(location);
+                    }
+                    return Some(id);
+                }
+                (DocumentOrigin::Model { .. }, DocumentAccess::User) => return None,
+                _ => self.sidebar_mut().remove_document(id),
             }
-            self.sidebar_mut().remove_document(id);
+        }
+        if matches!(origin, DocumentOrigin::Model { .. })
+            && self
+                .sidebars
+                .values()
+                .flat_map(|pane| pane.documents.values())
+                .filter(|doc| matches!(doc.access, DocumentAccess::Model { .. }))
+                .count()
+                >= MAX_MODEL_DOCUMENTS
+        {
+            self.chat_widget.add_warning_message(
+                "Close a model-opened sidebar tab to open another model preview.".to_owned(),
+            );
+            return None;
         }
         let request = uuid::Uuid::new_v4();
-        let tx = self.app_event_tx.clone();
+        let (state, access) = match origin {
+            DocumentOrigin::User { .. } => (State::Loading(Instant::now()), DocumentAccess::User),
+            DocumentOrigin::Model { permissions } => {
+                let (state, load) = match (permissions, environment) {
+                    (Ok(None), _) => (State::AwaitingOpen, None),
+                    (Err(error), _) => (
+                        State::Failed {
+                            error,
+                            position: None,
+                        },
+                        None,
+                    ),
+                    (Ok(Some(_)), None) => (
+                        State::Failed {
+                            error: eyre!("Local filesystem is unavailable"),
+                            position: None,
+                        },
+                        None,
+                    ),
+                    (Ok(Some(permissions)), Some(environment)) => {
+                        let reader = server.file_system();
+                        let task_tx = tx.clone();
+                        let task_path = path.clone();
+                        let task_original = original_path.clone();
+                        let permissions = Arc::new(permissions);
+                        let initial = Arc::clone(&permissions);
+                        let (cancel, canceled) = oneshot::channel();
+                        tokio::spawn(async move {
+                            let read = model_read::read(
+                                &reader,
+                                &environment,
+                                source,
+                                &task_original,
+                                &task_path,
+                                &permissions,
+                            );
+                            let result = tokio::select! {
+                                biased;
+                                _ = canceled => Err(eyre!("Preview closed")),
+                                result = read => result,
+                            };
+                            let result = match result {
+                                Ok(bytes) => decode_document(bytes, &task_path, location).await,
+                                Err(error) => Err(error),
+                            };
+                            task_tx.send(AppEvent::SidebarDocumentLoaded {
+                                backend_id,
+                                parent,
+                                tab: request,
+                                request,
+                                result,
+                            });
+                        });
+                        (
+                            State::Loading(Instant::now()),
+                            Some(ModelLoad {
+                                permissions: initial,
+                                _cancel: cancel,
+                            }),
+                        )
+                    }
+                };
+                (state, DocumentAccess::Model { load })
+            }
+        };
         let pane = self.sidebar_mut();
-        if !pane.opened_files.contains(&path) {
+        if matches!(access, DocumentAccess::User) && !pane.opened_files.contains(&path) {
             pane.opened_files.push(path.clone());
         }
         let mut doc = Document {
@@ -571,18 +905,14 @@ impl App {
             backend: backend_id,
             link: None,
             location,
-            state: State::Loading(Instant::now()),
+            state,
+            access,
+            path_actions: PathActions::default(),
         };
         doc.subscribe(request, parent, server, tx);
         pane.documents.insert(request, doc);
         pane.add_document_tab(request);
-        if focus {
-            self.activate_sidebar_tab(tui, server, SidebarTab::Document(request))
-                .await?;
-        } else {
-            tui.frame_requester().schedule_frame();
-        }
-        Ok(())
+        Some(request)
     }
 
     pub(super) async fn handle_document_input(
@@ -592,8 +922,9 @@ impl App {
         event: &TuiEvent,
     ) -> bool {
         let focused = self.panel_focus() == Some(PaneFocus::Sidebar);
-        let area = self.conversation_frame.panel_area();
-        let Some(pane) = self.sidebars.get_mut(&self.sidebar_parent()) else {
+        let panel = self.conversation_frame.panel_area();
+        let parent = self.sidebar_parent();
+        let Some(pane) = self.sidebars.get_mut(&parent) else {
             return false;
         };
         let Some(SidebarContent::Document(id)) = pane.visible_content() else {
@@ -604,8 +935,10 @@ impl App {
         {
             if let Some(Document {
                 state: State::Ready { view, cells, .. },
+                path_actions,
                 ..
             }) = pane.documents.get_mut(&id)
+                && path_actions.scroll.is_none()
                 && view.handle_mouse(*mouse, cells).is_some()
             {
                 tui.frame_requester().schedule_frame();
@@ -625,6 +958,34 @@ impl App {
                 }
                 let escape = crate::key_hint::plain(KeyCode::Esc).is_press(*key);
                 if key.kind != KeyEventKind::Press && (escape || key.code == KeyCode::Enter) {
+                    return true;
+                }
+                if doc.path_actions.scroll.is_some() {
+                    let list = &self.keymap.list;
+                    if escape || list.cancel.is_pressed(*key) {
+                        doc.path_actions.dismiss();
+                    } else if !doc.path_actions.handle_key(*key, &doc.path, tui)
+                        && let Some(panel) = panel
+                        && let Some(action) = list.vertical_action_for(*key)
+                    {
+                        doc.path_actions.scroll_path(panel, &doc.path, action);
+                    }
+                    tui.frame_requester().schedule_frame();
+                    return true;
+                }
+                if crate::key_hint::plain(KeyCode::Enter).is_press(*key)
+                    && let Some(parent) = parent
+                    && doc.opens_live_on_enter()
+                {
+                    doc.access = DocumentAccess::User;
+                    if doc.awaits_open() {
+                        doc.state = State::Loading(Instant::now());
+                    }
+                    doc.subscribe(id, parent, server, self.app_event_tx.clone());
+                    if !pane.opened_files.contains(&doc.path) {
+                        pane.opened_files.push(doc.path.clone());
+                    }
+                    tui.frame_requester().schedule_frame();
                     return true;
                 }
                 if let State::Ready {
@@ -672,6 +1033,9 @@ impl App {
                         && let Some(index) = doc.link.take()
                     {
                         view.document_link(cells, index).map(ViewAction::from)
+                    } else if doc.link.is_none() && !view.has_active_interaction() {
+                        doc.path_actions.handle_key(*key, &doc.path, tui);
+                        None
                     } else {
                         doc.link = None;
                         if view.has_active_interaction() {
@@ -684,14 +1048,19 @@ impl App {
                         }
                     }
                 } else {
+                    if doc.path_actions_available() {
+                        doc.path_actions.handle_key(*key, &doc.path, tui);
+                    }
                     None
                 }
             }
             TuiEvent::Paste(text) if focused => {
                 if let Some(Document {
                     state: State::Ready { view, .. },
+                    path_actions,
                     ..
                 }) = pane.documents.get_mut(&id)
+                    && path_actions.scroll.is_none()
                 {
                     view.paste_search(text);
                 }
@@ -699,7 +1068,7 @@ impl App {
             }
             TuiEvent::Mouse(mouse) if mouse.kind != MouseEventKind::Moved => {
                 let inside =
-                    area.is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)));
+                    panel.is_some_and(|area| area.contains(Position::new(mouse.column, mouse.row)));
                 if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                     pane.show(
                         SidebarContent::Document(id),
@@ -717,13 +1086,21 @@ impl App {
                 if (selection_motion && !focused) || (!selection_motion && !inside) {
                     return false;
                 }
-                if let Some(Document {
-                    state: State::Ready { view, cells, .. },
-                    link,
-                    ..
-                }) = pane.documents.get_mut(&id)
-                {
-                    *link = None;
+                let Some(doc) = pane.documents.get_mut(&id) else {
+                    return true;
+                };
+                if doc.path_actions.scroll.is_some() {
+                    let action = match mouse.kind {
+                        MouseEventKind::ScrollUp => Some(crate::keymap::ListAction::MoveUp),
+                        MouseEventKind::ScrollDown => Some(crate::keymap::ListAction::MoveDown),
+                        _ => None,
+                    };
+                    if let (Some(panel), Some(action)) = (panel, action) {
+                        doc.path_actions.scroll_path(panel, &doc.path, action);
+                    }
+                    None
+                } else if let State::Ready { view, cells, .. } = &mut doc.state {
+                    doc.link = None;
                     view.mouse_scroll_speed = self.transcript_view.mouse_scroll_speed;
                     view.copy_on_select = self.transcript_view.copy_on_select;
                     view.copy_on_select_clear_selection =

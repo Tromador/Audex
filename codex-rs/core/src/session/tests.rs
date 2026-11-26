@@ -1363,7 +1363,7 @@ network.transparent_tcp = true
         let prepared = proxy
             .proxy()
             .prepare_for_optional_environment(HashMap::new(), /*environment_id*/ None)?;
-        assert_eq!(prepared.sandbox_context.transparent_tcp, capture);
+        assert_eq!(prepared.sandbox_context.portable.transparent_tcp, capture);
     }
     Ok(())
 }
@@ -1838,6 +1838,50 @@ async fn reload_user_config_layer_updates_base_and_selected_profile_layers() {
             .and_then(toml::Value::as_str),
         Some("never")
     );
+}
+
+#[test_case("startup", true; "sync and async hooks match")]
+#[test_case("resume", false; "only async hook matches")]
+#[tokio::test]
+async fn cancelled_turn_defers_only_blocking_session_start_hooks(
+    sync_matcher: &str,
+    deferred: bool,
+) -> anyhow::Result<()> {
+    let session = make_session_with_config(|config| {
+        config.bypass_hook_trust = true;
+        config.features.enable(Feature::CodexHooks).unwrap();
+        config.config_layer_stack = config
+            .config_layer_stack
+            .with_user_config(
+                &config.codex_home.join(CONFIG_TOML_FILE),
+                toml::from_str(&format!(
+                    r#"[[hooks.SessionStart]]
+matcher = "startup"
+hooks = [{{ type = "command", command = "echo async", async = true }}]
+
+[[hooks.SessionStart]]
+matcher = "{sync_matcher}"
+hooks = [{{ type = "command", command = "echo startup" }}]
+"#
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+    })
+    .await?;
+    let turn = session.new_default_turn().await;
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    cancellation.cancel();
+
+    assert_eq!(
+        crate::hook_runtime::run_pending_session_start_hooks(&session, &turn, &cancellation).await,
+        deferred
+    );
+    assert_eq!(
+        session.pending_session_start_source().await.is_some(),
+        deferred
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -4003,7 +4047,7 @@ async fn start_new_context_window_persists_checkpoint_state(clear_tools: bool) {
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::RealtimeItem(_)
-        | RolloutItem::EventMsg(_) => None,
+        | RolloutItem::EventMsg { .. } => None,
     });
     let mut expected_history = live_history.annotated_items().to_vec();
     // Compaction's parallel metadata vector represents absent entries as default metadata.
@@ -4108,7 +4152,7 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::RealtimeItem(_)
-        | RolloutItem::EventMsg(_) => None,
+        | RolloutItem::EventMsg { .. } => None,
     });
     let persisted_item = persisted_item.expect("forked response item should be persisted");
     assert_eq!(
@@ -4733,7 +4777,7 @@ async fn open_thread_persistence(session: &mut Session) -> PathBuf {
         .expect("thread should have rollout path")
 }
 
-async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
+pub(super) async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
     let rollout_path = open_thread_persistence(session).await;
     session
         .ensure_rollout_materialized(PersistContext::Standard)
@@ -5000,6 +5044,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
+            spawn_service_tier_override: None,
             personality: config.personality,
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
@@ -5881,9 +5926,10 @@ async fn settings_checkpoint_waits_for_accepted_settings_persistence() {
     let snapshots = items
         .into_iter()
         .filter_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
-                Some((event.thread_id, event.thread_settings))
-            }
+            RolloutItem::EventMsg {
+                event: EventMsg::ThreadSettingsApplied(event),
+                ..
+            } => Some((event.thread_id, event.thread_settings)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -6105,7 +6151,10 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
         RolloutItem::Compacted(compacted),
         RolloutItem::WorldState(saved_world_state),
         RolloutItem::TurnContext(saved_turn_context),
-        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(saved_settings)),
+        RolloutItem::EventMsg {
+            event: EventMsg::ThreadSettingsApplied(saved_settings),
+            ..
+        },
     ] = compaction_items.as_slice()
     else {
         panic!("unexpected compaction records: {compaction_items:#?}");
@@ -6587,6 +6636,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
+            spawn_service_tier_override: None,
             personality: config.personality,
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
@@ -6794,13 +6844,14 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         context_ids,
         agent_runtime: crate::agent::host::AgentRuntimeServices::Controller,
         outcome_reporting: None,
+        preserve_review_writes: false,
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         tx_event,
         parent_observer_event_tx: OnceLock::new(),
         agent_status: agent_status_tx,
         state: Mutex::new(state),
         initial_context_publication: Semaphore::new(/*permits*/ 1),
-        thread_settings_persistence: Semaphore::new(/*permits*/ 1),
+        thread_settings_persistence: Arc::new(Semaphore::new(/*permits*/ 1)),
         code_mode_message_tasks: Default::default(),
         managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
         features: config.features.clone(),
@@ -6938,6 +6989,7 @@ async fn make_session_with_config_and_rx(
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
+            spawn_service_tier_override: None,
             personality: config.personality,
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
@@ -7079,6 +7131,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
+            spawn_service_tier_override: None,
             personality: config.personality,
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
@@ -8953,6 +9006,7 @@ where
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
+            spawn_service_tier_override: None,
             personality: config.personality,
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
@@ -9159,13 +9213,14 @@ where
         context_ids,
         agent_runtime: crate::agent::host::AgentRuntimeServices::Controller,
         outcome_reporting: None,
+        preserve_review_writes: false,
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         tx_event,
         parent_observer_event_tx: OnceLock::new(),
         agent_status: agent_status_tx,
         state: Mutex::new(state),
         initial_context_publication: Semaphore::new(/*permits*/ 1),
-        thread_settings_persistence: Semaphore::new(/*permits*/ 1),
+        thread_settings_persistence: Arc::new(Semaphore::new(/*permits*/ 1)),
         code_mode_message_tasks: Default::default(),
         managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
         features: config.features.clone(),
@@ -11298,7 +11353,7 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
         model_info.context_window = None;
         model_info.max_context_window = None;
         let messages = model_info.model_messages.as_mut().unwrap();
-        messages.instructions_template = Some("A instructions".to_string());
+        messages.instructions_template = Some("A instructions".into());
     });
     session.state.lock().await.base_instructions_provenance =
         Some(codex_protocol::models::BaseInstructionsProvenance::Model {
@@ -11346,7 +11401,7 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
         .model_messages
         .as_mut()
         .unwrap()
-        .instructions_template = Some("B instructions".to_string());
+        .instructions_template = Some("B instructions".into());
     turn_context
         .next_step_settings
         .store(Arc::new(ResolvedStepSettings::new(

@@ -178,7 +178,7 @@ async fn daybreak_refusal_offers_enable_for_the_next_turn() {
         daybreak_availability: Default::default(),
         cyber: vec![codex_protocol::turn_input::CyberAccessProgram::DaybreakBlue],
     });
-    chat.model_catalog = std::sync::Arc::new(ModelCatalog::new(vec![model]));
+    set_test_model_catalog(&mut chat, vec![model]);
 
     chat.thread_usage.replaying_turn_completion = true;
     chat.on_cyber_policy_error();
@@ -283,7 +283,7 @@ async fn daybreak_refusal_offers_enable_for_the_next_turn() {
         daybreak_availability: Default::default(),
         cyber: vec![codex_protocol::turn_input::CyberAccessProgram::DaybreakBlue],
     });
-    chat.model_catalog = std::sync::Arc::new(ModelCatalog::new(vec![daybreak.clone()]));
+    set_test_model_catalog(&mut chat, vec![daybreak.clone()]);
     chat.set_model("gpt-5.6-sol");
     chat.daybreak_enabled = true;
     handle_turn_started(&mut chat, "daybreak-recourse");
@@ -331,7 +331,7 @@ async fn daybreak_refusal_offers_enable_for_the_next_turn() {
         daybreak_availability: Default::default(),
         cyber: vec![codex_protocol::turn_input::CyberAccessProgram::Standard],
     });
-    chat.model_catalog = std::sync::Arc::new(ModelCatalog::new(vec![astra]));
+    set_test_model_catalog(&mut chat, vec![astra]);
     chat.set_model("gpt-6-astra");
     handle_turn_started(&mut chat, "astra-recourse");
     safety_recourse::on_metadata(
@@ -369,7 +369,7 @@ async fn daybreak_refusal_offers_enable_for_the_next_turn() {
     assert!(!picker.contains("Enable Daybreak"));
     chat.handle_key_event(KeyCode::Esc.into());
 
-    chat.model_catalog = std::sync::Arc::new(ModelCatalog::new(vec![daybreak]));
+    set_test_model_catalog(&mut chat, vec![daybreak]);
     chat.set_model("gpt-5.6-sol");
     chat.daybreak_enabled = false;
     chat.set_parent_owned_thread();
@@ -843,9 +843,6 @@ async fn prefetch_rate_limits_is_gated_on_chatgpt_auth_provider() {
     chat.config.model_provider.requires_openai_auth = true;
     chat.requires_openai_auth = false;
     assert!(!chat.should_prefetch_rate_limits());
-
-    chat.prefetch_rate_limits();
-    assert!(!chat.should_prefetch_rate_limits());
 }
 
 #[tokio::test]
@@ -864,18 +861,10 @@ async fn rate_limit_warnings_emit_thresholds() {
     assert_eq!(
         warnings,
         vec![
-            String::from(
-                "Heads up, you have less than 25% of your 5h limit left. Run /status for a breakdown."
-            ),
-            String::from(
-                "Heads up, you have less than 25% of your weekly limit left. Run /status for a breakdown.",
-            ),
-            String::from(
-                "Heads up, you have less than 5% of your 5h limit left. Run /status for a breakdown."
-            ),
-            String::from(
-                "Heads up, you have less than 5% of your weekly limit left. Run /status for a breakdown.",
-            ),
+            String::from("Heads up, you have less than 25% of your 5h limit left."),
+            String::from("Heads up, you have less than 25% of your weekly limit left.",),
+            String::from("Heads up, you have less than 5% of your 5h limit left."),
+            String::from("Heads up, you have less than 5% of your weekly limit left.",),
         ],
         "expected one warning per limit for the highest crossed threshold"
     );
@@ -942,7 +931,7 @@ async fn test_rate_limit_warnings_monthly() {
     assert_eq!(
         warnings,
         vec![String::from(
-            "Heads up, you have less than 25% of your monthly limit left. Run /status for a breakdown.",
+            "Heads up, you have less than 25% of your monthly limit left.",
         ),],
         "expected one warning per limit for the highest crossed threshold"
     );
@@ -971,12 +960,8 @@ async fn test_rate_limit_warnings_use_generic_fallback_labels() {
             /*primary_window_minutes*/ None,
         ),
         vec![
-            String::from(
-                "Heads up, you have less than 25% of your secondary usage limit left. Run /status for a breakdown.",
-            ),
-            String::from(
-                "Heads up, you have less than 25% of your usage limit left. Run /status for a breakdown.",
-            ),
+            String::from("Heads up, you have less than 25% of your secondary usage limit left.",),
+            String::from("Heads up, you have less than 25% of your usage limit left.",),
         ],
     );
 }
@@ -994,7 +979,7 @@ async fn test_rate_limit_warnings_use_secondary_fallback_for_unsupported_window(
             /*primary_window_minutes*/ None,
         ),
         vec![String::from(
-            "Heads up, you have less than 25% of your secondary usage limit left. Run /status for a breakdown.",
+            "Heads up, you have less than 25% of your secondary usage limit left.",
         )],
     );
 }
@@ -1452,6 +1437,39 @@ async fn rate_limit_switch_prompt_skips_when_on_lower_cost_model() {
         chat.rate_limit_switch_prompt,
         RateLimitSwitchPromptState::Idle
     ));
+}
+
+#[tokio::test]
+async fn custom_provider_warns_from_turn_without_rate_limit_switch_prompt() {
+    let (mut chat, mut rx, _) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.config.model_provider_id = "custom".into();
+    chat.requires_openai_auth = false;
+    let mut usage = snapshot(/*percent*/ 96.0);
+    usage.primary.as_mut().unwrap().window_duration_mins = Some(10080);
+    chat.on_rolling_rate_limit_snapshot(usage.clone());
+
+    let warnings = drain_insert_history_transcript(&mut rx);
+    insta::assert_snapshot!(lines_to_single_string(&warnings.concat()), @r"
+    ⚠ Heads up, you have less than 5% of your weekly limit left.
+    ");
+    assert!(matches!(
+        chat.rate_limit_switch_prompt,
+        RateLimitSwitchPromptState::Idle
+    ));
+    let notice = chat.usage_notice(/*width*/ 160).unwrap().to_string();
+    insta::assert_snapshot!(notice, @"⚠ weekly limit: only 4% left");
+
+    let mut sparse = snapshot(/*percent*/ 10.0);
+    sparse.secondary = sparse.primary.take();
+    chat.on_rolling_rate_limit_snapshot(sparse);
+    assert_eq!(
+        chat.usage_notice(/*width*/ 160).unwrap().to_string(),
+        notice
+    );
+
+    usage.primary.as_mut().unwrap().used_percent = 10;
+    chat.on_rolling_rate_limit_snapshot(usage);
+    assert!(chat.usage_notice(/*width*/ 160).is_none());
 }
 
 #[tokio::test]
@@ -2687,22 +2705,91 @@ fn assert_goal_paused_event(
 }
 
 #[tokio::test]
-async fn idle_commit_ticks_do_not_restore_status_without_commentary_completion() {
+async fn unphased_stream_keeps_activity_visible_until_turn_completion() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    handle_turn_started(&mut chat, "turn-1");
 
-    chat.on_task_started();
-    assert_eq!(chat.bottom_pane.status_indicator_visible(), true);
-
-    chat.on_agent_message_delta("Final answer line\n".to_string());
+    let whitespace = "\u{3000}\n";
+    handle_agent_message_delta(&mut chat, whitespace);
     chat.on_commit_tick();
-    drain_insert_history(&mut rx);
+    assert!(drain_insert_history(&mut rx).is_empty());
+    assert!(chat.bottom_pane.status_indicator_visible());
+    complete_assistant_message(&mut chat, "msg-1", whitespace, /*phase*/ None);
+    assert!(chat.bottom_pane.status_indicator_visible());
 
-    assert_eq!(chat.bottom_pane.status_indicator_visible(), false);
-    assert_eq!(chat.bottom_pane.is_task_running(), true);
-
-    // A second idle tick should not toggle the row back on and cause jitter.
+    chat.on_agent_message_delta("Checking the workbook.\n".to_string());
     chat.on_commit_tick();
-    assert_eq!(chat.bottom_pane.status_indicator_visible(), false);
+    chat.on_commit_tick();
+    let footer = |chat: &ChatWidget, width| {
+        hook_status_frame(chat, width)
+            .lines()
+            .last()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(!chat.bottom_pane.status_indicator_visible());
+    let mut hints = vec![footer(&chat, 60)];
+    chat.apply_external_edit("Follow up".into());
+    hints.push(footer(&chat, 60));
+    hints.push(footer(&chat, 26));
+    chat.apply_external_edit(String::new());
+    chat.bottom_pane.set_vim_enabled(/*enabled*/ true);
+    chat.handle_key_event(KeyCode::Insert.into());
+    hints.push(footer(&chat, 60));
+    chat.handle_key_event(KeyCode::Esc.into());
+    hints.push(footer(&chat, 60));
+    chat.bottom_pane.set_vim_enabled(/*enabled*/ false);
+    assert_chatwidget_snapshot!("streaming_interrupt_hint", hints.join("\n"));
+    complete_assistant_message(
+        &mut chat,
+        "msg-2",
+        "Checking the workbook.",
+        /*phase*/ None,
+    );
+    assert_chatwidget_snapshot!(
+        "paused_unphased_message",
+        hook_status_frame(&chat, /*width*/ 60)
+    );
+    handle_turn_completed(&mut chat, "turn-1", /*duration_ms*/ None);
+    assert!(!chat.bottom_pane.status_indicator_visible());
+}
+
+#[tokio::test]
+async fn stop_hook_retry_restores_working_after_final_answer() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    handle_turn_started(&mut chat, "turn-1");
+    complete_assistant_message(&mut chat, "msg-1", "Done.", Some(MessagePhase::FinalAnswer));
+
+    let prompt = ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+        String::new(),
+        "turn-1".into(),
+        AppServerThreadItemPayload::HookPrompt {
+            id: "prompt-1".into(),
+            fragments: vec![codex_app_server_protocol::HookPromptFragment {
+                text: "Include test results.".into(),
+                hook_run_id: "stop-1".into(),
+            }],
+        },
+        /*started_at_ms*/ None,
+        /*completed_at_ms*/ 0,
+    ));
+    chat.handle_server_notification(prompt.clone(), /*replay_kind*/ None);
+    assert_chatwidget_snapshot!(
+        "stop_hook_retry_working",
+        hook_status_frame(&chat, /*width*/ 60)
+    );
+
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let replay = ReplayKind::ThreadSnapshot;
+    replay_turn_started(&mut chat, replay);
+    replay_agent_message(&mut chat, "msg-1", "Done.", replay);
+    assert!(!chat.bottom_pane.status_indicator_visible());
+    chat.handle_server_notification(prompt.clone(), Some(replay));
+    assert!(chat.bottom_pane.status_indicator_visible());
+
+    handle_turn_completed(&mut chat, "turn-1", /*duration_ms*/ None);
+    chat.handle_server_notification(prompt, Some(replay));
+    assert!(!chat.bottom_pane.status_indicator_visible());
 }
 
 #[tokio::test]
@@ -2852,7 +2939,7 @@ async fn ambient_pet_stays_hidden_until_a_pet_is_selected() {
         /*x*/ 0, /*y*/ 0, /*width*/ 60, /*height*/ 20,
     );
     let draw = chat
-        .ambient_pet_draw(area, area.bottom())
+        .ambient_pet_draw(area, area.bottom(), /*shortcut_hud_area*/ None)
         .expect("ambient pet draw request");
     assert_eq!(draw.x, 51);
     assert_eq!(draw.y, 14);
@@ -2866,7 +2953,7 @@ async fn ambient_pet_stays_hidden_until_a_pet_is_selected() {
     handle_turn_started(&mut chat, "turn-1");
     handle_agent_reasoning_delta(&mut chat, "**Thinking**");
     let draw_with_status = chat
-        .ambient_pet_draw(area, area.bottom())
+        .ambient_pet_draw(area, area.bottom(), /*shortcut_hud_area*/ None)
         .expect("ambient pet draw request with status");
     assert_eq!(draw_with_status.y, draw.y);
     assert_eq!(
@@ -2889,13 +2976,21 @@ async fn ambient_pet_screen_bottom_anchor_uses_terminal_bottom() {
     );
     let composer_bottom_y = 20;
     let default_draw = chat
-        .ambient_pet_draw(terminal_area, composer_bottom_y)
+        .ambient_pet_draw(
+            terminal_area,
+            composer_bottom_y,
+            /*shortcut_hud_area*/ None,
+        )
         .expect("composer-anchored pet draw request");
     assert_eq!(default_draw.y, 14);
 
     chat.local_settings.tui.pet_anchor = TuiPetAnchor::ScreenBottom;
     let screen_bottom_draw = chat
-        .ambient_pet_draw(terminal_area, composer_bottom_y)
+        .ambient_pet_draw(
+            terminal_area,
+            composer_bottom_y,
+            /*shortcut_hud_area*/ None,
+        )
         .expect("screen-bottom anchored pet draw request");
     assert_eq!(screen_bottom_draw.y, 18);
 }
@@ -3054,27 +3149,39 @@ async fn ambient_pet_draw_uses_terminal_screen_area_not_short_inline_viewport() 
     use ratatui::layout::Rect;
 
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    enable_test_ambient_pet(&mut chat);
+    let (tx, mut frames) = tokio::sync::broadcast::channel(1);
+    chat.ambient_pet = Some(crate::pets::test_ambient_pet(
+        FrameRequester::new(tx),
+        /*animations_enabled*/ true,
+    ));
+    tokio::time::pause();
+    handle_turn_started(&mut chat, "pet-turn");
+    chat.pre_draw_tick();
 
-    assert!(
-        chat.ambient_pet_draw(
-            Rect::new(
-                /*x*/ 0, /*y*/ 21, /*width*/ 80, /*height*/ 3,
-            ),
-            /*composer_bottom_y*/ 24
-        )
-        .is_none(),
-        "a normal short inline viewport cannot fit the ambient pet"
+    let screen = Rect::new(
+        /*x*/ 0, /*y*/ 0, /*width*/ 80, /*height*/ 24,
     );
+    let short = Rect::new(
+        /*x*/ 0, /*y*/ 21, /*width*/ 80, /*height*/ 3,
+    );
+    assert!(
+        chat.ambient_pet_draw(short, screen.bottom(), /*shortcut_hud_area*/ None)
+            .is_none()
+    );
+    assert!(
+        chat.ambient_pet_draw(screen, screen.bottom(), Some(screen))
+            .is_none()
+    );
+    let timeout = std::time::Duration::from_secs(1);
+    assert!(tokio::time::timeout(timeout, frames.recv()).await.is_err());
 
     let draw = chat
-        .ambient_pet_draw(
-            Rect::new(
-                /*x*/ 0, /*y*/ 0, /*width*/ 80, /*height*/ 24,
-            ),
-            /*composer_bottom_y*/ 24,
-        )
+        .ambient_pet_draw(screen, screen.bottom(), /*shortcut_hud_area*/ None)
         .expect("full terminal screen has room for the ambient pet");
+    tokio::time::timeout(timeout, frames.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(draw.x, 71);
     assert_eq!(draw.y, 18);
 }
@@ -4629,7 +4736,7 @@ async fn status_line_model_with_reasoning_speed_footer_snapshots() {
             description: String::new(),
         },
     ]);
-    chat.model_catalog = Arc::new(ModelCatalog::new(vec![preset]));
+    set_test_model_catalog(&mut chat, vec![preset]);
 
     for (tier_id, tier_name, snapshot) in [
         (

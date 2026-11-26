@@ -164,6 +164,7 @@ pub(crate) enum ConfiguredHandlerKind {
 
 #[derive(Debug)]
 pub(crate) struct HandlerRunResult {
+    pub encrypted_context: Vec<crate::HookContextPayload>,
     pub structured_content: Option<serde_json::Value>,
     pub context_metadata: codex_protocol::models::ContentItemMetadata,
     pub started_at: i64,
@@ -392,6 +393,8 @@ impl ClaudeHooksEngine {
                     timeout_sec,
                     status_message,
                     on_failure,
+                    // Executor-scoped cleanup events cannot emit additionalContext.
+                    additional_context_limit: _,
                 } = handler
                 else {
                     unreachable!("allowlisted executor handler must be an MCP tool");

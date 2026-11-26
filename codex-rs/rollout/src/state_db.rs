@@ -291,62 +291,6 @@ pub fn normalize_cwd_for_state_db(cwd: &Path) -> PathBuf {
     normalize_for_path_comparison(cwd).unwrap_or_else(|_| cwd.to_path_buf())
 }
 
-/// List thread ids from SQLite for parity checks without rollout scanning.
-#[allow(clippy::too_many_arguments)]
-pub async fn list_thread_ids_db(
-    context: Option<&codex_state::StateRuntime>,
-    sqlite: &codex_state::SqliteConfig,
-    page_size: usize,
-    cursor: Option<&Cursor>,
-    sort_key: ThreadSortKey,
-    allowed_sources: &[SessionSource],
-    model_providers: Option<&[String]>,
-    archived_only: bool,
-    stage: &str,
-) -> Option<Vec<ThreadId>> {
-    let ctx = context?;
-    if ctx.sqlite() != sqlite {
-        warn!(
-            "state db SQLite home mismatch: expected {}, got {}",
-            sqlite.home().display(),
-            ctx.sqlite().home().display()
-        );
-        return None;
-    }
-
-    let anchor = cursor_to_anchor(cursor);
-    let allowed_sources: Vec<String> = allowed_sources
-        .iter()
-        .map(|value| match serde_json::to_value(value) {
-            Ok(Value::String(s)) => s,
-            Ok(other) => other.to_string(),
-            Err(_) => String::new(),
-        })
-        .collect();
-    let model_providers = model_providers.map(<[String]>::to_vec);
-    match ctx
-        .list_thread_ids(
-            page_size,
-            anchor.as_ref(),
-            match sort_key {
-                ThreadSortKey::CreatedAt => codex_state::SortKey::CreatedAt,
-                ThreadSortKey::UpdatedAt => codex_state::SortKey::UpdatedAt,
-                ThreadSortKey::RecencyAt => codex_state::SortKey::RecencyAt,
-            },
-            allowed_sources.as_slice(),
-            model_providers.as_deref(),
-            archived_only,
-        )
-        .await
-    {
-        Ok(ids) => Some(ids),
-        Err(err) => {
-            warn!("state db list_thread_ids failed during {stage}: {err}");
-            None
-        }
-    }
-}
-
 /// List thread metadata from SQLite without rollout directory traversal.
 #[allow(clippy::too_many_arguments)]
 pub async fn list_threads_db(
@@ -636,21 +580,21 @@ pub async fn read_repair_rollout_path(
             return;
         }
         saw_existing_metadata = true;
-        let mut repaired = metadata.clone();
-        repaired.rollout_path = rollout_path.to_path_buf();
-        repaired.cwd = normalize_cwd_for_state_db(&repaired.cwd);
-        match archived_only {
-            Some(true) if repaired.archived_at.is_none() => {
-                repaired.archived_at = Some(repaired.updated_at);
-            }
-            Some(false) => {
-                repaired.archived_at = None;
-            }
-            Some(true) | None => {}
-        }
-        if repaired == metadata {
+        let cwd = normalize_cwd_for_state_db(&metadata.cwd);
+        let archived_at = match archived_only {
+            Some(true) => Some(metadata.archived_at.unwrap_or(metadata.updated_at)),
+            Some(false) => None,
+            None => metadata.archived_at,
+        };
+        if cwd == metadata.cwd && archived_at == metadata.archived_at {
             return;
         }
+        let repaired = codex_state::ThreadMetadata {
+            rollout_path: rollout_path.to_path_buf(),
+            cwd,
+            archived_at,
+            ..metadata
+        };
         warn!("state db discrepancy during read_repair_rollout_path: upsert_needed (fast path)");
         if let Err(err) = ctx.upsert_thread(&repaired).await {
             warn!(

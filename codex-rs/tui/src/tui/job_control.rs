@@ -18,7 +18,7 @@ use ratatui::layout::Size;
 
 use crate::key_hint;
 
-use super::Terminal;
+use super::Tui;
 
 pub const SUSPEND_KEY: key_hint::KeyBinding = key_hint::ctrl(KeyCode::Char('z'));
 
@@ -60,6 +60,11 @@ impl SuspendContext {
     /// - Update the cached inline cursor row so suspend can place the cursor meaningfully.
     /// - Trigger SIGTSTP so the process can be resumed and continue drawing with the saved state.
     pub(crate) fn suspend(&self, alt_screen_active: &Arc<AtomicBool>) -> Result<()> {
+        // A launcher can supply a PTY without making it our controlling terminal.
+        // Leave the TUI intact if we couldn't verify ownership on resume.
+        if unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
         if alt_screen_active.load(Ordering::Relaxed) {
             // Leave alt-screen so the terminal returns to the normal buffer while suspended; also turn off alt-scroll.
             let _ = super::ALTERNATE_SCREEN.leave(&mut stdout());
@@ -181,20 +186,21 @@ pub(crate) enum PreparedResumeAction {
 }
 
 impl PreparedResumeAction {
-    pub(crate) fn apply(
-        self,
-        terminal: &mut Terminal,
-        screen_size: Size,
-        owned: bool,
-        capture_mouse: bool,
-    ) -> Result<()> {
+    pub(crate) fn apply(self, tui: &mut Tui, screen_size: Size) -> Result<()> {
+        tui.terminal.invalidate_cursor_state();
         match self {
             PreparedResumeAction::RealignViewport(area) => {
-                terminal.set_viewport_area(area);
+                // A deferred clear resets the origin itself. Realigning to an empty
+                // viewport first would make the terminal skip the scrollback purge.
+                if tui.clear_on_draw.is_none() {
+                    tui.terminal.set_viewport_area(area);
+                }
             }
             PreparedResumeAction::RestoreAltScreen => {
+                let capture_mouse = tui.mouse_capture.captures_mouse(tui.owned_screen);
+                let terminal = &mut tui.terminal;
                 super::ALTERNATE_SCREEN.enter(terminal.backend_mut(), capture_mouse)?;
-                if owned {
+                if tui.owned_screen {
                     terminal.hide_cursor()?;
                 }
                 terminal.set_viewport_area(Rect::from(screen_size));
@@ -205,7 +211,7 @@ impl PreparedResumeAction {
     }
 }
 
-/// Deliver SIGTSTP after restoring terminal state, then re-applies terminal modes once resumed.
+/// Release the terminal and suspend the job until it resumes in the foreground.
 fn suspend_process() -> Result<()> {
     static JOB_RESUMED: AtomicBool = AtomicBool::new(false);
     extern "C" fn record_job_resumed(_signal: libc::c_int) {
@@ -276,6 +282,27 @@ fn suspend_process() -> Result<()> {
     } else {
         Err(std::io::Error::last_os_error())
     };
+    // bg resumes the process without the terminal. A subsequent fg can hand
+    // it back without another SIGCONT. Only query ownership here: even a
+    // kernel-generated SIGTTOU could arrive after that handoff.
+    let job = unsafe { libc::getpgrp() };
+    loop {
+        let foreground = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+        if foreground == job {
+            break;
+        }
+        if foreground == -1
+            && matches!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ENOTTY | libc::EBADF | libc::EIO | libc::ENXIO)
+            )
+        {
+            // We lost the controlling terminal after releasing it. Returning
+            // would restart input and redraw, even on error.
+            std::process::exit(1);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     suspend_result
         .and(restore_mask_result)
         .and(restore_result)

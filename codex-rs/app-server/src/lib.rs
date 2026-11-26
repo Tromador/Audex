@@ -51,6 +51,7 @@ use crate::transport::start_websocket_acceptor;
 use codex_analytics::AppServerRpcTransport;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::JSONRPCMessage;
+use codex_app_server_protocol::MESSAGE_BOARD_CLIENT_NAME;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::TextPosition as AppTextPosition;
 use codex_app_server_protocol::TextRange as AppTextRange;
@@ -579,7 +580,7 @@ pub async fn run_main_with_transport_options(
     )
     .with_mcp_launch_cwds(runtime_options.plugin_mcp_launch.into_cwds()?);
     let startup = config_manager
-        .load_managed_startup_config(startup_cwd.clone())
+        .load_managed_startup_config(startup_cwd.clone(), /*previous*/ None)
         .await?;
     let mut config_warnings = Vec::new();
     let mut plugin_startup_config = PluginStartupConfig::Current;
@@ -823,6 +824,15 @@ pub async fn run_main_with_transport_options(
         ));
     }
     let installation_id = resolve_installation_id(&config.codex_home).await?;
+    let statsig = config
+        .start_statsig(
+            codex_core::statsig::StatsigSurface::AppServer,
+            codex_core::statsig::HostIdentity::ServingAccount {
+                auth: Arc::clone(&auth_manager),
+                default_analytics_enabled,
+            },
+        )
+        .await;
     let transport_shutdown_token = CancellationToken::new();
     // Remote enrollment must cancel before RPC drain without shutting down telemetry.
     let remote_control_shutdown_token = transport_shutdown_token.child_token();
@@ -1359,20 +1369,22 @@ pub async fn run_main_with_transport_options(
                     created = thread_created_rx.recv(), if listen_for_threads && !ready_to_exit => {
                         match created {
                             Ok(thread_id) => {
-                                let mut initialized_connection_ids = Vec::new();
+                                let mut subscriber_ids = Vec::new();
                                 for (connection_id, connection_state) in &connections {
-                                    if connection_state.session.initialized() {
-                                        initialized_connection_ids.push(*connection_id);
+                                    // The board only injects mail. Subscribing it keeps idle children loaded.
+                                    if connection_state
+                                        .session
+                                        .app_server_client_name()
+                                        .is_some_and(|name| name != MESSAGE_BOARD_CLIENT_NAME)
+                                    {
+                                        subscriber_ids.push(*connection_id);
                                     }
                                 }
                                 let processor = Arc::clone(&processor);
                                 // Attachment can wait on snapshot locks; keep force shutdown responsive.
                                 thread_listener_tasks.spawn(async move {
                                     processor
-                                        .try_attach_thread_listener(
-                                            thread_id,
-                                            initialized_connection_ids,
-                                        )
+                                        .try_attach_thread_listener(thread_id, subscriber_ids)
                                         .await;
                                 });
                             }
@@ -1436,6 +1448,7 @@ pub async fn run_main_with_transport_options(
         let _ = handle.await;
     }
 
+    codex_core::statsig::StatsigRuntime::finish(statsig).await;
     Ok(AppServerExit::Graceful)
 }
 

@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::exec_cell::CommandOutput;
+use crate::exec_cell::plain_output_text;
 
 impl ChatWidget {
     pub(super) fn flush_unified_exec_wait_streak(&mut self) {
@@ -28,13 +29,11 @@ impl ChatWidget {
             command,
             process_id,
             source,
-            command_actions,
             ..
         } = &item
         else {
             return;
         };
-        let (_command, parsed_cmd) = command_execution_command_and_parsed(command, command_actions);
         self.flush_answer_stream_with_separator();
         if is_unified_exec_source(*source) {
             if *source == ExecCommandSource::UnifiedExecStartup && !render_source.is_replay() {
@@ -43,11 +42,10 @@ impl ChatWidget {
             if !self.bottom_pane.is_task_running() {
                 return;
             }
-            // Unified exec may be parsed as Unknown; keep the working indicator visible regardless.
-            self.bottom_pane.ensure_status_indicator();
-            if !is_standard_tool_call(&parsed_cmd) {
-                return;
+            if *source == ExecCommandSource::UnifiedExecStartup {
+                self.transcript.pending_command_rows.insert(id.clone());
             }
+            self.bottom_pane.ensure_status_indicator();
         }
         self.defer_or_handle(
             item,
@@ -57,7 +55,7 @@ impl ChatWidget {
     }
 
     pub(super) fn on_exec_command_output_delta(&mut self, call_id: &str, delta: &str) {
-        self.track_unified_exec_output_chunk(call_id, delta.as_bytes());
+        self.track_unified_exec_output_chunk(call_id, delta);
         if !self.bottom_pane.is_task_running() {
             return;
         }
@@ -156,7 +154,9 @@ impl ChatWidget {
                 self.flush_unified_exec_wait_streak();
             }
             self.track_unified_exec_process_end(id, process_id.as_deref());
-            if !self.bottom_pane.is_task_running() {
+            if !self.bottom_pane.is_task_running()
+                && *source != ExecCommandSource::UnifiedExecStartup
+            {
                 return;
             }
         }
@@ -184,12 +184,14 @@ impl ChatWidget {
             existing.call_id = call_id.to_string();
             existing.command_display = command_display;
             existing.recent_chunks.clear();
+            existing.pending = Default::default();
         } else {
             self.unified_exec_processes.push(UnifiedExecProcessSummary {
                 key,
                 call_id: call_id.to_string(),
                 command_display,
                 recent_chunks: Vec::new(),
+                pending: Default::default(),
             });
         }
         self.sync_unified_exec_footer();
@@ -230,6 +232,7 @@ impl ChatWidget {
                     call_id: terminal.item_id,
                     command_display: terminal.command,
                     recent_chunks: Vec::new(),
+                    pending: Default::default(),
                 });
             }
         }
@@ -263,7 +266,7 @@ impl ChatWidget {
     }
 
     /// Record recent stdout/stderr lines for the unified exec footer.
-    pub(super) fn track_unified_exec_output_chunk(&mut self, call_id: &str, chunk: &[u8]) {
+    fn track_unified_exec_output_chunk(&mut self, call_id: &str, chunk: &str) {
         let Some(process) = self
             .unified_exec_processes
             .iter_mut()
@@ -272,20 +275,20 @@ impl ChatWidget {
             return;
         };
 
-        let text = String::from_utf8_lossy(chunk);
-        for line in text
-            .lines()
-            .map(str::trim_end)
+        let limit = UnifiedExecProcessSummary::MAX_RECENT_CHUNKS;
+        let insert_at = process.recent_chunks.len();
+        for line in process
+            .pending
+            .push_lines(chunk)
+            .rev()
+            .map(plain_output_text)
             .filter(|line| !line.is_empty())
+            .take(limit)
         {
-            process.recent_chunks.push(line.to_string());
+            process.recent_chunks.insert(insert_at, line);
         }
-
-        const MAX_RECENT_CHUNKS: usize = 3;
-        if process.recent_chunks.len() > MAX_RECENT_CHUNKS {
-            let drop_count = process.recent_chunks.len() - MAX_RECENT_CHUNKS;
-            process.recent_chunks.drain(0..drop_count);
-        }
+        let excess = process.recent_chunks.len().saturating_sub(limit);
+        process.recent_chunks.drain(..excess);
     }
 
     pub(crate) fn handle_command_execution_started_now(&mut self, item: ThreadItemPayload) {
@@ -301,6 +304,10 @@ impl ChatWidget {
         };
         let (command, parsed_cmd) =
             command_execution_command_and_parsed(&command, &command_actions);
+        let is_wait_interaction = matches!(source, ExecCommandSource::UnifiedExecInteraction);
+        if is_wait_interaction && !is_standard_tool_call(&parsed_cmd) {
+            return;
+        }
         // Ensure the status indicator is visible while the command runs.
         self.bottom_pane.ensure_status_indicator();
         let parsed_cmd = self.annotate_skill_reads_in_parsed_cmd(parsed_cmd);
@@ -312,7 +319,6 @@ impl ChatWidget {
                 source,
             },
         );
-        let is_wait_interaction = matches!(source, ExecCommandSource::UnifiedExecInteraction);
         let command_display = command.join(" ");
         let should_suppress_unified_wait = is_wait_interaction
             && self
@@ -403,6 +409,7 @@ impl ChatWidget {
         if self.suppressed_exec_calls.remove(&id) {
             return;
         }
+        let was_running = self.transcript.pending_command_rows.remove(&id) || running.is_some();
         let (command, parsed, source) = match running {
             Some(rc) => (rc.command, rc.parsed_cmd, rc.source),
             None => (event_command, event_parsed, source),
@@ -416,6 +423,7 @@ impl ChatWidget {
             .active_cell
             .as_mut()
             .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
+            && !was_running
             && !cell.is_active()
             && !cell.should_flush()
             && !cell.iter_calls().any(|call| call.call_id == id)
@@ -469,22 +477,7 @@ impl ChatWidget {
                     }
                 }
             }
-            ExecEndTarget::OrphanHistoryWhileActiveExec => {
-                let mut orphan = new_active_exec_command(
-                    id.clone(),
-                    command,
-                    parsed,
-                    source,
-                    /*interaction_input*/ None,
-                    self.local_settings.tui.animations && self.local_settings.tui.effects.progress,
-                );
-                let completed = orphan.complete_call(&id, output, duration);
-                debug_assert!(completed, "new orphan exec cell should contain {id}");
-                self.app_event_tx
-                    .send(AppEvent::InsertHistoryCell(Box::new(orphan)));
-                self.request_redraw();
-            }
-            ExecEndTarget::NewCell => {
+            ExecEndTarget::OrphanHistoryWhileActiveExec | ExecEndTarget::NewCell => {
                 let mut cell = new_active_exec_command(
                     id.clone(),
                     command,
@@ -495,7 +488,15 @@ impl ChatWidget {
                 );
                 let completed = cell.complete_call(&id, output, duration);
                 debug_assert!(completed, "new exec cell should contain {id}");
-                if let Some(active) = self
+                if was_running {
+                    // Another item committed the running cell to history before this exit.
+                    self.app_event_tx
+                        .send(AppEvent::CompleteBackgroundCommand(Box::new(cell)));
+                } else if matches!(end_target, ExecEndTarget::OrphanHistoryWhileActiveExec) {
+                    self.app_event_tx
+                        .send(AppEvent::InsertHistoryCell(Box::new(cell)));
+                    self.request_redraw();
+                } else if let Some(active) = self
                     .transcript
                     .active_cell
                     .as_mut()

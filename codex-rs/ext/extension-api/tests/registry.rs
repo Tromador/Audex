@@ -22,7 +22,6 @@ use codex_extension_api::ResponseItem;
 use codex_extension_api::SkillInvocationContributor;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::TokenUsageContributor;
-use codex_extension_api::ToolCall;
 use codex_extension_api::ToolContributor;
 use codex_extension_api::ToolExecutor;
 use codex_extension_api::ToolLifecycleContributor;
@@ -31,6 +30,7 @@ use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputContributor;
 use codex_extension_api::TurnItemContributor;
 use codex_extension_api::TurnLifecycleContributor;
+use codex_guardian_context::CachedApprovalContext;
 use codex_protocol::items::HookPromptItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::EnvironmentConfigState;
@@ -178,7 +178,7 @@ impl ToolContributor for AllContributors {
         &self,
         _session_store: &ExtensionData,
         _thread_store: &ExtensionData,
-    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
+    ) -> Vec<Arc<dyn ToolExecutor>> {
         Vec::new()
     }
 }
@@ -212,7 +212,7 @@ impl codex_extension_api::SynchronousApprovalReviewer for AllContributors {
     fn review<'a>(
         &'a self,
         _reason: codex_protocol::approvals::GuardianReviewReason,
-        _async_approval: Option<codex_extension_api::ExtensionFuture<'a, ()>>,
+        _async_approval: Option<codex_extension_api::ExtensionFuture<'a, CachedApprovalContext>>,
     ) -> ExtensionFuture<'a, Option<codex_protocol::protocol::ReviewDecision>> {
         Box::pin(std::future::ready(Some(
             codex_protocol::protocol::ReviewDecision::Approved,

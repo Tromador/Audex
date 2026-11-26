@@ -1404,6 +1404,7 @@ fn sanitize_project_config(
             "respect_system_proxy",
             "system_proxy_fallback",
             "credential_masking",
+            "guardianv3_shadow",
         ] {
             if features.remove(key).is_some() {
                 ignored_keys.push(format!("features.{key}"));
@@ -2076,7 +2077,12 @@ async fn load_root_checkout_project_config(
                 };
                 parsed
             }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
                 TomlValue::Table(toml::map::Map::new())
             }
             Err(err) => {

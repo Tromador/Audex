@@ -70,9 +70,44 @@ async fn settled_tool_precedes_queued_output_and_is_not_emitted_twice() -> Resul
         .push(Arc::new(history_cell::PlainHistoryCell::new(vec![
             "past context".into(),
         ])));
+    let mut command = crate::exec_cell::new_active_exec_command(
+        "cmd".into(),
+        vec!["build".into()],
+        Vec::new(),
+        codex_app_server_protocol::CommandExecutionSource::UnifiedExecStartup,
+        /*interaction_input*/ None,
+        /*animations_enabled*/ false,
+    );
+    app.insert_history_cell(&mut tui, Box::new(command.clone()));
+    tui.clear_pending_history_lines();
     app.insert_history_cell(&mut tui, Box::new(cell.clone()));
     app.flush_native_history(&mut tui);
     assert!(tui.pending_history_lines_for_test().is_empty());
+    // Nothing in the split answer has printed. Replaying here would clear shell
+    // scrollback and re-emit "past context" while the tool still blocks output.
+    app.insert_history_cell(
+        &mut tui,
+        Box::new(history_cell::AgentMessageCell::new(
+            vec!["Introduction".into()],
+            /*is_first_line*/ true,
+        )),
+    );
+    app.insert_history_cell(
+        &mut tui,
+        Box::new(history_cell::new_error_event("Paste failed".into())),
+    );
+    app.handle_consolidate_agent_message(
+        &mut tui,
+        history_cell::AgentMarkdownCell::new("Introduction and conclusion".into(), &app.config.cwd),
+        /*emitted_cells*/ 2,
+        crate::app_event::ConsolidationScrollbackReflow::IfResizeReflowRan,
+        Some(Box::new(history_cell::AgentMessageCell::new(
+            vec!["and conclusion".into()],
+            /*is_first_line*/ false,
+        ))),
+    )?;
+    assert!(tui.pending_history_lines_for_test().is_empty());
+    assert!(!app.transcript_reflow.has_pending_reflow());
     // A long-lived tool must not lose output queued behind it.
     for index in 0..4097 {
         app.insert_history_cell(
@@ -97,6 +132,13 @@ async fn settled_tool_precedes_queued_output_and_is_not_emitted_twice() -> Resul
             .iter()
             .any(|line| line.line.to_string().contains("Calling lookup"))
     );
+    command.complete_call(
+        "cmd",
+        crate::exec_cell::CommandOutput::new(/*exit_code*/ 0, "built".into()),
+        Duration::ZERO,
+    );
+    app.complete_background_command(&mut tui, Box::new(command));
+    assert!(tui.pending_history_lines_for_test().is_empty());
     cell.update_from_item(item(DynamicToolCallStatus::Completed));
     for _ in 0..=4097 / CELLS_PER_FRAME {
         app.flush_native_history(&mut tui);
@@ -109,7 +151,17 @@ async fn settled_tool_precedes_queued_output_and_is_not_emitted_twice() -> Resul
         .join("\n");
     assert_eq!(text.matches("unique result").count(), 1);
     assert_eq!(text.matches("later output").count(), 4097);
-    assert!(text.find("unique result").unwrap() < text.find("later output").unwrap());
+    insta::assert_snapshot!(&text[text.find("later output 4096").unwrap()..], @"
+    later output 4096
+
+    • Ran build
+      └ built
+    ");
+    let answer = text.find("Introduction and conclusion").unwrap();
+    let error = text.find("Paste failed").unwrap();
+    assert_eq!(text.matches("Introduction").count(), 1);
+    assert!(text.find("unique result").unwrap() < answer);
+    assert!(answer < error && error < text.find("later output").unwrap());
     app.flush_native_history(&mut tui);
     assert_eq!(tui.pending_history_lines_for_test(), lines);
     // Rollback replay consumes even a queue larger than one frame's drain budget.

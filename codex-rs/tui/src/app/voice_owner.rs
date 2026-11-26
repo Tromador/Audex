@@ -48,7 +48,7 @@ impl App {
         (self.chat_widget.thread_id() == Some(thread_id)).then_some(&mut self.chat_widget)
     }
 
-    pub(super) fn control_voice(&mut self, control: VoiceControl) {
+    pub(super) async fn control_voice(&mut self, control: VoiceControl) {
         if let Some(thread_id) = self.voice_owner_thread_id()
             && let Some(owner) = self.voice_widget_for_thread(thread_id)
         {
@@ -57,7 +57,10 @@ impl App {
                 VoiceControl::Stop => owner.stop_realtime_conversation(),
                 VoiceControl::Mute => owner.toggle_realtime_microphone(),
             }
-        } else if matches!(control, VoiceControl::Toggle) && !self.reconnect.offline {
+        } else if matches!(control, VoiceControl::Toggle)
+            && !self.reconnect.offline
+            && self.ensure_voice_account().await
+        {
             // Preserve the ended owner's transcript before allowing another call.
             self.retire_background_voice();
             self.chat_widget.toggle_realtime_conversation();
@@ -126,6 +129,11 @@ impl App {
         destination: Option<ThreadId>,
     ) {
         app_server.task_search.cancel();
+        if self.reconnect.cloud_resume.as_ref().is_some_and(|resume| {
+            resume.backend_id == app_server.backend_id() && Some(resume.thread_id) != destination
+        }) {
+            self.reconnect.cloud_resume = None;
+        }
         let thread_ids: Vec<_> = self
             .thread_event_channels
             .iter()

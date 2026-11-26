@@ -1,3 +1,7 @@
+mod continuation_cyber_access_program;
+
+pub use continuation_cyber_access_program::ContinuationCyberAccessProgram;
+
 use super::step_settings::ResolvedStepSettings;
 use super::token_budget::has_explicit_settings;
 use super::token_budget::resolve_token_budget;
@@ -44,7 +48,10 @@ use codex_sandboxing::policy_transforms::effective_permission_profile;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use codex_skills_extension::HostSkillsSnapshot;
 use codex_skills_extension::SkillLoadOutcome;
+use codex_utils_path_uri::LegacyAppPathString;
+use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
+use codex_utils_path_uri::Platform;
 use codex_utils_plugins::PluginIdentity;
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -240,6 +247,24 @@ impl TurnEnvironment {
         self.config().permission_profile.permission_profile()
     }
 
+    pub(crate) fn executor_path_convention(&self) -> Option<PathConvention> {
+        if let Some(os) = self.executor_platform_os.as_deref() {
+            return Platform::from_platform_os(Some(os)).path_convention();
+        }
+        // Legacy executors report their shell path. A leading // can also be POSIX.
+        let shell = LegacyAppPathString::from_path(&self.shell.as_ref()?.shell_path);
+        if shell.as_str().starts_with('/') {
+            return Some(PathConvention::Posix);
+        }
+        shell.infer_absolute_path_convention()
+    }
+
+    pub(crate) fn has_denied_reads(&self) -> bool {
+        self.permission_profile()
+            .file_system_sandbox_policy()
+            .has_denied_read_restrictions_for_convention(self.executor_path_convention())
+    }
+
     /// Borrows this snapshot's filesystem using its permissions and any additional grants.
     pub(crate) fn fs_accessor(
         &self,
@@ -340,7 +365,12 @@ pub(crate) struct NewTurnContextOptions {
     pub(crate) prompt_cache_ttl: Option<crate::PromptCacheTtl>,
     pub(crate) cyber_access_program: Option<CyberAccessProgram>,
     pub(crate) helper_admission: Option<crate::agent::helper_daybreak::turn::HelperTurnAdmission>,
+    pub(crate) goal_daybreak: Option<crate::GoalDaybreakSnapshot>,
 }
+
+/// Unrecorded input shared with cleanup, even after the active task is detached.
+#[derive(Clone)]
+struct PendingInitialInput(Vec<TurnInput>);
 
 /// The context needed for a single turn of the thread.
 #[derive(Debug)]
@@ -427,6 +457,17 @@ enum TurnContextBuildMode {
 }
 
 impl TurnContext {
+    pub(crate) fn park_initial_input(&self, input: Vec<TurnInput>) {
+        let previous = self.extension_data.insert(PendingInitialInput(input));
+        debug_assert!(previous.is_none());
+    }
+
+    pub(crate) fn take_initial_input(&self) -> Option<Vec<TurnInput>> {
+        self.extension_data
+            .remove::<PendingInitialInput>()
+            .map(|input| Arc::unwrap_or_clone(input).0)
+    }
+
     /// Returns the resolved causal root for this admitted turn.
     pub(crate) fn root_turn_id(&self) -> String {
         self.turn_metadata_state
@@ -1264,7 +1305,6 @@ impl Session {
                         misalignment: None,
                         message: message.clone(),
                         codex_error_info: Some(CodexErrorInfo::BadRequest),
-                        rejected_audio_file_ids: Vec::new(),
                     }),
                 })
                 .await;
@@ -1500,8 +1540,14 @@ impl Session {
         turn_context.prompt_cache_ttl = options.prompt_cache_ttl;
         turn_context.cyber_access_program =
             cyber_access_program::for_provider(&turn_context.config, options.cyber_access_program);
+        if let Some(program) = ContinuationCyberAccessProgram::capture(self, &turn_context) {
+            turn_context.extension_data.insert(program);
+        }
         if let Some(admission) = options.helper_admission {
             admission.capture_intent(self, &mut turn_context).await;
+        }
+        if let Some(snapshot) = options.goal_daybreak {
+            snapshot.apply(self, &mut turn_context);
         }
         // Tool observers retain this turn's selection even after a later turn starts.
         if let Some(program) = turn_context.cyber_access_program {

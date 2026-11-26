@@ -97,13 +97,19 @@ pub(crate) use codex_guardian_reviewer::GUARDIAN_MAX_NODE_REPL_TOOL_RESULT_TOKEN
 /// MCP elicitations use their live invocation's issuing step when available, otherwise turn inputs.
 #[derive(Clone)]
 pub(crate) struct GuardianReviewContext {
+    /// Parent evidence supplied for a direct review of recorded worker history.
+    root_evidence: Option<Arc<codex_app_server_protocol::GuardianRootEvidence>>,
     pub(crate) request_country: RequestCountry,
     pub(crate) serving_assessment: Option<Arc<ServingAssessment>>,
+    /// Observational serving probe; never an approval decision.
+    pub(crate) guardian_probe: Option<bool>,
     /// The latest response ID and its connection affinity when review was requested.
     pub(crate) parent_response: Option<Arc<ParentResponse>>,
     /// A host-verified, still-running tool invocation that requested this nested review.
     pub(crate) enclosing_invocation_id: Option<String>,
     turn: Arc<TurnContext>,
+    /// Analytics lineage of the action, which can come from an earlier turn.
+    reviewed_action_root_turn_id: Option<String>,
     review_execution: Option<codex_direct_tool_timing::ReviewExecution>,
     environments: TurnEnvironmentSnapshot,
     project_instructions: Option<Arc<LoadedAgentsMd>>,
@@ -143,11 +149,15 @@ impl GuardianReviewContext {
         turn: Arc<TurnContext>,
         settings: &ResolvedStepSettings,
         environments: &TurnEnvironmentSnapshot,
+        reviewed_action_root_turn_id: Option<String>,
     ) -> Self {
         Self {
+            reviewed_action_root_turn_id,
             request_country: settings.request_country().clone(),
             serving_assessment: None,
+            guardian_probe: None,
             review_execution: None,
+            root_evidence: None,
             enclosing_invocation_id: None,
             parent_response: turn.extension_data.get::<ParentResponse>(),
             environments: environments.clone(),
@@ -176,10 +186,13 @@ impl From<&Arc<StepContext>> for GuardianReviewContext {
         Self {
             request_country: step.settings.request_country().clone(),
             serving_assessment: step.serving_assessment.clone(),
+            guardian_probe: step.guardian_probe,
             review_execution: None,
+            root_evidence: None,
             enclosing_invocation_id: None,
             parent_response: step.turn.extension_data.get::<ParentResponse>(),
             turn: Arc::clone(&step.turn),
+            reviewed_action_root_turn_id: step.turn.turn_metadata_state.root_turn_id(),
             environments: step.environments.clone(),
             project_instructions: Some(step.loaded_agents_md.clone().unwrap_or_default()),
             model_info: Arc::clone(&step.settings.model_info),
@@ -197,7 +210,9 @@ impl From<Arc<TurnContext>> for GuardianReviewContext {
         Self {
             request_country: turn.initial_settings.request_country().clone(),
             serving_assessment: None,
+            guardian_probe: None,
             review_execution: None,
+            root_evidence: None,
             enclosing_invocation_id: None,
             parent_response: turn.extension_data.get::<ParentResponse>(),
             environments: turn.initial_environments.clone(),
@@ -208,6 +223,7 @@ impl From<Arc<TurnContext>> for GuardianReviewContext {
             personality: turn.personality(),
             approval_policy: turn.approval_policy(),
             approvals_reviewer: turn.config.approvals_reviewer,
+            reviewed_action_root_turn_id: turn.turn_metadata_state.root_turn_id(),
             turn,
         }
     }

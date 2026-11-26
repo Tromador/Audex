@@ -2783,7 +2783,7 @@ fn mcp_server_status_accepts_older_inventory_without_runtime_status() {
 }
 
 #[test]
-fn mcp_server_status_updated_accepts_missing_thread_id() {
+fn mcp_server_status_updated_accepts_missing_thread_id_and_duration() {
     let notification: McpServerStatusUpdatedNotification = serde_json::from_value(json!({
         "name": "optional_broken",
         "status": "failed",
@@ -2796,6 +2796,7 @@ fn mcp_server_status_updated_accepts_missing_thread_id() {
         name: "optional_broken".to_string(),
         environment_id: None,
         status: McpServerStartupState::Failed,
+        duration_ms: None,
         error: Some("handshake failed".to_string()),
         failure_reason: None,
     };
@@ -2807,6 +2808,7 @@ fn mcp_server_status_updated_accepts_missing_thread_id() {
             "name": "optional_broken",
             "environmentId": null,
             "status": "failed",
+            "durationMs": null,
             "error": "handshake failed",
             "failureReason": null,
         })
@@ -2814,13 +2816,14 @@ fn mcp_server_status_updated_accepts_missing_thread_id() {
 }
 
 #[test]
-fn mcp_server_status_updated_serializes_failure_reason() {
+fn mcp_server_status_updated_serializes_failure_reason_and_duration() {
     let notification =
         ServerNotification::McpServerStatusUpdated(McpServerStatusUpdatedNotification {
             thread_id: Some("thread-1".to_string()),
             name: "expired-oauth".to_string(),
             environment_id: Some("remote".to_string()),
             status: McpServerStartupState::Failed,
+            duration_ms: Some(482),
             error: Some("OAuth credentials expired".to_string()),
             failure_reason: Some(McpServerStartupFailureReason::ReauthenticationRequired),
         });
@@ -2834,6 +2837,7 @@ fn mcp_server_status_updated_serializes_failure_reason() {
                 "name": "expired-oauth",
                 "environmentId": "remote",
                 "status": "failed",
+                "durationMs": 482,
                 "error": "OAuth credentials expired",
                 "failureReason": "reauthenticationRequired",
             },
@@ -3272,7 +3276,7 @@ fn answer_moderation_preserves_the_display_instruction() {
         json!({"version":1, "mode":"block", "reason":{"kind":"protection","protectionType":"omnimod"}}),
         json!({"version":1, "mode":"block", "reason":{"kind":"cyber","trustedAccess":false}}),
     ] {
-        let stored = json!({"moderated": !display.is_null(), "display": display});
+        let mut stored = json!({"moderated": !display.is_null(), "display": display});
         let mut with_extra_fields = stored.clone();
         if let Some(object) = with_extra_fields["display"].as_object_mut() {
             object.insert("additionalV1Field".into(), json!(true));
@@ -3281,10 +3285,30 @@ fn answer_moderation_preserves_the_display_instruction() {
             with_extra_fields,
         )
         .unwrap();
+        stored["promptWellbeingResults"] = JsonValue::Null;
         assert_eq!(
             serde_json::to_value(AgentMessageModeration::from(core)).unwrap(),
             stored
         );
+    }
+}
+
+#[test]
+fn prompt_wellbeing_results_round_trip_with_or_without_display() {
+    for display in [
+        json!({"version": 1, "mode": "show", "trustedContacts": "check"}),
+        JsonValue::Null,
+    ] {
+        let stored = json!({
+            "moderated": true,
+            "display": display,
+            "promptWellbeingResults": [{"inputItemId":"msg_input_1","labels":[],"scores":{"U-S4":0.1}}]
+        });
+        let core: codex_protocol::items::AgentMessageModeration =
+            serde_json::from_value(stored.clone()).unwrap();
+        let decision: AgentMessageModeration =
+            serde_json::from_value(serde_json::to_value(core).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(decision).unwrap(), stored);
     }
 }
 
@@ -3416,6 +3440,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
 
     let agent_item_with_phase = TurnItem::AgentMessage(AgentMessageItem {
         moderation: Some(codex_protocol::items::AgentMessageModeration {
+            prompt_wellbeing_results: None,
             moderated: true,
             display: None,
         }),
@@ -3441,6 +3466,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         ThreadItemPayload::from(agent_item_with_phase),
         ThreadItemPayload::AgentMessage {
             moderation: Some(AgentMessageModeration {
+                prompt_wellbeing_results: None,
                 moderated: true,
                 display: None
             }),
@@ -5130,6 +5156,71 @@ fn codex_error_info_serializes_active_turn_not_steerable_turn_kind_in_camel_case
             }
         })
     );
+}
+
+#[test]
+fn dynamic_tool_native_wire_round_trip() {
+    let schema = serde_json::to_value(schemars::schema_for!(DynamicToolCallResult)).unwrap();
+    for wire in [
+        serde_json::json!({"success":true,"structuredContent":{"threads":[{"id":"🌿","text":"a\\n\\\"b"}]}}),
+        serde_json::json!({"success":true,"structuredContent":[]}),
+        serde_json::json!({"success":true,"structuredContent":{}}),
+        serde_json::json!({"success":true,"structuredContent":null}),
+        serde_json::json!({"success":false,"errorMessage":"History unavailable"}),
+        serde_json::json!({"success":true,"contentItems":[]}),
+    ] {
+        let mut extended = wire.clone();
+        extended["_meta"] = json!({"client": "extension"});
+        let response: DynamicToolCallResult = serde_json::from_value(extended).unwrap();
+        assert_eq!(serde_json::to_value(response).unwrap(), wire);
+        let fields = wire.as_object().unwrap();
+        assert!(
+            schema["anyOf"].as_array().unwrap().iter().any(|variant| {
+                let variant = match variant["$ref"].as_str() {
+                    Some(reference) => schema
+                        .pointer(reference.strip_prefix('#').unwrap())
+                        .unwrap(),
+                    None => variant,
+                };
+                let required = variant["required"].as_array().unwrap();
+                required.len() == fields.len()
+                    && required
+                        .iter()
+                        .all(|key| fields.contains_key(key.as_str().unwrap()))
+            }),
+            "schema must accept the fields in {wire}"
+        );
+    }
+}
+
+#[test]
+fn dynamic_tool_wire_rejects_ambiguous_results_and_inconsistent_errors() {
+    for wire in [
+        json!({"success":true,"contentItems":[],"structuredContent":null}),
+        json!({"success":true,"contentItems":[],"errorMessage":null}),
+        json!({"success":false,"contentItems":null,"structuredContent":{}}),
+        json!({"success":true,"_meta":{}}),
+        json!({"success":true,"structuredContent":{},"errorMessage":"error"}),
+        json!({"success":false,"contentItems":[],"errorMessage":"error"}),
+        json!({"success":true,"errorMessage":"error"}),
+    ] {
+        assert!(
+            serde_json::from_value::<DynamicToolCallResult>(wire.clone()).is_err(),
+            "unexpectedly accepted {wire}"
+        );
+    }
+}
+
+#[test]
+fn dynamic_tool_call_advertises_native_result_format() {
+    let without_format = serde_json::json!({"threadId":"t","turnId":"u","callId":"c","namespace":null,"tool":"lookup","arguments":{}});
+    let mut params: super::DynamicToolCallParams =
+        serde_json::from_value(without_format.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&params).unwrap(), without_format);
+    params.supported_result_format = Some(super::DynamicToolResultFormat::StructuredContent);
+    let mut expected = without_format;
+    expected["supportedResultFormat"] = serde_json::json!("structuredContent");
+    assert_eq!(serde_json::to_value(params).unwrap(), expected);
 }
 
 #[test]
